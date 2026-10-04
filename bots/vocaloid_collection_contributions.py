@@ -20,8 +20,9 @@ The bot can:
   ``FrailL'aVillanos``), and the link is corrected while colouring.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
   A cell's colour is the hand-made creator annotation and wins outright; only
-  entries without a colour fall back to the creator of the local page, so the
-  two signals together match the numbers the page has always shown.
+  entries without a colour fall back to the creator of the local page.  Some
+  of the chart's numbers come from bookkeeping outside the wiki and cannot be
+  derived at all, so a cell is only ever raised, never lowered.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``watch``   - near-real-time: poll ``list=recentchanges`` and maintain the
@@ -460,18 +461,34 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
             per_season[season][user] += count
             totals[user] += count
 
-    users = [u for u in yaxis if totals[u] >= 5]
+    palette = [s.get("itemStyle", {}).get("color") for s in chart["series"]]
+    series_by_label = {s["name"]: s for s in chart["series"]}
+    # 有些数字来自站外的人工记账（既没上色、本地也没页面），任何算法都推不出来，
+    # 所以只在机器人算得更多时提高，绝不把人工数字改小。
+    kept: Dict[str, Dict[str, int]] = {}
+    for label, series in series_by_label.items():
+        for name, value in zip(yaxis, series.get("data", [])):
+            if value:
+                kept.setdefault(label, {})[name] = value
+
+    users = [u for u in yaxis if totals[u] >= 5 or any(u in kept.get(l, {}) for l in labels)]
     users += sorted((u for u in totals if totals[u] >= 5 and u not in users),
                     key=lambda u: (-totals[u], u))
 
-    palette = [s.get("itemStyle", {}).get("color") for s in chart["series"]]
-    series_by_label = {s["name"]: s for s in chart["series"]}
+    manual = 0
     new_series = []
     for index, label in enumerate(labels):
         season = seasons[index]
         colour = series_by_label.get(label, {}).get("itemStyle", {}).get("color")
         if colour is None:
             colour = palette[index % len(palette)] if palette else "#888888"
+        data = []
+        for user in users:
+            computed = per_season[season].get(user, 0)
+            previous = kept.get(label, {}).get(user, 0)
+            if previous > computed:
+                manual += 1
+            data.append(max(computed, previous))
         new_series.append({
             "name": label,
             "type": "bar",
@@ -481,9 +498,11 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
                       "fontWeight": "bold", "borderColor": "auto", "borderWidth": 1.2,
                       "borderRadius": 10, "lineHeight": 16, "padding": [1, 0, 0, 0]},
             "emphasis": {"label": {"show": True}},
-            "data": [per_season[season].get(u, 0) for u in users],
+            "data": data,
         })
     new_series += [s for s in chart["series"] if s["name"] not in labels]
+    if manual:
+        pywikibot.output(f"统计: 保留 {manual} 个机器人推不出来的人工数字")
 
     chart["legend"]["data"] = labels
     chart["yAxis"]["data"] = users

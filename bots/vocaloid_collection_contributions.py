@@ -494,10 +494,52 @@ ALL_ACTIONS = ("counts", "colour", "stats", "report")
 DEFAULT_SUMMARY = "机器人：自动维护贡献列表"
 
 
+def ensure_login(site) -> None:
+    """Log in explicitly - pywikibot will not edit anonymously.
+
+    Credentials come from ``user-config.py`` (``usernames``) plus
+    ``user-password.py`` (``('LihaohongBot', 'password')`` or
+    ``('LihaohongBot', BotPassword('name', 'token'))``).
+    """
+    if site.logged_in():
+        pywikibot.output(f"已登录：{site.user()}")
+        return
+    try:
+        ok = site.login()
+    except Exception as exc:  # NoUsernameError / PasswordError / API errors
+        raise RuntimeError(
+            f"登录失败：{exc}\n"
+            "请检查 user-config.py 的 usernames 与 user-password.py"
+            "（CI 中为 secret USER_PASSWORD_PY；若开启了两步验证需用 BotPassword）") from exc
+    if not ok:
+        raise RuntimeError(
+            "登录失败：请检查 user-config.py 的 usernames 与 user-password.py"
+            "（CI 中为 secret USER_PASSWORD_PY；若开启了两步验证需用 BotPassword）")
+    pywikibot.output(f"已登录：{site.user()}")
+
+
+def save_page(page: Page, text: str, summary: Optional[str]) -> None:
+    """Save with the bot/tags flags, degrading gracefully if not permitted."""
+    page.text = text
+    summary = summary or DEFAULT_SUMMARY
+    try:
+        page.save(summary=summary, minor=True, bot=True, tags="Bot")
+        return
+    except TypeError:  # older pywikibot: ``bot`` is named ``botflag``
+        page.save(summary=summary, minor=True, botflag=True, tags="Bot")
+        return
+    except pywikibot.exceptions.APIError as exc:
+        # the account may lack the "bot" right or the "changetags" right
+        pywikibot.error(f"带 bot/tags 保存失败，改用普通保存重试：{exc}")
+    page.save(summary=summary, minor=True)
+
+
 def run_once(site, actions, basis: str = "listed", write: bool = False,
              summary: Optional[str] = None) -> bool:
     """Run one maintenance pass.  Returns True when the page would change."""
     actions = set(actions)
+    if write:
+        ensure_login(site)
     page = Page(site, PAGE_TITLE)
     original = page.text
     sections = parse_sections(original)
@@ -544,8 +586,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         pywikibot.output("\n".join(list(diff)[:200]))
         pywikibot.output("\n[dry-run] 加 --write 以保存。")
         return True
-    page.text = text
-    page.save(summary=summary or DEFAULT_SUMMARY, minor=True, botflag=True, tags="Bot")
+    save_page(page, text, summary)
     return True
 
 

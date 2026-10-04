@@ -2,9 +2,10 @@ name: Update VOCALOID Collection contribution list
 
 # 需要先在本仓库 Settings > Secrets and variables > Actions 里添加：
 #   USER_PASSWORD_PY = user-password.py 的完整内容，例如
-#     ('LihaohongBot', '机器人密码')
+#     ('Renjian-bot', '机器人密码')
 #   若用 MediaWiki 机器人密码（BotPassword），写成
-#     ('LihaohongBot', BotPassword('botname', 'token'))
+#     ('Renjian-bot', BotPassword('botname', 'token'))
+#   VOCA_USERNAME（可选）= voca.wiki 上的机器人账号名；不设则用 user-config.py 里的默认值 Renjian-bot
 # user-config.py 已经提交在仓库里（family_files['voca'] 指向 https://voca.wiki/api.php）。
 #
 # 注意：*/5 每天最多 288 次运行。公开仓库免费；私有仓库会很快消耗 Actions 分钟数。
@@ -29,6 +30,7 @@ jobs:
     timeout-minutes: 60
     env:
       PYTHONIOENCODING: utf-8
+      VOCA_USERNAME: ${{ secrets.VOCA_USERNAME }}
     steps:
       - uses: actions/checkout@v4
 

@@ -1,3 +1,5 @@
+import os
+
 family_files['library'] = 'https://library.moegirl.org.cn/api.php'
 # change this to zh/mzh
 family_files['voca'] = 'https://voca.wiki/api.php'
@@ -11,6 +13,8 @@ family = 'voca'
 
 usernames['mirror']['*'] = 'Lihb'
 usernames['*']['*'] = 'LihaohongBot'
+# voca.wiki 的机器人账号；可用环境变量 VOCA_USERNAME 覆盖（CI 用 secret VOCA_USERNAME）
+usernames['voca']['*'] = os.environ.get('VOCA_USERNAME') or 'Renjian-bot'
 password_file = "user-password.py"
 
 # increase if WAF is frequently encountered

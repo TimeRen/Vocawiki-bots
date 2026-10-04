@@ -9,18 +9,38 @@ name: Update VOCALOID Collection contribution list
 #   VOCA_USERNAME（可选）= voca.wiki 上的机器人账号名；不设则用 user-config.py 里的默认值 Renjian-bot
 # user-config.py 已经提交在仓库里（family_files['voca'] 指向 https://voca.wiki/api.php）。
 #
-# 注意：*/5 每天最多 288 次运行。公开仓库免费；私有仓库会很快消耗 Actions 分钟数。
-# GitHub 的 schedule 只是“尽力而为”，高负载时会延迟甚至跳过，属于近似实时而非严格实时。
+# 触发方式与可靠性（2026-10-04 实测）：
+#   · push 到 main 且改动到机器人脚本或本工作流 -> 立即运行（改完即可验证）
+#   · schedule 每 5 分钟（UTC）——实测**很不可靠**：工作流注册后 8 小时内约 96 次
+#     机会只投递了 1 次，且时间落在 12:13 这种非 5 倍数分钟上，属于 GitHub 调度器
+#     延迟后补投。官方说明 schedule 是尽力而为，负载高时会延迟甚至丢事件。
+#     所以 cron 故意避开整点（整点是官方点名的高负载时段），但别指望它准时。
+#   · workflow_dispatch -> Actions 页面手动 Run workflow
+#   · repository_dispatch -> 外部心跳（自建 VPS / cron 服务）即时触发：
+#       curl -X POST -H "Authorization: Bearer <PAT>" \
+#            -H "Accept: application/vnd.github+json" \
+#            https://api.github.com/repos/TimeRen/Vocawiki-bots/dispatches \
+#            -d '{"event_type":"update-vocaloid-collection"}'
+#     想要真正的实时更新，请用 deploy/voca-contributions.service 常驻 watch 模式，
+#     GitHub 的 schedule 只能当作兜底。
 
 on:
   schedule:
-    # cron 用 UTC。*/5 = 每 5 分钟（GitHub 会尽最大努力，可能延迟/跳过）
-    - cron: '*/5 * * * *'
+    # 每 5 分钟，但跳过整点（分钟 0），降低被延迟/丢弃的概率
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'bots/vocaloid_collection_contributions.py'
+      - '.github/workflows/update-vocaloid-collection.yml'
   workflow_dispatch:
+  repository_dispatch:
+    types: [update-vocaloid-collection]
 
+# 定时事件偶发补投时可能一次涌入多个，只保留最新一个，避免排队被取消
 concurrency:
   group: vocaloid-collection
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read

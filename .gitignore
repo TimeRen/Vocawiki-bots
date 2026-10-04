@@ -9,6 +9,7 @@ texts/
 *.lwp
 *.ctrl
 apicache-py3/
+apicache/
 logs/
 
 # password

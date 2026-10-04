@@ -498,24 +498,30 @@ def ensure_login(site) -> None:
     """Log in explicitly - pywikibot will not edit anonymously.
 
     Credentials come from ``user-config.py`` (``usernames``) plus
-    ``user-password.py`` (``('LihaohongBot', 'password')`` or
-    ``('LihaohongBot', BotPassword('name', 'token'))``).
+    ``user-password.py`` (``('Renjian-bot', 'password')`` or
+    ``('Renjian-bot', BotPassword('suffix', 'token'))``).
     """
-    if site.logged_in():
-        pywikibot.output(f"已登录：{site.user()}")
-        return
-    try:
-        ok = site.login()
-    except Exception as exc:  # NoUsernameError / PasswordError / API errors
+    hint = (
+        "请检查 user-config.py 的 usernames 与 user-password.py"
+        "（CI 中为 secret USER_PASSWORD_PY）；机器人密码必须写成 "
+        "BotPassword('后缀', '机器人密码')，后缀即 Special:BotPasswords 里"
+        "\"账号@后缀\" 中 @ 后面的部分。"
+    )
+    if not site.logged_in():
+        try:
+            # Site.login() 成功和失败都返回 None，不能依赖它的返回值，
+            # 只能调用后用 site.logged_in() 判断结果。
+            site.login()
+        except Exception as exc:  # NoUsernameError / APIError / EOFError...
+            raise RuntimeError(f"登录失败：{exc}\n{hint}") from exc
+    if not site.logged_in():
+        raise RuntimeError(f"登录失败：{hint}")
+    if not site.has_right("edit"):
         raise RuntimeError(
-            f"登录失败：{exc}\n"
-            "请检查 user-config.py 的 usernames 与 user-password.py"
-            "（CI 中为 secret USER_PASSWORD_PY；若开启了两步验证需用 BotPassword）") from exc
-    if not ok:
-        raise RuntimeError(
-            "登录失败：请检查 user-config.py 的 usernames 与 user-password.py"
-            "（CI 中为 secret USER_PASSWORD_PY；若开启了两步验证需用 BotPassword）")
-    pywikibot.output(f"已登录：{site.user()}")
+            f"账号 {site.user()} 已登录但没有 edit 权限，无法编辑。"
+            "请确认该账号已被授予编辑权限（voca.wiki 上匿名用户不能编辑）。")
+    pywikibot.output(
+        f"已登录：{site.user()}（权限组：{', '.join(site.userinfo['groups'])}）")
 
 
 def save_page(page: Page, text: str, summary: Optional[str]) -> None:

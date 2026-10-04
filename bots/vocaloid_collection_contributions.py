@@ -240,16 +240,20 @@ def parse_season_template(text: str) -> Dict[str, Dict[int, str]]:
         if group:
             rng = GROUP_RANGE_RE.search(value)
             if rng:
-                starts[group.group(1)] = int(rng.group(1))
+                starts[group.group(1)] = (int(rng.group(1)), int(rng.group(2)))
             continue
         listing = re.fullmatch(r"list(\d+)", key)
         if listing and listing.group(1) in starts:
-            rank = starts[listing.group(1)]
-            for title in LIST_LINK_RE.findall(value):
-                title = title.strip()
-                if title:
-                    result[section].setdefault(rank, title)
-                    rank += 1
+            start, end = starts[listing.group(1)]
+            links = [title.strip() for title in LIST_LINK_RE.findall(value) if title.strip()]
+            span = end - start + 1
+            if len(links) > span:
+                # 分组标着 81-90位 却塞了 11 项（2024冬 ROOKIE 就多挂了一个 column），
+                # 多的会顶掉下一组的名次，只能丢掉并提醒。
+                pywikibot.warning(f"{section} {start}-{end}位 有 {len(links)} 项，"
+                                  f"多出的 {'、'.join(links[span:])} 已忽略")
+            for offset, title in enumerate(links[:span]):
+                result[section].setdefault(start + offset, title)
     return {name: dict(ranks) for name, ranks in result.items()}
 
 
@@ -860,7 +864,6 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         wanted = season_templates(site, dict.fromkeys(s.season for s in sections))
         diffs = entry_diffs(text, wanted)
         fixes: Dict[Tuple[str, str, int], str] = {}
-        skipped: List[str] = []
         repaired = 0
         normalised = 0
         if diffs:
@@ -869,8 +872,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
             batch_exists(site, [d[3] for d in diffs] + [d[4] for d in diffs], probe, redirects)
             for season, name, rank, current, want in diffs:
                 if not probe.get(want):
-                    skipped.append(f"{season}/{name} {rank}: {want}")
-                    continue
+                    continue  # 模板里的标题还没有页面，不动页面
                 # 模板标题本身可能是重定向（"ダウナ" 指回 "Downa"），要取最终页面，
                 # 否则会把链接改成一个绕回原地的重定向。
                 target = redirects.get(want, want)
@@ -888,9 +890,6 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
             pywikibot.output(f"  {note}")
         if len(notes) > 20:
             pywikibot.output(f"  ……另有 {len(notes) - 20} 处未逐条列出")
-        if skipped:
-            pywikibot.output(f"  模板里的标题没有页面，跳过 {len(skipped)} 处，例如："
-                             + "；".join(skipped[:3]))
         missing = [f"{season}/{title}" for season, secs in wanted.items()
                    for title in sorted(set(template_participants(site, season))
                                        - {t for ranks in secs.values() for t in ranks.values()}

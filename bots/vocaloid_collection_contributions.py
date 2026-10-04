@@ -15,7 +15,8 @@ The bot can:
 
 * ``entries`` - 按赛季榜单模板（``Template:The VOCALOID Collection2023夏`` 这类
   Navbox）补正贡献列表：模板按名次列出参赛作品，机器人据此把每个名次格子的
-  链接写成正确条目，新公布的排名不需要人工誊抄。
+  链接统一改写成规范标题（死链修复、重定向写法归一），新公布的排名不需要人工誊抄；
+  模板里还没有对应页面的标题只报告，不动页面。
 * ``counts``  - recompute every section header ``(已创建/总数)``.
 * ``colour``  - colour uncoloured cells whose page exists, using the creator's
   colour from the legend.  A link whose target does not exist is matched
@@ -853,13 +854,15 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     plan: Dict[str, Tuple[str, str]] = {}
     exists: Dict[str, bool] = {}
     if "entries" in actions:
-        # 赛季模板是「哪些歌、第几名」的来源：只补正页面上坏掉/空缺的名次格子，
-        # 两边都能打开、只是标题写法不同的（页面上普遍保留重定向链接）保持原样并报告。
+        # 赛季模板是「哪些歌、第几名、条目该叫什么」的权威来源：只要模板里的标题
+        # 有对应页面，就把名次格子统一改写成规范标题（重定向写法一并归一），
+        # 模板里还没有页面的标题只报告、不动。
         wanted = season_templates(site, dict.fromkeys(s.season for s in sections))
         diffs = entry_diffs(text, wanted)
         fixes: Dict[Tuple[str, str, int], str] = {}
         skipped: List[str] = []
-        conflicts: List[str] = []
+        repaired = 0
+        normalised = 0
         if diffs:
             probe: Dict[str, bool] = {}
             redirects: Dict[str, str] = {}
@@ -867,21 +870,27 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
             for season, name, rank, current, want in diffs:
                 if not probe.get(want):
                     skipped.append(f"{season}/{name} {rank}: {want}")
-                elif not probe.get(current):
-                    fixes[(season, name, rank)] = want
+                    continue
+                # 模板标题本身可能是重定向（"ダウナ" 指回 "Downa"），要取最终页面，
+                # 否则会把链接改成一个绕回原地的重定向。
+                target = redirects.get(want, want)
+                if target == current:
+                    continue
+                fixes[(season, name, rank)] = target
+                if not probe.get(current):
+                    repaired += 1
                 else:
-                    conflicts.append(f"{season}/{name} {rank}: {current} ≠ {want}")
+                    normalised += 1
         text, synced, notes = sync_entries(text, fixes)
-        pywikibot.output(f"条目: 赛季模板对比出 {len(diffs)} 处差异，补正 {synced} 个名次格子")
+        pywikibot.output(f"条目: 赛季模板对比出 {len(diffs)} 处差异，改写 {synced} 个名次"
+                         f"（死链修复 {repaired}，统一成规范标题 {normalised}）")
         for note in notes[:20]:
             pywikibot.output(f"  {note}")
+        if len(notes) > 20:
+            pywikibot.output(f"  ……另有 {len(notes) - 20} 处未逐条列出")
         if skipped:
             pywikibot.output(f"  模板里的标题没有页面，跳过 {len(skipped)} 处，例如："
                              + "；".join(skipped[:3]))
-        for line in conflicts[:5]:
-            pywikibot.output(f"  条目差异(未改动，两边都能打开): {line}")
-        if len(conflicts) > 5:
-            pywikibot.output(f"  ……另有 {len(conflicts) - 5} 处写法差异未改动")
         missing = [f"{season}/{title}" for season, secs in wanted.items()
                    for title in sorted(set(template_participants(site, season))
                                        - {t for ranks in secs.values() for t in ranks.values()}

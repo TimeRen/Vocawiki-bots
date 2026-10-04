@@ -1,10 +1,11 @@
 name: Update VOCALOID Collection contribution list
 
 # 需要先在本仓库 Settings > Secrets and variables > Actions 里添加：
-#   USER_PASSWORD_PY = user-password.py 的完整内容，例如
-#     ('Renjian-bot', '机器人密码')
-#   若用 MediaWiki 机器人密码（BotPassword），写成
-#     ('Renjian-bot', BotPassword('botname', 'token'))
+#   USER_PASSWORD_PY = user-password.py 的完整内容。
+#     · 普通密码：      ('Renjian-bot', '账号密码')
+#     · 机器人密码(推荐)：('Renjian-bot', BotPassword('后缀', '机器人密码'))
+#         —— 后缀就是 Special:BotPasswords 里那行 "Renjian-bot@后缀" 中 @ 后面的部分；
+#            这里只写后缀，不要写 "Renjian-bot@后缀"。
 #   VOCA_USERNAME（可选）= voca.wiki 上的机器人账号名；不设则用 user-config.py 里的默认值 Renjian-bot
 # user-config.py 已经提交在仓库里（family_files['voca'] 指向 https://voca.wiki/api.php）。
 #
@@ -50,6 +51,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$USER_PASSWORD_PY" > user-password.py
+          chmod 600 user-password.py
 
       - name: Run maintenance bot
         run: |

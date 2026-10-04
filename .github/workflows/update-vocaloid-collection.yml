@@ -9,11 +9,6 @@ name: Update VOCALOID Collection contribution list
 #   VOCA_USERNAME（可选）= voca.wiki 上的机器人账号名；不设则用 user-config.py 里的默认值 Renjian-bot
 # user-config.py 已经提交在仓库里（family_files['voca'] 指向 https://voca.wiki/api.php）。
 #
-# 触发方式：
-#   · schedule 每 5 分钟（UTC，GitHub 只尽力而为，可能延迟/跳过）
-#   · push 到 main 且改动到机器人脚本或本工作流时（便于改完立刻验证）
-#   · 手动 Actions -> Run workflow
-#
 # 注意：*/5 每天最多 288 次运行。公开仓库免费；私有仓库会很快消耗 Actions 分钟数。
 # GitHub 的 schedule 只是“尽力而为”，高负载时会延迟甚至跳过，属于近似实时而非严格实时。
 
@@ -21,11 +16,6 @@ on:
   schedule:
     # cron 用 UTC。*/5 = 每 5 分钟（GitHub 会尽最大努力，可能延迟/跳过）
     - cron: '*/5 * * * *'
-  push:
-    branches: [main]
-    paths:
-      - 'bots/vocaloid_collection_contributions.py'
-      - '.github/workflows/update-vocaloid-collection.yml'
   workflow_dispatch:
 
 concurrency:

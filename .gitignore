@@ -1,0 +1,25 @@
+# program generated files
+data/
+sandbox.py
+sync_pages/
+texts/
+*.txt
+
+# pywikibot generated files
+*.lwp
+*.ctrl
+apicache-py3/
+logs/
+
+# password
+user-password.py
+
+# python related stuff
+env/
+__pycache__/
+
+# PyCharm generated files
+.idea/
+
+#other
+.DS_Store

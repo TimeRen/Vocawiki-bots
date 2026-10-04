@@ -32,7 +32,10 @@ The bot can:
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``watch``   - near-real-time: poll ``list=recentchanges`` and maintain the
-  page whenever a listed entry (or the page itself) changes.
+  page whenever a listed entry, or the page itself, changes.  ``--max-runtime``
+  lets a CI job bow out before the runner's 6-hour limit so the next trigger
+  takes over, which is how the unreliable ``schedule`` event still yields
+  near-continuous coverage.
 
 Everything runs in dry-run mode unless ``--write`` is given.
 
@@ -936,32 +939,41 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
 
 
 def watch(site, *, interval: float, settle: float, stats_interval: float,
-          basis: str, write: bool, summary: Optional[str]) -> None:
+          basis: str, write: bool, summary: Optional[str],
+          max_runtime: float = 0) -> None:
     """Near-real-time mode: poll recent changes and maintain the page on the fly.
 
     voca.wiki runs no EventStreams/EventBus, so there is no push stream; polling
     ``list=recentchanges`` every few seconds is the closest available.
+    ``max_runtime`` (seconds, 0 = forever) makes the loop return on its own so a
+    CI job can bow out before the runner's hard limit kills it.
     """
     page = Page(site, PAGE_TITLE)
     relevant: set = set()
+    deadline = time.monotonic() + max_runtime if max_runtime else 0.0
 
     def refresh() -> None:
         nonlocal relevant
         relevant = {e.title for s in parse_sections(page.text) for e in s.entries}
 
     refresh()
-    pywikibot.output(f"监听 {PAGE_TITLE}：{len(relevant)} 个条目，轮询间隔 {interval}s")
+    pywikibot.output(f"监听 {PAGE_TITLE}：{len(relevant)} 个条目，轮询间隔 {interval}s"
+                     + (f"，本次最多运行 {max_runtime:.0f}s" if deadline else ""))
 
     seen: set = set()
     last_ts = pywikibot.Timestamp.now() - timedelta(seconds=60)
     dirty = False
     last_relevant = 0.0
     last_stats = 0.0
+    actions = {"entries", "counts", "colour", "report"}
 
     # one immediate pass so the page is current before we start listening
-    run_once(site, ("counts", "colour", "report"), basis, write, summary)
+    run_once(site, actions, basis, write, summary)
 
     while True:
+        if deadline and time.monotonic() >= deadline:
+            pywikibot.output("本轮监听结束，交给下一次触发。")
+            return
         try:
             for rc in site.recentchanges(namespaces=[0], start=last_ts, reverse=True):
                 key = rc.get("rcid") or (rc.get("title"), str(rc.get("timestamp")), rc.get("user"))
@@ -985,12 +997,12 @@ def watch(site, *, interval: float, settle: float, stats_interval: float,
             seen.clear()
 
         if dirty and time.monotonic() - last_relevant >= settle:
-            actions = {"counts", "colour", "report"}
+            todo = set(actions)
             if time.monotonic() - last_stats >= stats_interval:
-                actions.add("stats")
+                todo.add("stats")
                 last_stats = time.monotonic()
             try:
-                run_once(site, actions, basis, write, summary)
+                run_once(site, todo, basis, write, summary)
                 refresh()
             except Exception as exc:  # noqa: BLE001
                 pywikibot.error(f"维护失败: {exc}")
@@ -1014,6 +1026,9 @@ def main() -> None:
                         help="watch: wait this long after the last relevant change (default 15)")
     parser.add_argument("--stats-interval", type=float, default=1800,
                         help="watch: minimum seconds between chart recomputations (default 1800)")
+    parser.add_argument("--max-runtime", type=float, default=0,
+                        help="watch: give up after this many seconds (0 = run forever); "
+                             "used by CI so a long job ends before the 6h runner limit")
     args = parser.parse_args()
 
     site = pywikibot.Site()
@@ -1021,7 +1036,8 @@ def main() -> None:
         try:
             watch(site, interval=args.interval, settle=args.settle,
                   stats_interval=args.stats_interval, basis=args.basis,
-                  write=args.write, summary=args.summary)
+                  write=args.write, summary=args.summary,
+                  max_runtime=args.max_runtime)
         except KeyboardInterrupt:
             pywikibot.output("已停止监听。")
         return

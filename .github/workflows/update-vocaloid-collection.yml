@@ -48,7 +48,8 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # GitHub 单个 job 上限 6 小时；watch 用 --max-runtime 提前收工
+    timeout-minutes: 360
     env:
       PYTHONIOENCODING: utf-8
       VOCA_USERNAME: ${{ secrets.VOCA_USERNAME }}
@@ -75,9 +76,17 @@ jobs:
 
       - name: Run maintenance bot
         run: |
-          # 每 5 分钟跑“按模板补名次 + 上色 + 计数 + 报告”；图表(stats)较慢，每小时(分钟<5)才重算
+          # 先跑一轮“按模板补名次 + 上色 + 计数 + 报告”，图表(stats)较慢，每小时(分钟<5)才重算
           if [ "$(date -u +%M)" -lt 5 ]; then
             python bots/vocaloid_collection_contributions.py entries,counts,colour,report,stats --write
           else
             python bots/vocaloid_collection_contributions.py entries,counts,colour,report --write
           fi
+
+      - name: Watch for changes（仅定时/手动/外部心跳触发）
+        # push 触发的运行只做一轮校验；定时事件很稀疏（实测 8 小时才 1 次），
+        # 所以每次触发让机器人驻留几小时，把 cron 的窟窿补成近似连续覆盖。
+        if: github.event_name != 'push'
+        run: |
+          python bots/vocaloid_collection_contributions.py watch \
+            --interval 30 --settle 15 --stats-interval 1800 --max-runtime 19800 --write

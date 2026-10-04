@@ -19,8 +19,9 @@ The bot can:
   against the real page first (e.g. ``[[FrailLaVillanos]]`` for the existing
   ``FrailL'aVillanos``), and the link is corrected while colouring.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
-  An entry whose page is missing or was created by a bot is credited to the
-  colour its cell carries, so hand-claimed entries never drop out of the chart.
+  A cell's colour is the hand-made creator annotation and wins outright; only
+  entries without a colour fall back to the creator of the local page, so the
+  two signals together match the numbers the page has always shown.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``watch``   - near-real-time: poll ``list=recentchanges`` and maintain the
@@ -393,15 +394,17 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
             if entry.title in seen[section.season]:  # a song counts once per season
                 continue
             seen[section.season].add(entry.title)
+            # 单元格上的颜色是人工标注的创建者，最可信（页面缺失也照样算）；
+            # 没有颜色的条目才回退到「谁在 voca 建的页面」，两者合起来才是
+            # 页面上图表的口径。
+            if entry.colours:
+                for colour in dict.fromkeys(entry.colours):
+                    if colour in legend.colour_to_name:
+                        result[section.season][colour] += 1
+                continue
             user = creator_of(site, entry.title, cache)
             if user and user not in KNOWN_BOTS:
                 result[section.season][legend.identity(user)] += 1
-                continue
-            # 页面缺失或由机器人代建时，退回页面上手工标注的颜色（颜色即创建者），
-            # 否则这些已被认领的条目会从统计里凭空消失。
-            for colour in entry.colours:
-                if colour in legend.colour_to_name:
-                    result[section.season][colour] += 1
     return result
 
 

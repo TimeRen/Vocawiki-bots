@@ -55,9 +55,9 @@ jobs:
 
       - name: Run maintenance bot
         run: |
-          # 每 5 分钟只跑快速的“上色+计数+报告”；图表(stats)较慢，每小时(分钟<5)才重算一次
+          # 每 5 分钟跑“按模板补名次 + 上色 + 计数 + 报告”；图表(stats)较慢，每小时(分钟<5)才重算
           if [ "$(date -u +%M)" -lt 5 ]; then
-            python bots/vocaloid_collection_contributions.py counts,colour,report,stats --write
+            python bots/vocaloid_collection_contributions.py entries,counts,colour,report,stats --write
           else
-            python bots/vocaloid_collection_contributions.py counts,colour,report --write
+            python bots/vocaloid_collection_contributions.py entries,counts,colour,report --write
           fi

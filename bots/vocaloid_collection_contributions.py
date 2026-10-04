@@ -13,6 +13,9 @@ The page consists of two independently maintained parts:
 
 The bot can:
 
+* ``entries`` - 按赛季榜单模板（``Template:The VOCALOID Collection2023夏`` 这类
+  Navbox）补正贡献列表：模板按名次列出参赛作品，机器人据此把每个名次格子的
+  链接写成正确条目，新公布的排名不需要人工誊抄。
 * ``counts``  - recompute every section header ``(已创建/总数)``.
 * ``colour``  - colour uncoloured cells whose page exists, using the creator's
   colour from the legend.  A link whose target does not exist is matched
@@ -84,6 +87,17 @@ BG_RE = re.compile(r"bgcolor\s*=\s*(%s)|background:\s*linear-gradient\(([^)]*)\)
 HEADER_RE = re.compile(r";\s*([A-Za-z0-9]+)\s*\((.*?)/([^)]*)\)")
 SEASON_RE = re.compile(r"^===\s*(\d{4}[冬春夏秋])\s*===\s*$", re.M)
 CHART_RE = re.compile(r"(\{\{Echart\|data=<nowiki>)(.*?)(</nowiki>)", re.S)
+
+# 每个赛季的榜单模板，如 Template:The VOCALOID Collection2023夏
+SEASON_TEMPLATE = "Template:The VOCALOID Collection"
+# 模板里 Navbox 子表的标题 -> 贡献列表里的小节名
+TEMPLATE_SECTIONS = {"TOP100": "TOP100", "TOP30": "TOP30", "ROOKIE": "ROOKIE",
+                     "REMIX": "REMIX", "其他歌曲": "neta"}
+TEMPLATE_ITEM_RE = re.compile(r"\|\s*([A-Za-z0-9_]+)\s*=\s*")
+GROUP_RANGE_RE = re.compile(r"(\d+)\s*[-–~〜ー]\s*(\d+)\s*位")
+LIST_LINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]")
+# 贡献列表里的名次单元格：{{colorlink|#色|标题|名次}} 或 [[标题|名次]]
+CELL_RANK_RE = re.compile(r"\{\{colorlink\|([^|]*)\|([^|}]+)\|(\d+)\}\}|\[\[([^\]|]+)\|(\d+)\]\]")
 
 
 def normalise_colour(colour: str) -> str:
@@ -197,6 +211,147 @@ def parse_sections(text: str) -> List[Section]:
                         section.entries.append(Entry(title, colours))
             sections.append(section)
     return sections
+
+
+# --------------------------------------------------------------------------- #
+# 赛季榜单模板（新条目与名次的来源）
+# --------------------------------------------------------------------------- #
+def parse_season_template(text: str) -> Dict[str, Dict[int, str]]:
+    """赛季 Navbox -> ``{小节: {名次: 页面标题}}``。
+
+    模板按名次顺序列出每个小节（TOP100 / ROOKIE / REMIX / 其他歌曲），
+    并用 ``1-10位`` 之类的分组标出区间，所以链接在分组里的位置就是名次。
+    """
+    marks = [(m.start(), m.end(), m.group(1)) for m in TEMPLATE_ITEM_RE.finditer(text)]
+    result: Dict[str, Dict[int, str]] = defaultdict(dict)
+    section: Optional[str] = None
+    starts: Dict[str, int] = {}
+    for i, (_, end, key) in enumerate(marks):
+        stop = marks[i + 1][0] if i + 1 < len(marks) else len(text)
+        value = text[end:stop]
+        if key == "title":
+            section = TEMPLATE_SECTIONS.get(value.strip())
+            starts = {}
+            continue
+        if not section:
+            continue
+        group = re.fullmatch(r"group(\d+)", key)
+        if group:
+            rng = GROUP_RANGE_RE.search(value)
+            if rng:
+                starts[group.group(1)] = int(rng.group(1))
+            continue
+        listing = re.fullmatch(r"list(\d+)", key)
+        if listing and listing.group(1) in starts:
+            rank = starts[listing.group(1)]
+            for title in LIST_LINK_RE.findall(value):
+                title = title.strip()
+                if title:
+                    result[section].setdefault(rank, title)
+                    rank += 1
+    return {name: dict(ranks) for name, ranks in result.items()}
+
+
+def season_templates(site, seasons: Iterable[str]) -> Dict[str, Dict[str, Dict[int, str]]]:
+    """Fetch every season's ranking template: ``{赛季: {小节: {名次: 标题}}}``."""
+    wanted: Dict[str, Dict[str, Dict[int, str]]] = {}
+    for season in seasons:
+        title = f"{SEASON_TEMPLATE}{season}"
+        try:
+            text = Page(site, title).text
+        except NoPageError:
+            continue
+        except Exception as exc:  # noqa: BLE001
+            pywikibot.error(f"{title}: {exc}")
+            continue
+        parsed = parse_season_template(text)
+        if parsed:
+            wanted[season] = parsed
+        else:
+            pywikibot.error(f"{title}: 没解析出任何小节，模板结构可能变了")
+    return wanted
+
+
+def template_participants(site, season: str) -> List[str]:
+    """Pages that transclude the season's template (i.e. 参加该赛季的歌曲）。"""
+    try:
+        data = site.simple_request(action="query", list="embeddedin", formatversion="2",
+                                   eititle=f"{SEASON_TEMPLATE}{season}", einamespace=0,
+                                   eilimit=500).submit()
+    except Exception as exc:  # noqa: BLE001
+        pywikibot.error(f"{season}: 无法读取模板引用 ({exc})")
+        return []
+    return [entry["title"] for entry in data.get("query", {}).get("embeddedin", [])]
+
+
+def entry_diffs(text: str, wanted: Dict[str, Dict[str, Dict[int, str]]]
+                ) -> List[Tuple[str, str, int, str, str]]:
+    """列出名次格子与赛季模板不一致的地方：(赛季, 小节, 名次, 页面标题, 模板标题)。"""
+    diffs: List[Tuple[str, str, int, str, str]] = []
+    seasons = list(SEASON_RE.finditer(text))
+    for i, season_match in enumerate(seasons):
+        end = seasons[i + 1].start() if i + 1 < len(seasons) else len(text)
+        season = season_match.group(1)
+        wanted_sections = wanted.get(season, {})
+        region = text[season_match.end():end]
+        headers = list(HEADER_RE.finditer(region))
+        for j, header in enumerate(headers):
+            stop = headers[j + 1].start() if j + 1 < len(headers) else len(region)
+            ranks = wanted_sections.get(header.group(1))
+            if not ranks:
+                continue
+            for cell in CELL_RANK_RE.finditer(region[header.start():stop]):
+                if cell.group(3) is not None:
+                    rank, current = int(cell.group(3)), cell.group(2)
+                else:
+                    rank, current = int(cell.group(5)), cell.group(4)
+                want = ranks.get(rank)
+                if want and want != current:
+                    diffs.append((season, header.group(1), rank, current, want))
+    return diffs
+
+
+def sync_entries(text: str, replacements: Dict[Tuple[str, str, int], str]
+                 ) -> Tuple[str, int, List[str]]:
+    """按 ``{(赛季, 小节, 名次): 标题}`` 改写名次格子（保留原有颜色包装）。"""
+    if not replacements:
+        return text, 0, []
+    changed = 0
+    notes: List[str] = []
+    seasons = list(SEASON_RE.finditer(text))
+    pieces = [text[:seasons[0].start()]] if seasons else [text]
+    for i, season_match in enumerate(seasons):
+        end = seasons[i + 1].start() if i + 1 < len(seasons) else len(text)
+        season = season_match.group(1)
+        region = text[season_match.end():end]
+        headers = list(HEADER_RE.finditer(region))
+        parts = [season_match.group(0)]
+        if headers:
+            parts.append(region[:headers[0].start()])
+        else:
+            parts.append(region)
+        for j, header in enumerate(headers):
+            stop = headers[j + 1].start() if j + 1 < len(headers) else len(region)
+            name, table = header.group(1), region[header.start():stop]
+
+            def repl(cell: re.Match, name: str = name, season: str = season) -> str:
+                nonlocal changed
+                if cell.group(3) is not None:  # {{colorlink|#色|标题|名次}}
+                    rank, current = int(cell.group(3)), cell.group(2)
+                else:
+                    rank, current = int(cell.group(5)), cell.group(4)
+                want = replacements.get((season, name, rank))
+                if not want or want == current:
+                    return cell.group(0)
+                changed += 1
+                notes.append(f"{season}/{name} {rank}: {current} -> {want}")
+                if cell.group(3) is not None:
+                    return f"{{{{colorlink|{cell.group(1)}|{want}|{rank}}}}}"
+                return f"[[{want}|{rank}]]"
+
+            parts.append(CELL_RANK_RE.sub(repl, table))
+        pieces.append("".join(parts))
+    return "".join(pieces), changed, notes
 
 
 # --------------------------------------------------------------------------- #
@@ -627,7 +782,7 @@ def build_report(site, sections: List[Section], legend: Legend,
 
 
 # --------------------------------------------------------------------------- #
-ALL_ACTIONS = ("counts", "colour", "stats", "report")
+ALL_ACTIONS = ("entries", "counts", "colour", "stats", "report")
 DEFAULT_SUMMARY = "机器人：自动维护贡献列表"
 
 
@@ -697,6 +852,45 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     created = None
     plan: Dict[str, Tuple[str, str]] = {}
     exists: Dict[str, bool] = {}
+    if "entries" in actions:
+        # 赛季模板是「哪些歌、第几名」的来源：只补正页面上坏掉/空缺的名次格子，
+        # 两边都能打开、只是标题写法不同的（页面上普遍保留重定向链接）保持原样并报告。
+        wanted = season_templates(site, dict.fromkeys(s.season for s in sections))
+        diffs = entry_diffs(text, wanted)
+        fixes: Dict[Tuple[str, str, int], str] = {}
+        skipped: List[str] = []
+        conflicts: List[str] = []
+        if diffs:
+            probe: Dict[str, bool] = {}
+            redirects: Dict[str, str] = {}
+            batch_exists(site, [d[3] for d in diffs] + [d[4] for d in diffs], probe, redirects)
+            for season, name, rank, current, want in diffs:
+                if not probe.get(want):
+                    skipped.append(f"{season}/{name} {rank}: {want}")
+                elif not probe.get(current):
+                    fixes[(season, name, rank)] = want
+                else:
+                    conflicts.append(f"{season}/{name} {rank}: {current} ≠ {want}")
+        text, synced, notes = sync_entries(text, fixes)
+        pywikibot.output(f"条目: 赛季模板对比出 {len(diffs)} 处差异，补正 {synced} 个名次格子")
+        for note in notes[:20]:
+            pywikibot.output(f"  {note}")
+        if skipped:
+            pywikibot.output(f"  模板里的标题没有页面，跳过 {len(skipped)} 处，例如："
+                             + "；".join(skipped[:3]))
+        for line in conflicts[:5]:
+            pywikibot.output(f"  条目差异(未改动，两边都能打开): {line}")
+        if len(conflicts) > 5:
+            pywikibot.output(f"  ……另有 {len(conflicts) - 5} 处写法差异未改动")
+        missing = [f"{season}/{title}" for season, secs in wanted.items()
+                   for title in sorted(set(template_participants(site, season))
+                                       - {t for ranks in secs.values() for t in ranks.values()}
+                                       - {"The VOCALOID Collection"})]
+        if missing:
+            pywikibot.output(f"有赛季模板但不在该赛季榜单里: {len(missing)} 条，例如："
+                             + "；".join(missing[:8]))
+        if synced:
+            sections = parse_sections(text)
     if "colour" in actions:
         plan = plan_colours(site, sections, legend, cache, exists)
         text, coloured = apply_colours(text, plan)

@@ -17,7 +17,9 @@ The bot can:
 * ``colour``  - colour uncoloured cells whose page exists, using the creator's
   colour from the legend.  A link whose target does not exist is matched
   against the real page first (e.g. ``[[FrailLaVillanos]]`` for the existing
-  ``FrailL'aVillanos``), and the link is corrected while colouring.
+  ``FrailL'aVillanos``), and a link that points at a redirect is rewritten to
+  its target (``[[毒deンぱ]]`` -> ``[[毒电波]]``); both are corrected while
+  colouring.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
   A cell's colour is the hand-made creator annotation and wins outright; only
   entries without a colour fall back to the creator of the local page.  Some
@@ -299,8 +301,15 @@ def creator_of(site, title: str, cache: Dict[str, Optional[str]]):
     return user
 
 
-def batch_exists(site, titles: Iterable[str], exists: Dict[str, bool]) -> None:
-    """Fill ``exists`` for many titles using batched ``prop=info`` queries."""
+def batch_exists(site, titles: Iterable[str], exists: Dict[str, bool],
+                 resolved: Optional[Dict[str, str]] = None) -> None:
+    """Fill ``exists`` for many titles using batched ``prop=info`` queries.
+
+    When ``resolved`` is given it also records which titles are redirects and
+    what they point at, so the caller can both credit the real page's creator
+    and point the link straight at it (the page has dozens of romanised
+    redirect titles).
+    """
     pending = [t for t in dict.fromkeys(titles) if t not in exists]
     for i in range(0, len(pending), 50):
         batch = pending[i:i + 50]
@@ -318,8 +327,11 @@ def batch_exists(site, titles: Iterable[str], exists: Dict[str, bool]) -> None:
             pages = list(pages.values())
         present = {p["title"]: not p.get("missing") for p in pages}
         for title in batch:
-            key = redirected.get(normalized.get(title, title), normalized.get(title, title))
-            exists[title] = present.get(key, False)
+            key = normalized.get(title, title)
+            final = redirected.get(key, key)
+            exists[title] = present.get(final, False)
+            if resolved is not None and final != key:
+                resolved[title] = final
 
 
 def page_exists(site, title: str, exists: Dict[str, bool]) -> bool:
@@ -388,9 +400,11 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     cache: Dict[str, Optional[str]]) -> Dict[str, Counter]:
     result: Dict[str, Counter] = defaultdict(Counter)
     seen: Dict[str, set] = defaultdict(set)
-    for section in sections:
-        if not is_counted_section(section.name):
-            continue
+    counted = [s for s in sections if is_counted_section(s.name)]
+    exists: Dict[str, bool] = {}
+    resolved: Dict[str, str] = {}
+    batch_exists(site, (e.title for s in counted for e in s.entries), exists, resolved)
+    for section in counted:
         for entry in section.entries:
             if entry.title in seen[section.season]:  # a song counts once per season
                 continue
@@ -403,7 +417,10 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     if colour in legend.colour_to_name:
                         result[section.season][colour] += 1
                 continue
-            user = creator_of(site, entry.title, cache)
+            if not exists.get(entry.title):
+                continue  # 页面还没建，等 build 出来再算
+            target = resolved.get(entry.title, entry.title)
+            user = creator_of(site, target, cache)
             if user and user not in KNOWN_BOTS:
                 result[section.season][legend.identity(user)] += 1
     return result
@@ -531,14 +548,16 @@ def plan_colours(site, sections: List[Section], legend: Legend,
     edit (``[[FrailLaVillanos]]`` -> ``[[FrailL'aVillanos]]``).
     """
     uncoloured = [e for s in sections for e in s.entries if not e.colours]
-    batch_exists(site, (e.title for e in uncoloured), exists)
+    resolved: Dict[str, str] = {}
+    batch_exists(site, (e.title for e in uncoloured), exists, resolved)
     index: Optional[Dict[str, str]] = None
     plan: Dict[str, Tuple[str, str]] = {}
     for entry in uncoloured:
         if entry.title in plan:
             continue
         if page_exists(site, entry.title, exists):
-            target = entry.title
+            # 链接指向重定向时按真页面取创建者，并把链接改写成真标题
+            target = resolved.get(entry.title, entry.title)
         else:
             if index is None:
                 index = title_index(site)

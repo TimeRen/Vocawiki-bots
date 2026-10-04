@@ -74,14 +74,20 @@ jobs:
           printf '%s\n' "$USER_PASSWORD_PY" > user-password.py
           chmod 600 user-password.py
 
+      - name: Restore bot cache
+        # data/ 只在 runner 本地存在，缓存起来才能让 stats 的创建者查询接近免费
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: voca-creator-cache-${{ github.run_id }}
+          restore-keys: voca-creator-cache-
+
       - name: Run maintenance bot
         run: |
-          # 先跑一轮“按模板补名次 + 上色 + 计数 + 报告”，图表(stats)较慢，每小时(分钟<5)才重算
-          if [ "$(date -u +%M)" -lt 5 ]; then
-            python bots/vocaloid_collection_contributions.py entries,counts,colour,report,stats --write
-          else
-            python bots/vocaloid_collection_contributions.py entries,counts,colour,report --write
-          fi
+          # 一轮跑全：按模板补名次 + 上色 + 计数 + 报告 + 图表。
+          # 图表曾经只在“分钟<5”时才跑，结果 push 触发的运行几乎从不算图表；
+          # 现在创建者查询改为批量，冷启动也只需几十个请求，所以每轮都算。
+          python bots/vocaloid_collection_contributions.py entries,counts,colour,report,stats --write
 
       - name: Watch for changes（仅定时/手动/外部心跳触发）
         # push 触发的运行只做一轮校验；定时事件很稀疏（实测 8 小时才 1 次），

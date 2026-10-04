@@ -447,6 +447,42 @@ def save_cache(path: Path, cache: Dict[str, Optional[str]]) -> None:
         pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+def batch_creators(site, titles: Iterable[str], cache: Dict[str, Optional[str]],
+                   resolved: Optional[Dict[str, str]] = None) -> None:
+    """Fill ``cache`` for many titles using batched oldest-revision queries.
+
+    ``creator_of`` costs one request per song, which makes a cold ``stats`` run
+    take minutes; 45 titles per request brings that down to tens of requests.
+    Only real answers are cached, so a song that does not exist yet is retried
+    on the next run.
+    """
+    resolved = resolved or {}
+    pending: List[str] = []
+    for title in titles:
+        target = resolved.get(title, title)
+        if target and target not in cache and target not in pending:
+            pending.append(target)
+    for i in range(0, len(pending), 45):
+        batch = pending[i:i + 45]
+        try:
+            data = site.simple_request(action="query", prop="revisions", rvprop="user",
+                                       rvlimit=1, rvdir="newer", formatversion=2,
+                                       titles="|".join(batch)).submit()
+        except Exception as exc:  # noqa: BLE001
+            pywikibot.error(f"批量创建者查询失败: {exc}")
+            continue
+        query = data.get("query", {})
+        normalized = {n["from"]: n["to"] for n in query.get("normalized", [])}
+        found: Dict[str, Optional[str]] = {}
+        for page in query.get("pages", []):
+            revisions = page.get("revisions")
+            found[page["title"]] = strip_prefix(revisions[0]["user"]) if revisions else None
+        for title in batch:
+            user = found.get(normalized.get(title, title))
+            if user:
+                cache[title] = user
+
+
 def creator_of(site, title: str, cache: Dict[str, Optional[str]]):
     if title in cache:
         return cache[title]
@@ -567,6 +603,9 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
     exists: Dict[str, bool] = {}
     resolved: Dict[str, str] = {}
     batch_exists(site, (e.title for s in counted for e in s.entries), exists, resolved)
+    # 先把要按"谁建的页面"归属的条目一次性查出来，避免每条一次请求
+    batch_creators(site, (e.title for s in counted for e in s.entries
+                          if not e.colours and exists.get(e.title)), cache, resolved)
     for section in counted:
         for entry in section.entries:
             if entry.title in seen[section.season]:  # a song counts once per season
@@ -715,12 +754,18 @@ def plan_colours(site, sections: List[Section], legend: Legend,
     batch_exists(site, (e.title for e in uncoloured), exists, resolved)
     index: Optional[Dict[str, str]] = None
     plan: Dict[str, Tuple[str, str]] = {}
+    targets: Dict[str, str] = {}
+    for entry in uncoloured:
+        if not page_exists(site, entry.title, exists):
+            continue
+        # 链接指向重定向时按真页面取创建者，并把链接改写成真标题
+        targets[entry.title] = resolved.get(entry.title, entry.title)
+    batch_creators(site, targets.values(), cache)
     for entry in uncoloured:
         if entry.title in plan:
             continue
-        if page_exists(site, entry.title, exists):
-            # 链接指向重定向时按真页面取创建者，并把链接改写成真标题
-            target = resolved.get(entry.title, entry.title)
+        if entry.title in targets:
+            target = targets[entry.title]
         else:
             if index is None:
                 index = title_index(site)
@@ -964,11 +1009,12 @@ def watch(site, *, interval: float, settle: float, stats_interval: float,
     last_ts = pywikibot.Timestamp.now() - timedelta(seconds=60)
     dirty = False
     last_relevant = 0.0
-    last_stats = 0.0
     actions = {"entries", "counts", "colour", "report"}
 
-    # one immediate pass so the page is current before we start listening
-    run_once(site, actions, basis, write, summary)
+    # 立刻跑一轮，并带上 stats：定时事件很稀疏，每次开工都该把图表刷到最新，
+    # 之后才受 stats_interval 节流（批量取创建者后这一轮很便宜）
+    run_once(site, actions | {"stats"}, basis, write, summary)
+    last_stats = time.monotonic()
 
     while True:
         if deadline and time.monotonic() >= deadline:

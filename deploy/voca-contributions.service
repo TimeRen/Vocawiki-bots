@@ -1,0 +1,22 @@
+[Unit]
+Description=Vocawiki contribution list watcher (near-real-time)
+Documentation=https://github.com/TimeRen/Vocawiki-bots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 改成你的实际部署路径
+WorkingDirectory=/opt/Vocawiki-bots
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUNBUFFERED=1
+# 轮询间隔 20s，抖动 15s；图表重算最多每 30 分钟一次
+ExecStart=/opt/Vocawiki-bots/.venv/bin/python bots/vocaloid_collection_contributions.py watch --interval 20 --settle 15 --stats-interval 1800 --write
+Restart=always
+RestartSec=10
+# 运行用户（需能读写 /opt/Vocawiki-bots 与 user-password.py）
+User=voca-bot
+Group=voca-bot
+
+[Install]
+WantedBy=multi-user.target

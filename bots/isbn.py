@@ -68,7 +68,7 @@ class IsbnBot(SingleSiteBot):
 
 
 def isbn_adjust():
-    from utils.sites import mgp
+    from utils.sites import voca
     gen = search_pages("ISBN", preload=True)
-    bot = IsbnBot(site=mgp(), generator=gen)
+    bot = IsbnBot(site=voca(), generator=gen)
     bot.run()

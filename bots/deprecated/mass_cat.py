@@ -9,7 +9,7 @@ import pywikibot
 from pywikibot import Page
 
 from utils.config import get_data_path
-from utils.sites import mgp, cm
+from utils.sites import voca, cm
 from utils.utils import get_categories
 
 import wikitextparser as wtp
@@ -90,7 +90,7 @@ def mass_cat():
             skip_page = False
             category_blacklist = set()
             page_name = re.search(r"\[\[([^]]+)]", line).group(1)
-            curr_page = Page(source=mgp(), title=page_name)
+            curr_page = Page(source=voca(), title=page_name)
             curr_cat = Page(source=cm(), title="Cat:" + page_name)
             while True:
                 print("Processing " + curr_page.title())

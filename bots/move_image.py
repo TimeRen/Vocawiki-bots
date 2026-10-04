@@ -9,21 +9,21 @@ from pywikibot.bot import SingleSiteBot
 from pywikibot.pagegenerators import GeneratorFactory, PreloadingGenerator
 
 from utils.config import get_default_save_params
-from utils.sites import mgp, cm
+from utils.sites import voca, cm
 from utils.utils import generate_possible_titles
 
 
 class MoveImageBot(SingleSiteBot):
 
     def __init__(self, image_from: str, image_to: str, summary: Optional[str] = None):
-        gen = GeneratorFactory(site=mgp())
+        gen = GeneratorFactory(site=voca())
         for filename in generate_possible_titles(image_from):
             gen.handle_arg(f'-search:insource:"{filename}"')
         gen1 = gen.getCombinedGenerator(preload=True)
-        gen2 = PreloadingGenerator(Page(source=mgp(), title=p.title())
+        gen2 = PreloadingGenerator(Page(source=voca(), title=p.title())
                                    for p in FilePage(source=cm(), title="File:" + image_from).globalusage())
         generator = itertools.chain(gen1, gen2)
-        super().__init__(site=mgp(), generator=generator)
+        super().__init__(site=voca(), generator=generator)
         self.image_from = image_from
         self.from_pattern = "".join("[ _]" if c == ' ' or c == '_' else c
                                     for c in re.escape(image_from).replace(r"\ ", " "))

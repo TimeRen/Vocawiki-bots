@@ -11,14 +11,14 @@ def get_lang_map():
     from pywikibot import Site
     return {
         'en': Site(code='en', fam='en'),
-        'zh': Site(code='mgp', fam='mgp'),
+        'zh': Site(code='voca', fam='voca'),
         # 'ja': Site(fam='ja')
     }
 
 
 def get_rate_limit():
-    from utils.sites import mgp
-    u = mgp().username()
+    from utils.sites import voca
+    u = voca().username()
     if "bot" in u.lower() or "机" in u:
         # FIXME: 500 will sometimes exceed the limit of 8,388,608 bytes in server response
         rate_limit = 300

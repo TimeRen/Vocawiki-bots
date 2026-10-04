@@ -7,10 +7,10 @@ from pywikibot.data.api import PropertyGenerator
 from pywikibot.pagegenerators import GeneratorFactory
 from pywikibot.tools.itertools import itergroup
 
-from utils.sites import mgp
+from utils.sites import voca
 from utils.utils import adjust_trailing_newline
 
-site: APISite = mgp()
+site: APISite = voca()
 
 
 def get_disambig_pages():
@@ -166,4 +166,4 @@ def run_links_to_disambig():
 
 def links_to_disambig():
     run_links_to_disambig()
-    # print(batch_page_links([Page(source=mgp(), title="魔剑士莉奈2"), Page(source=mgp(), title="User:Lihaohong")]))
+    # print(batch_page_links([Page(source=voca(), title="魔剑士莉奈2"), Page(source=voca(), title="User:Lihaohong")]))

@@ -12,7 +12,7 @@ from pywikibot.tools import deprecated
 from wikitextparser import Template, WikiLink
 
 from utils.config import get_data_path, get_rate_limit
-from utils.mgp import MGPPage
+from utils.voca import vocaPage
 
 
 def process_title(s: str) -> str:
@@ -212,8 +212,8 @@ def search_pages(*search_strings, preload: bool = True) -> Iterable[Page]:
     :param preload: 是否预先批量加载列表中的页面
     :return: Page对象
     """
-    from utils.sites import mgp
-    gen = GeneratorFactory(site=mgp())
+    from utils.sites import voca
+    gen = GeneratorFactory(site=voca())
     gen.handle_arg('-ns:0')
     for s in search_strings:
         gen.handle_arg(f'-search:insource:"{s}"')

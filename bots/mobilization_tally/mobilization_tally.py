@@ -150,7 +150,7 @@ def run_mobilization_tally():
                              "list_contributions tracks the score of each participant.")
     parser.add_argument("target", nargs=1,
                         help="Target page of an event. Should be a user page on which you have event information.")
-    parser.add_argument("-s", "--site", type=str, dest="site", default="mgp")
+    parser.add_argument("-s", "--site", type=str, dest="site", default="voca")
     parser.add_argument("-p", "--preset", type=str, dest="preset", default="vj",
                         help="Organization preset. Only applies to list_contributions."
                              "Defaults to vj. "

@@ -1,19 +1,19 @@
 import sys
 import init_script
 
-from mgp_common.video import VideoSite
+from voca_common.video import VideoSite
 from wikitextparser import parse
 
 from pywikibot import Page
-from mgp_common import video
+from voca_common import video
 
-from utils.sites import mgp
+from utils.sites import voca
 from utils.utils import find_templates
 
 
 def main():
     page = sys.argv[1]
-    page = Page(source=mgp(), title=page)
+    page = Page(source=voca(), title=page)
     parsed = parse(page.text)
     songs = find_templates(parsed.templates, "Producer_Song")
     TEMPLE, LEGENDARY = 100000, 1000000

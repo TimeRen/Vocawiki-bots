@@ -11,7 +11,7 @@ from pywikibot.exceptions import InvalidTitleError
 from pywikibot.pagegenerators import GeneratorFactory
 
 from utils.config import get_data_path
-from utils.sites import cm, mgp
+from utils.sites import cm, voca
 from utils.utils import get_page_list, get_continue_page, save_continue_page, adjust_trailing_newline
 
 
@@ -45,7 +45,7 @@ def deprecated():
         sleep(3)
 
 
-MGP_CONTINUE_FILE_NAME = "commons_image_continue.txt"
+voca_CONTINUE_FILE_NAME = "commons_image_continue.txt"
 COMMONS_CONTINUE_FILE_NAME = "commons_image_file_continue.txt"
 TEMP_PROGRESS_FILE = get_data_path().joinpath("commons_image_temp_progress.pickle")
 
@@ -65,7 +65,7 @@ def process_page(page: Page):
         s.add(page.title())
         progress[file_name] = s
     pickle.dump(progress, open(TEMP_PROGRESS_FILE, "wb"))
-    save_continue_page(MGP_CONTINUE_FILE_NAME, page.title())
+    save_continue_page(voca_CONTINUE_FILE_NAME, page.title())
 
 
 def get_files_global_usage(files: List[Page]) -> List[Page]:
@@ -128,21 +128,21 @@ def filter_page_names(names) -> Tuple[List[str], List[str]]:
 
 
 def commons_image():
-    gen = GeneratorFactory(site=mgp())
+    gen = GeneratorFactory(site=voca())
     gen.handle_arg('-search:insource:"filepath"')
     # gen.handle_arg('-search:insource:"img.moegirl"')
     pages = get_page_list("commons_image_page_list.txt",
                           gen.getCombinedGenerator(preload=False),
-                          get_continue_page(MGP_CONTINUE_FILE_NAME))
+                          get_continue_page(voca_CONTINUE_FILE_NAME))
     for page in pages:
         process_page(page)
     progress = load_progress()
     page_names, problematic_pages = filter_page_names(progress.keys())
-    mgp_pages = set()
+    voca_pages = set()
     for p in problematic_pages:
         for name in progress[p]:
-            mgp_pages.add(name)
-    print(mgp_pages)
+            voca_pages.add(name)
+    print(voca_pages)
     pages = []
     for s in page_names:
         p = Page(source=cm(), title="File:" + s)

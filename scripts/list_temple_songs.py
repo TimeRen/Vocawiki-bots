@@ -3,16 +3,16 @@ import re
 import webbrowser
 from threading import Thread
 
-from mgp_common.video import video_from_site, VideoSite
+from voca_common.video import video_from_site, VideoSite
 from pywikibot import Page
 from pywikibot.bot import SingleSiteBot
 from pywikibot.pagegenerators import GeneratorFactory, PreloadingGenerator
 from pywikibot.tools.itertools import itergroup
 
 from utils.config import get_data_path
-from utils.sites import mgp
+from utils.sites import voca
 
-use_site = mgp()
+use_site = voca()
 
 TOP_PATTERN = re.compile(r"{{ *vocaloid(..)?..曲[題题][头頭]", re.IGNORECASE)
 NICO_PATTERN = re.compile(r"{{ *niconicocount *\| *id *= *([^}]+) *}}", re.IGNORECASE)
@@ -75,9 +75,9 @@ class BatchAddBot(SingleSiteBot):
                      summary="已达成殿堂", asynchronous=True)
 
     def __init__(self):
-        gen = GeneratorFactory(site=mgp())
+        gen = GeneratorFactory(site=voca())
         gen.handle_arg("-file:" + str(FILE_PATH))
-        super(BatchAddBot, self).__init__(site=mgp(),
+        super(BatchAddBot, self).__init__(site=voca(),
                                           generator=gen.getCombinedGenerator(preload=True))
 
 

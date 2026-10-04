@@ -26,11 +26,11 @@ from bots.template_splitter import run_template_splitter
 from utils import login
 from utils.config import get_data_path
 from utils.logger import setup_logger
-from utils.sites import mgp
+from utils.sites import voca
 
 
 def test():
-    sandbox = Page(source=mgp(), title="Help:沙盒")
+    sandbox = Page(source=voca(), title="Help:沙盒")
     sandbox.text += "\n测试"
     sandbox.save(summary="测试", tags="Bot", minor=True)
 

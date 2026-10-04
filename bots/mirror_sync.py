@@ -57,7 +57,7 @@ def process_file(f):
 
 
 def mirror_sync():
-    pywikibot.output("Syncing pages from mgp with mirror.")
+    pywikibot.output("Syncing pages from voca with mirror.")
     page_folder.mkdir(exist_ok=True)
     bot = RCDownloadBot()
     bot.run()

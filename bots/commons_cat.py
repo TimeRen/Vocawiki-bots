@@ -10,7 +10,7 @@ from pywikibot.pagegenerators import GeneratorFactory
 from pywikibot.tools.itertools import itergroup
 
 from utils.config import get_data_path
-from utils.sites import cm, mgp
+from utils.sites import cm, voca
 from utils.utils import get_commons_links, get_page_list, get_continue_page, save_continue_page
 
 exclude = {'Logo youtube.png', 'Bilibili Logo Blue.svg', 'Bilibilitv-logo.png', 'Nijisanji_temp.png',
@@ -303,7 +303,7 @@ def query_cats(files: Iterable[str]):
 
 
 def query_templates_for_exceptions():
-    gen = GeneratorFactory(site=mgp())
+    gen = GeneratorFactory(site=voca())
     gen.handle_arg("-ns:Template")
     gen.handle_arg("-catr:虚拟UP主导航模板")
     pages = gen.getCombinedGenerator(preload=False)
@@ -399,7 +399,7 @@ def commons_cat():
     pages = get_page_list(file_name=PAGE_LIST_NAME,
                           factory=gen.getCombinedGenerator(preload=False),
                           cont=get_continue_page(CONT_FILE),
-                          site=mgp())
+                          site=voca())
     for page in pages:
         files = find_image_links(page)
         output = ""

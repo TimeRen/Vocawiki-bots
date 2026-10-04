@@ -8,10 +8,10 @@ from pywikibot import Page
 from pywikibot.pagegenerators import PreloadingGenerator
 
 from utils.config import get_default_save_params
-from utils.sites import mgp, get_site_by_name
+from utils.sites import voca, get_site_by_name
 from utils.utils import find_templates
 
-site = mgp()
+site = voca()
 
 
 def template_splitter(name, aliases, limit: int = 50):
@@ -114,7 +114,7 @@ def run_template_splitter():
     parser = ArgumentParser()
     parser.add_argument("template_names", nargs="+")
     parser.add_argument("-l", "--limit", dest="limit", type=int, default=50)
-    parser.add_argument("-s", "--site", dest="site", type=str, default="mgp")
+    parser.add_argument("-s", "--site", dest="site", type=str, default="voca")
     args = parser.parse_args(sys.argv[2:])
     limit = args.limit
     if limit < 0:

@@ -13,7 +13,7 @@ from pywikibot.page import Revision
 from pywikibot.pagegenerators import PreloadingGenerator
 
 from utils.logger import get_logger
-from utils.mgp import get_page
+from utils.voca import get_page
 
 # edit count, bytes added, articles changed
 from utils.path_utils import EMPTY_PATH

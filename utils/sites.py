@@ -5,8 +5,8 @@ def cm():
     return Site(fam="commons", code="commons")
 
 
-def mgp() -> APISite:
-    return Site(fam="mgp", code="mgp")
+def voca() -> APISite:
+    return Site(fam="voca", code="voca")
 
 
 def mirror() -> APISite:
@@ -26,7 +26,7 @@ def enwp():
 
 def get_site_by_name(name: str):
     name_to_site = {
-        'mgp': mgp,
+        'voca': voca,
         'mirror': mirror,
         'commons': cm
     }

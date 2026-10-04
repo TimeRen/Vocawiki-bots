@@ -7,11 +7,11 @@ from pywikibot.bot import SingleSiteBot
 from pywikibot.pagegenerators import PreloadingGenerator
 from wikitextparser import parse, WikiLink
 
-from utils.sites import mgp, mirror
+from utils.sites import voca, mirror
 from utils.user_interact import prompt_choices
 from utils.utils import generate_possible_titles, find_templates, change_internal_link
 
-site = mgp()
+site = voca()
 
 
 def disambiguate_page_text(text: str, choices: List[str], replace: Set[str],

@@ -3,12 +3,12 @@ from unittest import TestCase
 from pywikibot import Page
 
 from bots.mobilization_tally.presets import is_vj_song
-from utils.sites import mgp
+from utils.sites import voca
 
 
 class Test(TestCase):
     def test_is_vj_song(self):
-        site = mgp()
+        site = voca()
         self.assertTrue(is_vj_song(Page(site, "同一夜")))
         self.assertTrue(not is_vj_song(Page(site, "中华缘木娘")))
         self.assertTrue(not is_vj_song(Page(site, "NHOT_BOT(歌曲)")))

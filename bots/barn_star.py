@@ -7,8 +7,8 @@ from pywikibot.bot import SingleSiteBot
 
 from utils.contributions import write_contributions_to_file
 from utils.logger import get_logger
-from utils.mgp import get_page
-from utils.sites import mgp
+from utils.voca import get_page
+from utils.sites import voca
 from utils.utils import get_links_in_template, count_trailing_newline
 
 
@@ -38,7 +38,7 @@ def auto_star(template_name: str, print_contributions: bool = True, send_stars: 
               body: str = ""):
     file_name = Path("data/{}.pickle".format(template_name))
     if not file_name.exists():
-        write_contributions_to_file((Page(source=mgp(), title=title)
+        write_contributions_to_file((Page(source=voca(), title=title)
                                      for title in get_links_in_template(get_page('T:' + template_name))),
                                     file_name)
     with open(file_name, "rb") as f:

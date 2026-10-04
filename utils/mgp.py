@@ -5,24 +5,24 @@ import pywikibot as pwb
 import wikitextparser
 
 DEFAULT_SITE = pwb.Site()
-MGP_BASE_URL = "https://zh.moegirl.org.cn/"
+voca_BASE_URL = "https://voca.wiki/"
 
 
-class MGPPage(pwb.Page):
+class vocaPage(pwb.Page):
     @property
     def name(self):
         return self.title(underscore=True)
 
     @property
     def link(self):
-        return MGP_BASE_URL + self.title(as_url=True)
+        return voca_BASE_URL + self.title(as_url=True)
 
     def open_in_browser(self):
         webbrowser.open(self.link)
 
 
-def get_page(title: str, resolve_redirect: bool = True) -> Optional[MGPPage]:
-    page = MGPPage(DEFAULT_SITE, title)
+def get_page(title: str, resolve_redirect: bool = True) -> Optional[vocaPage]:
+    page = vocaPage(DEFAULT_SITE, title)
     if not page.exists() or not resolve_redirect:
         return page
     t = page.text.strip()

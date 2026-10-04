@@ -10,10 +10,10 @@ from pywikibot.pagegenerators import GeneratorFactory, PreloadingGenerator
 from utils.time_utils import cst
 from utils.config import get_data_path
 from utils.contributions import write_contributions_to_file, ContributionInfo
-from utils.sites import mgp
+from utils.sites import voca
 from utils.utils import find_templates
 
-use_site = mgp()
+use_site = voca()
 
 
 def get_vj_songs():
@@ -44,7 +44,7 @@ def get_vj_songs():
     gen = PreloadingGenerator(gen, groupsize=500)
 
     def filter_songs_from_china(page: Page):
-        from mgp_common.japanese import is_kana
+        from voca_common.japanese import is_kana
         if len(list(filter(is_kana, page.text))) > 50:
             return False
         if "{{LyricsKai" in page.text or "{{需要翻译" in page.text or "{{求翻译" in page.text:

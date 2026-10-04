@@ -2,11 +2,11 @@ from pywikibot import Page
 from pywikibot.pagegenerators import GeneratorFactory, PreloadingGenerator
 
 from utils.config import get_data_path
-from utils.sites import mgp, cm
+from utils.sites import voca, cm
 
 
 def main():
-    gen = GeneratorFactory(site=mgp())
+    gen = GeneratorFactory(site=voca())
     gen.handle_args(["-cat:虚拟UP主", "-ns:0"])
     gen = gen.getCombinedGenerator()
     titles = ("Category:" + p.title() for p in gen)

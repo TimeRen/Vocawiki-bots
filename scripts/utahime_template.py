@@ -4,7 +4,7 @@ from textwrap import indent
 from typing import Optional, List
 
 from bs4 import BeautifulSoup
-from mgp_common.string_utils import auto_lj
+from voca_common.string_utils import auto_lj
 
 import init_script
 from datetime import datetime
@@ -17,7 +17,7 @@ from wikitextparser import parse, Template
 from dataclasses import dataclass
 
 from utils.config import get_data_path
-from utils.sites import mgp, mirror
+from utils.sites import voca, mirror
 from utils.utils import find_templates
 
 
@@ -37,7 +37,7 @@ class Song:
     status: Status
 
 
-site = mgp()
+site = voca()
 err_file = get_data_path().joinpath("utahime_err.txt")
 
 

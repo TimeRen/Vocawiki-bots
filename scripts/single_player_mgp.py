@@ -1,11 +1,11 @@
 from pywikibot import Page
 
 import init_script
-from utils.sites import mgp
+from utils.sites import voca
 
 
 def main():
-    contributions_page = Page(source=mgp(), title="User:Lihaohong/创建的条目")
+    contributions_page = Page(source=voca(), title="User:Lihaohong/创建的条目")
     pages = list(contributions_page.linkedPages())
     for page in pages:
         for revision in page.revisions():

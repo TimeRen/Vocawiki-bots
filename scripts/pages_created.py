@@ -5,9 +5,9 @@ from pathlib import Path
 import init_script
 from pywikibot.pagegenerators import GeneratorFactory
 
-from utils.sites import mgp
+from utils.sites import voca
 
-site = mgp()
+site = voca()
 
 
 def get_all_pages():

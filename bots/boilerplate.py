@@ -87,7 +87,7 @@ def download_boilerplate():
     from bs4 import BeautifulSoup
     import urllib
 
-    from utils.sites import mgp
+    from utils.sites import voca
 
     # Don't know the api for subpages, so simply parse all the links in the HTML response
     response = requests.get("https://mzh.moegirl.org.cn/index.php?title=Special%3A%E5%89%8D%E7%BC%80%E7%B4%A2%E5%BC%95"
@@ -99,7 +99,7 @@ def download_boilerplate():
         if '/' == href[0]:
             href = href[1:]
         if 'Template:页面格式/' in href and '/doc' not in href:
-            pages.append(Page(source=mgp(), title=href))
+            pages.append(Page(source=voca(), title=href))
 
     # find all revision of all pages and add all comments into black list
     result = set()

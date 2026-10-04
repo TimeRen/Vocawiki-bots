@@ -2,10 +2,10 @@ from datetime import timedelta, timezone
 
 from pywikibot import Timestamp
 
-from utils.sites import mgp
+from utils.sites import voca
 from utils.utils import parse_time
 
-site = mgp()
+site = voca()
 now = Timestamp.now().astimezone(timezone.utc)
 changes = site.recentchanges(end=now + timedelta(hours=-24), start=now, bot=False)
 changes = list(changes)

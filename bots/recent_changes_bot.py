@@ -43,9 +43,9 @@ def filter_recent_changes(resume_id: int, recent_changes_generator):
 
 
 class RecentChangesBot(SingleSiteBot, ABC):
-    from utils.sites import mgp
+    from utils.sites import voca
 
-    def __init__(self, bot_name: str, resume_id: int = None, site: APISite = mgp(), group_size: int = get_rate_limit(),
+    def __init__(self, bot_name: str, resume_id: int = None, site: APISite = voca(), group_size: int = get_rate_limit(),
                  ns: Union[str, List[str]] = "0", delay: int = -2, change_type: str = 'edit|new|log', **kwargs):
         super(RecentChangesBot, self).__init__(site=site, **kwargs)
         self.group_size = group_size

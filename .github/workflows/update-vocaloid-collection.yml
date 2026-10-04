@@ -16,6 +16,11 @@ on:
   schedule:
     # cron 用 UTC。*/5 = 每 5 分钟（GitHub 会尽最大努力，可能延迟/跳过）
     - cron: '*/5 * * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'bots/vocaloid_collection_contributions.py'
+      - '.github/workflows/update-vocaloid-collection.yml'
   workflow_dispatch:
 
 concurrency:

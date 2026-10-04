@@ -15,8 +15,12 @@ The bot can:
 
 * ``counts``  - recompute every section header ``(已创建/总数)``.
 * ``colour``  - colour uncoloured cells whose page exists, using the creator's
-  colour from the legend.
+  colour from the legend.  A link whose target does not exist is matched
+  against the real page first (e.g. ``[[FrailLaVillanos]]`` for the existing
+  ``FrailL'aVillanos``), and the link is corrected while colouring.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
+  An entry whose page is missing or was created by a bot is credited to the
+  colour its cell carries, so hand-claimed entries never drop out of the chart.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``watch``   - near-real-time: poll ``list=recentchanges`` and maintain the
@@ -44,6 +48,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.parse import unquote
 
 import pywikibot
 from pywikibot import Page
@@ -83,6 +88,22 @@ def normalise_colour(colour: str) -> str:
     if len(colour) == 4:
         return "#" + "".join(c * 2 for c in colour[1:])
     return colour
+
+
+APOSTROPHE_RE = re.compile(r"['’‘`´ʼ]")
+TITLE_INDEX = DATA_DIR / "vocaloid_collection_titles.pickle"
+TITLE_INDEX_TTL = 12 * 3600  # seconds between full title sweeps
+TITLE_INDEX_MAX = 30000  # safety cap on the sweep
+
+
+def title_key(title: str) -> str:
+    """Match key for song titles: ignore apostrophe style and %-escapes.
+
+    Case is kept (MediaWiki only ignores the case of the first letter), so a
+    link is never rewritten to a page that differs by more than punctuation.
+    """
+    decoded = APOSTROPHE_RE.sub("", unquote(title)).replace("_", " ").strip()
+    return decoded[:1].upper() + decoded[1:]
 
 
 @dataclass
@@ -162,7 +183,7 @@ def parse_sections(text: str) -> List[Section]:
                         tm = TITLE_RE.search(cell)
                         if not tm:
                             continue
-                        title = (tm.group(1) or tm.group(2) or tm.group(3)).strip()
+                        title = unquote((tm.group(1) or tm.group(2) or tm.group(3)).strip())
                         colours: List[str] = []
                         for bm in BG_RE.finditer(cell):
                             if bm.group(1):
@@ -188,19 +209,26 @@ def new_header(match: re.Match, created: int) -> str:
 
 
 def compute_created(site, sections: Iterable[Section], cache: Dict[str, Optional[str]],
-                    exists: Dict[str, bool]) -> Dict[Tuple[str, str], int]:
+                    exists: Dict[str, bool],
+                    planned: Optional[set] = None) -> Dict[Tuple[str, str], int]:
     """A song entry counts as created when it is coloured *or* its page exists.
 
     Both cases occur on the page: a freshly created entry is often still
-    uncoloured (the creator's colour is assigned by hand).
+    uncoloured (the creator's colour is assigned by hand).  ``planned`` holds
+    the entries this pass is about to colour, so a song whose link had to be
+    corrected is already counted in the same edit.
     """
+    planned = planned or set()
     sections = list(sections)
-    batch_exists(site, (e.title for s in sections for e in s.entries if not e.colours), exists)
+    batch_exists(site, (e.title for s in sections for e in s.entries
+                        if not e.colours and e.title not in planned), exists)
     result: Dict[Tuple[str, str], int] = {}
     for section in sections:
         if not section.entries:
             continue
-        created = sum(1 for e in section.entries if e.colours or page_exists(site, e.title, exists))
+        created = sum(1 for e in section.entries
+                      if e.colours or e.title in planned
+                      or page_exists(site, e.title, exists))
         result[(section.season, section.name)] = created
     return result
 
@@ -259,11 +287,13 @@ def creator_of(site, title: str, cache: Dict[str, Optional[str]]):
         revisions = list(Page(site, title).revisions(total=1, reverse=True, content=False))
         user = strip_prefix(revisions[0]["user"]) if revisions else None
     except NoPageError:
-        user = None
+        # 不缓存：条目可能马上就要被创建（否则会把"还没建"记成永久结论）
+        return None
     except Exception as exc:  # noqa: BLE001
         pywikibot.error(f"{title}: {exc}")
         return None  # do not cache transient failures
-    cache[title] = user
+    if user:
+        cache[title] = user
     return user
 
 
@@ -296,6 +326,47 @@ def page_exists(site, title: str, exists: Dict[str, bool]) -> bool:
     return exists.get(title, False)
 
 
+def build_title_index(site) -> Dict[str, str]:
+    """``title_key`` -> real page title, for every mainspace page."""
+    index: Dict[str, str] = {}
+    try:
+        for count, page in enumerate(site.allpages(namespace=0)):
+            if count >= TITLE_INDEX_MAX:
+                pywikibot.error(f"标题索引超过 {TITLE_INDEX_MAX} 条，已截断。")
+                break
+            index.setdefault(title_key(page.title()), page.title())
+    except Exception as exc:  # noqa: BLE001
+        pywikibot.error(f"标题索引建立失败: {exc}")
+    return index
+
+
+def title_index(site) -> Dict[str, str]:
+    """The title index, rebuilt at most once per ``TITLE_INDEX_TTL``.
+
+    The page links songs by hand, so a typo such as ``[[FrailLaVillanos]]``
+    (the page is ``FrailL'aVillanos``) cannot be derived from the page alone.
+    One sweep of the wiki's titles makes every such link resolvable - and the
+    sweep is cached, so a long-running ``watch`` process does not repeat it.
+    """
+    try:
+        with open(TITLE_INDEX, "rb") as f:
+            blob = pickle.load(f)
+        if time.time() - blob.get("built", 0) < TITLE_INDEX_TTL:
+            return blob.get("index", {})
+    except Exception:  # noqa: BLE001  (no cache yet / unreadable cache)
+        pass
+    index = build_title_index(site)
+    if index:
+        try:
+            TITLE_INDEX.parent.mkdir(exist_ok=True)
+            with open(TITLE_INDEX, "wb") as f:
+                pickle.dump({"built": time.time(), "index": index}, f,
+                            protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as exc:  # noqa: BLE001
+            pywikibot.error(f"标题索引写入失败: {exc}")
+    return index
+
+
 def season_window(season: str, end_shift_days: int = 0) -> Tuple[datetime, datetime]:
     year, kind = int(season[:4]), season[4]
     if kind == "冬":
@@ -323,9 +394,14 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                 continue
             seen[section.season].add(entry.title)
             user = creator_of(site, entry.title, cache)
-            if not user or user in KNOWN_BOTS:
+            if user and user not in KNOWN_BOTS:
+                result[section.season][legend.identity(user)] += 1
                 continue
-            result[section.season][legend.identity(user)] += 1
+            # 页面缺失或由机器人代建时，退回页面上手工标注的颜色（颜色即创建者），
+            # 否则这些已被认领的条目会从统计里凭空消失。
+            for colour in entry.colours:
+                if colour in legend.colour_to_name:
+                    result[section.season][colour] += 1
     return result
 
 
@@ -424,24 +500,40 @@ def text_colour(background: str) -> str:
 
 
 def plan_colours(site, sections: List[Section], legend: Legend,
-                 cache: Dict[str, Optional[str]], exists: Dict[str, bool]) -> Dict[str, str]:
-    """title -> background colour for uncoloured entries with a known creator."""
-    batch_exists(site, (e.title for s in sections for e in s.entries if not e.colours), exists)
-    plan: Dict[str, str] = {}
-    for section in sections:
-        for entry in section.entries:
-            if entry.colours or entry.title in plan or not page_exists(site, entry.title, exists):
+                 cache: Dict[str, Optional[str]],
+                 exists: Dict[str, bool]) -> Dict[str, Tuple[str, str]]:
+    """entry title -> (background colour, page title to link to).
+
+    Only entries whose page exists are coloured; a link whose target does not
+    exist is matched against the real title first and corrected in the same
+    edit (``[[FrailLaVillanos]]`` -> ``[[FrailL'aVillanos]]``).
+    """
+    uncoloured = [e for s in sections for e in s.entries if not e.colours]
+    batch_exists(site, (e.title for e in uncoloured), exists)
+    index: Optional[Dict[str, str]] = None
+    plan: Dict[str, Tuple[str, str]] = {}
+    for entry in uncoloured:
+        if entry.title in plan:
+            continue
+        if page_exists(site, entry.title, exists):
+            target = entry.title
+        else:
+            if index is None:
+                index = title_index(site)
+            target = index.get(title_key(entry.title))
+            if not target:
                 continue
-            user = creator_of(site, entry.title, cache)
-            if not user or user in KNOWN_BOTS:
-                continue
-            identity = legend.identity(user)
-            if re.fullmatch(HEX, identity):
-                plan[entry.title] = identity
+            exists[target] = True
+        user = creator_of(site, target, cache)
+        if not user or user in KNOWN_BOTS:
+            continue
+        identity = legend.identity(user)
+        if re.fullmatch(HEX, identity):
+            plan[entry.title] = (identity, target)
     return plan
 
 
-def apply_colours(text: str, plan: Dict[str, str]) -> Tuple[str, int]:
+def apply_colours(text: str, plan: Dict[str, Tuple[str, str]]) -> Tuple[str, int]:
     """Wrap uncoloured table cells in ``bgcolor`` + ``{{colorlink}}``."""
     if not plan:
         return text, 0
@@ -450,13 +542,14 @@ def apply_colours(text: str, plan: Dict[str, str]) -> Tuple[str, int]:
 
     def repl(m: re.Match) -> str:
         nonlocal changed
-        title = m.group(1).strip()
-        colour = plan.get(title)
-        if colour is None:
+        title = unquote(m.group(1).strip())
+        entry = plan.get(title)
+        if entry is None:
             return m.group(0)  # an unrelated wikilink
+        colour, target = entry
         changed += 1
         return (f"bgcolor={colour} | "
-                f"{{{{colorlink|{text_colour(colour)}|{title}|{m.group(2)}}}}}")
+                f"{{{{colorlink|{text_colour(colour)}|{target}|{m.group(2)}}}}}")
 
     pieces: List[str] = []
     pos = 0
@@ -473,10 +566,13 @@ def apply_colours(text: str, plan: Dict[str, str]) -> Tuple[str, int]:
 # --------------------------------------------------------------------------- #
 def build_report(site, sections: List[Section], legend: Legend,
                  cache: Dict[str, Optional[str]], exists: Dict[str, bool],
-                 fixable: Optional[set] = None) -> str:
-    fixable = fixable or set()
+                 plan: Optional[Dict[str, Tuple[str, str]]] = None) -> str:
+    plan = plan or {}
     batch_exists(site, (e.title for s in sections for e in s.entries), exists)
     lines: List[str] = []
+    for title, (_, target) in plan.items():
+        if target != title:
+            lines.append(f"链接已修正: {title} -> {target}")
     for section in sections:
         if not section.entries:
             continue
@@ -484,7 +580,7 @@ def build_report(site, sections: List[Section], legend: Legend,
             found = page_exists(site, entry.title, exists)
             if entry.colours and not found:
                 lines.append(f"已上色但页面不存在: {section.season}/{section.name} - {entry.title}")
-            elif found and not entry.colours and entry.title not in fixable:
+            elif found and not entry.colours and entry.title not in plan:
                 lines.append(f"页面已存在但未上色（未能自动上色）: {section.season}/{section.name} - {entry.title}")
     return "\n".join(lines)
 
@@ -558,14 +654,14 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     cache = load_cache(CREATOR_CACHE)
     text = original
     created = None
-    plan: Dict[str, str] = {}
+    plan: Dict[str, Tuple[str, str]] = {}
     exists: Dict[str, bool] = {}
     if "colour" in actions:
         plan = plan_colours(site, sections, legend, cache, exists)
         text, coloured = apply_colours(text, plan)
         pywikibot.output(f"上色: 处理 {coloured} 个单元格（可自动上色条目 {len(plan)}）")
     if actions & {"counts", "report"}:
-        created = compute_created(site, sections, cache, exists)
+        created = compute_created(site, sections, cache, exists, set(plan))
     if "counts" in actions:
         text, changed = recompute_counts(text, created)
         pywikibot.output(f"计数: 更新 {changed} 个小节")
@@ -575,7 +671,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         text, _ = render_chart(text, sections, legend, counts)
         pywikibot.output(f"统计: 依据 {basis} 重算图表")
     if "report" in actions:
-        report = build_report(site, sections, legend, cache, exists, set(plan))
+        report = build_report(site, sections, legend, cache, exists, plan)
         pywikibot.output("异常报告:\n" + (report or "  （无）"))
 
     save_cache(CREATOR_CACHE, cache)

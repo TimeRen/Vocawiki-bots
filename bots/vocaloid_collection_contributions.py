@@ -92,6 +92,14 @@ HEADER_RE = re.compile(r";\s*([A-Za-z0-9]+)\s*\((.*?)/([^)]*)\)")
 SEASON_RE = re.compile(r"^===\s*(\d{4}[冬春夏秋])\s*===\s*$", re.M)
 CHART_RE = re.compile(r"(\{\{Echart\|data=<nowiki>)(.*?)(</nowiki>)", re.S)
 
+# 页面上没有旧块可参照时（第一次加赛季）用的模板，照抄页面现有的手写风格
+FALLBACK_SERIES = (
+    '{"name": "%(name)s","type": "bar","stack":"total","itemStyle":{"color":"%(colour)s"},'
+    '"label": {"formatter": " {c} ","distance":0,"backgroundColor": "white","fontWeight": "bold",'
+    '"borderColor": "auto","borderWidth": 1.2,"borderRadius": 10,"lineHeight": 16,'
+    '"padding": [1,0,0,0]},"emphasis":{"label": {"show": true}},"data": [%(data)s]}'
+)
+
 # 每个赛季的榜单模板，如 Template:The VOCALOID Collection2023夏
 SEASON_TEMPLATE = "Template:The VOCALOID Collection"
 # 模板里 Navbox 子表的标题 -> 贡献列表里的小节名
@@ -673,12 +681,118 @@ def canonical_names(legend: Legend, yaxis: List[str]) -> Dict[str, str]:
     return mapping
 
 
+def _matching_bracket(text: str, open_index: int) -> int:
+    """Index just past the ``]``/``}`` that closes ``text[open_index]``."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    raise RuntimeError("图表 JSON 的括号不匹配")
+
+
+def _container(text: str, pattern: str) -> Tuple[int, int]:
+    """``[start, end)`` of the JSON container the ``pattern`` ends on."""
+    match = re.search(pattern, text)
+    if not match:
+        raise RuntimeError(f"图表里找不到 {pattern}")
+    start = match.end() - 1
+    if text[start] not in "[{":
+        raise RuntimeError(f"图表里 {pattern} 之后不是 JSON 容器")
+    return start, _matching_bracket(text, start)
+
+
+def _nested(text: str, outer: str, key: str) -> Tuple[int, int]:
+    """Span of ``key``'s value inside the ``outer`` container, in ``text`` coordinates."""
+    start, end = _container(text, outer)
+    inner_start, inner_end = _container(text[start:end], key)
+    return start + inner_start, start + inner_end
+
+
+def _elements(text: str, start: int, end: int) -> List[Tuple[int, int]]:
+    """Spans of the top-level elements inside the container ``text[start:end]``."""
+    spans: List[Tuple[int, int]] = []
+    index = start + 1
+    while index < end - 1:
+        char = text[index]
+        if char.isspace() or char == ",":
+            index += 1
+        elif char in "[{":
+            stop = _matching_bracket(text, index)
+            spans.append((index, stop))
+            index = stop
+        elif char == '"':
+            stop = index + 1
+            while stop < end - 1:
+                if text[stop] == "\\":
+                    stop += 2
+                elif text[stop] == '"':
+                    break
+                else:
+                    stop += 1
+            spans.append((index, stop + 1))
+            index = stop + 1
+        else:
+            stop = index
+            while stop < end - 1 and text[stop] not in ",]}":
+                stop += 1
+            spans.append((index, stop))
+            index = stop
+    return spans
+
+
+def _edges(inner: str) -> Tuple[str, str]:
+    """Leading/trailing whitespace an editor left inside an array."""
+    if not inner.strip():
+        return "", ""
+    return inner[:len(inner) - len(inner.lstrip())], inner[len(inner.rstrip()):]
+
+
+def _refill(text: str, span: Tuple[int, int], values: List[str]) -> str:
+    """Replace an array's elements while keeping its own spacing and line breaks."""
+    start, end = span
+    lead, trail = _edges(text[start + 1:end - 1])
+    body = lead + ",".join(values) + trail if values else ""
+    return text[:start + 1] + body + text[end - 1:]
+
+
+def _relabel_series(model: Optional[str], name: str, colour: str,
+                    values: List[str]) -> str:
+    """Copy a series block under a new name/colour so a new season matches its neighbours."""
+    if model is None:
+        return FALLBACK_SERIES % {"name": name, "colour": colour, "data": ",".join(values)}
+    block = re.sub(r'("name"\s*:\s*")[^"]*(")',
+                   lambda m: m.group(1) + name + m.group(2), model, count=1)
+    block = re.sub(r'("color"\s*:\s*")[^"]*(")',
+                   lambda m: m.group(1) + colour + m.group(2), block, count=1)
+    return _refill(block, _container(block, r'"data"\s*:\s*\['), values)
+
+
 def render_chart(text: str, sections: List[Section], legend: Legend,
                  counts: Dict[str, Counter]) -> Tuple[str, dict]:
     match = CHART_RE.search(text)
     if not match:
         raise RuntimeError("未找到 {{Echart}} - 页面结构可能已改变")
-    chart = json.loads(match.group(2))
+    # 这份 JSON 是人在页面上手排的版（换行、冒号后的空格都不统一），所以只替换
+    # 数值本身，不重新序列化——否则排版会被洗成机器人自己的样子（257698 那次的教训）。
+    raw = match.group(2)
+    chart = json.loads(raw)
     yaxis: List[str] = chart["yAxis"]["data"]
     colours = canonical_names(legend, yaxis)
 
@@ -697,56 +811,66 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
             per_season[season][user] += count
             totals[user] += count
 
-    palette = [s.get("itemStyle", {}).get("color") for s in chart["series"]]
-    series_by_label = {s["name"]: s for s in chart["series"]}
+    series_span = _container(raw, r'"series"\s*:\s*\[')
+    spans = _elements(raw, *series_span)
+    blocks: List[Tuple[str, dict]] = []
+    for start, end in spans:
+        block = raw[start:end]
+        try:
+            blocks.append((block, json.loads(block)))
+        except ValueError:  # 混了注释之类的东西，别碰它
+            continue
+
+    palette = [obj.get("itemStyle", {}).get("color") for _, obj in blocks]
     # 有些数字来自站外的人工记账（既没上色、本地也没页面），任何算法都推不出来，
     # 所以只在机器人算得更多时提高，绝不把人工数字改小。
     kept: Dict[str, Dict[str, int]] = {}
-    for label, series in series_by_label.items():
-        for name, value in zip(yaxis, series.get("data", [])):
+    for _, obj in blocks:
+        for name, value in zip(yaxis, obj.get("data", [])):
             if value:
-                kept.setdefault(label, {})[name] = value
+                kept.setdefault(obj.get("name", ""), {})[name] = value
 
     users = [u for u in yaxis if totals[u] >= 5 or any(u in kept.get(l, {}) for l in labels)]
     users += sorted((u for u in totals if totals[u] >= 5 and u not in users),
                     key=lambda u: (-totals[u], u))
 
+    separators = [raw[spans[i][1]:spans[i + 1][0]] for i in range(len(spans) - 1)]
+    separator = separators[-1] if separators else ",\n\n"
+    model = blocks[0][0] if blocks else None
+
     manual = 0
-    new_series = []
+    ordered: List[str] = []
     for index, label in enumerate(labels):
         season = seasons[index]
-        colour = series_by_label.get(label, {}).get("itemStyle", {}).get("color")
-        if colour is None:
-            colour = palette[index % len(palette)] if palette else "#888888"
-        data = []
+        data: List[str] = []
         for user in users:
             computed = per_season[season].get(user, 0)
             previous = kept.get(label, {}).get(user, 0)
             if previous > computed:
                 manual += 1
-            data.append(max(computed, previous))
-        new_series.append({
-            "name": label,
-            "type": "bar",
-            "stack": "total",
-            "itemStyle": {"color": colour},
-            "label": {"formatter": " {c} ", "distance": 0, "backgroundColor": "white",
-                      "fontWeight": "bold", "borderColor": "auto", "borderWidth": 1.2,
-                      "borderRadius": 10, "lineHeight": 16, "padding": [1, 0, 0, 0]},
-            "emphasis": {"label": {"show": True}},
-            "data": data,
-        })
-    new_series += [s for s in chart["series"] if s["name"] not in labels]
+            data.append(str(max(computed, previous)))
+        existing = next((block for block, obj in blocks if obj.get("name") == label), None)
+        if existing is not None:
+            ordered.append(_refill(existing, _container(existing, r'"data"\s*:\s*\['), data))
+        else:
+            colour = palette[index % len(palette)] if palette else "#888888"
+            ordered.append(_relabel_series(model, label, colour, data))
+    ordered += [block for block, obj in blocks if obj.get("name") not in labels]
     if manual:
         pywikibot.output(f"统计: 保留 {manual} 个机器人推不出来的人工数字")
 
+    inner = raw[series_span[0] + 1:series_span[1] - 1]
+    lead, trail = _edges(inner)
+    updated = (raw[:series_span[0] + 1] + lead + separator.join(ordered) + trail
+               + raw[series_span[1] - 1:])
+    updated = _refill(updated, _nested(updated, r'"legend"\s*:\s*\{', r'"data"\s*:\s*\['),
+                      [json.dumps(value, ensure_ascii=False) for value in labels])
+    updated = _refill(updated, _nested(updated, r'"yAxis"\s*:\s*\{', r'"data"\s*:\s*\['),
+                      [json.dumps(value, ensure_ascii=False) for value in users])
+
     chart["legend"]["data"] = labels
     chart["yAxis"]["data"] = users
-    chart["series"] = new_series
-    # Keep the Echart readable in wikitext. Compact JSON turns the whole chart
-    # into one line and discards the hand-maintained spacing that editors rely on.
-    rendered = json.dumps(chart, ensure_ascii=False, indent=2)
-    return text[:match.start(2)] + rendered + text[match.end(2):], chart
+    return text[:match.start(2)] + updated + text[match.end(2):], chart
 
 
 # --------------------------------------------------------------------------- #

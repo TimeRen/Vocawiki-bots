@@ -431,6 +431,23 @@ def strip_prefix(user: str) -> str:
     return user.split(">", 1)[1] if ">" in user else user
 
 
+def rc_timestamp(value):
+    """Normalise a recent-changes timestamp.
+
+    ``list=recentchanges`` hands the timestamp back as a plain string
+    (``'2026-10-02T09:11:54Z'``), which cannot be compared with the
+    ``Timestamp`` cursor the watch loop keeps; that raised
+    ``TypeError: '>' not supported between instances of 'str' and 'Timestamp'``
+    on every poll and left the watcher blind.
+    """
+    if isinstance(value, pywikibot.Timestamp) or value is None:
+        return value
+    try:
+        return pywikibot.Timestamp.fromISOformat(str(value))
+    except ValueError:
+        return None
+
+
 def load_cache(path: Path) -> Dict[str, Optional[str]]:
     if path.exists():
         try:
@@ -1026,8 +1043,8 @@ def watch(site, *, interval: float, settle: float, stats_interval: float,
                 if key in seen:
                     continue
                 seen.add(key)
-                timestamp = rc.get("timestamp")
-                if timestamp and timestamp > last_ts:
+                timestamp = rc_timestamp(rc.get("timestamp"))
+                if timestamp is not None and timestamp > last_ts:
                     last_ts = timestamp
                 title = rc.get("title")
                 if title == PAGE_TITLE or title in relevant:

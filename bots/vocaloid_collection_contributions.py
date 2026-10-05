@@ -743,7 +743,9 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     chart["legend"]["data"] = labels
     chart["yAxis"]["data"] = users
     chart["series"] = new_series
-    rendered = json.dumps(chart, ensure_ascii=False, separators=(",", ":"))
+    # Keep the Echart readable in wikitext. Compact JSON turns the whole chart
+    # into one line and discards the hand-maintained spacing that editors rely on.
+    rendered = json.dumps(chart, ensure_ascii=False, indent=2)
     return text[:match.start(2)] + rendered + text[match.end(2):], chart
 
 

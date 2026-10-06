@@ -76,9 +76,11 @@ toolforge jobs run bootstrap-venv --image python3.13 --wait \
 结束时会打印 `pywikibot <版本> on Python 3.x`。容器里的 `$HOME` 就是工具的
 `/data/project/<tool>`，所以 `pyvenv` 建在共享存储上，后续 job 直接复用。
 
-## 5. 先干跑一次确认能登录
+## 5. 干跑确认链路，再去掉 `--dry-run` 确认登录
 
-不要直接在跳板机上跑 python（那是登录节点，不是跑负载的地方），用一次性 job：
+**干跑不会登录**：`run_once()` 只在 `write=True` 时才 `ensure_login()`，所以
+`--dry-run` 只验证脚本路径、venv、pywikibot 能跑通并读到页面，日志里**不会**
+出现 `已登录：Renjian-bot`：
 
 ```bash
 toolforge jobs run dryrun --image python3.13 --wait \
@@ -86,12 +88,24 @@ toolforge jobs run dryrun --image python3.13 --wait \
 cat ~/dryrun.out
 ```
 
-日志里应出现 `已登录：Renjian-bot`。确认没问题再往下走；去掉 `--dry-run`
-就是正式写入。
+期望看到 `统计: 依据 listed 重算图表`、`异常报告:`，最后是 `页面无需更新。`；
+页面若真有改动，会打印 diff 和 `[dry-run] 加 --write 以保存。`
 
-> **日志在 `.out` 里**：entry 脚本已经把 stderr 合并进 stdout
-> （`pywikibot.output()` 写的是 stderr，不合并的话 `工具名.out` 会是空的、
-> 内容全在 `工具名.err`）。如果 `.out` 仍然是空的，看 `~/dryrun.err`。
+链路通了之后，**去掉 `--dry-run` 再跑一次**，这一步才会登录：
+
+```bash
+toolforge jobs run logincheck --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-once.sh"
+cat ~/logincheck.out
+```
+
+应出现 `已登录：Renjian-bot（权限组：bot, *, user）`。登录失败会直接以非零退出码
+报错，并提示检查 `user-config.py` / `user-password.py`。页面本来就无需更新时，
+这一跑不会写任何东西。
+
+> **日志位置**：entry 脚本已把 stderr 合并进 stdout（`pywikibot.output()` 写的是
+> stderr，不合并则 `工具名.out` 是空的、内容全在 `工具名.err`）。还在用旧版脚本
+> 就直接看 `工具名.err`。
 
 ## 6. 载入常驻任务
 
@@ -175,6 +189,20 @@ ls ~/Vocawiki-bots/bots/vocaloid_collection_contributions.py
 
 ```bash
 git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
+```
+
+### 干跑日志里没有 `已登录：Renjian-bot`
+
+正常。`--dry-run` 不登录（`run_once()` 只在 `--write` 时才 `ensure_login()`），
+它只验证链路能不能跑通。要确认凭据，去掉 `--dry-run` 再跑一次（见第 5 步）。
+
+### 日志开头有一句 `./deploy/toolforge/...: not found`
+
+日志文件是**跨次运行追加**的，那句话是之前用错路径那次的残留。重新跑一次看
+文件末尾，或先删掉再跑：
+
+```bash
+rm -f ~/dryrun.out ~/dryrun.err
 ```
 
 ### job 显示 `completed` 但 `工具名.out` 是空的

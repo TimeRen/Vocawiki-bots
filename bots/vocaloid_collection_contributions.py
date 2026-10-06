@@ -669,9 +669,10 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                           if not e.colours and exists.get(e.title)), cache, resolved)
     for section in counted:
         for entry in section.entries:
-            if entry.title in seen[section.season]:  # a song counts once per season
+            target = resolved.get(entry.title, entry.title)
+            if target in seen[section.season]:  # redirects are the same song
                 continue
-            seen[section.season].add(entry.title)
+            seen[section.season].add(target)
             # 单元格上的颜色是人工标注的创建者，最可信（页面缺失也照样算）；
             # 没有颜色的条目才回退到「谁在 voca 建的页面」，两者合起来才是
             # 页面上图表的口径。
@@ -682,7 +683,6 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                 continue
             if not exists.get(entry.title):
                 continue  # 页面还没建，等 build 出来再算
-            target = resolved.get(entry.title, entry.title)
             if participants_of is not None and not belongs_to_season(
                     section.season, target, participants_of):
                 # 同名不同曲，页面是别的赛季的歌：算进来就会给这一季添一个假数字

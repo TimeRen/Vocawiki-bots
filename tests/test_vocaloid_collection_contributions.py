@@ -9,11 +9,22 @@ from bots.vocaloid_collection_contributions import (
 
 
 class FakeSite:
+    def __init__(self, redirects=None):
+        self.redirects = redirects or {}
+
     def simple_request(self, **kwargs):
+        self.titles = kwargs["titles"].split("|")
         return self
 
     def submit(self):
-        return {"query": {"pages": []}}
+        resolved = {title: self.redirects.get(title, title) for title in self.titles}
+        pages = [{"title": title} for title in dict.fromkeys(resolved.values())]
+        redirects = [
+            {"from": title, "to": target}
+            for title, target in resolved.items()
+            if title != target
+        ]
+        return {"query": {"pages": pages, "redirects": redirects}}
 
 
 class TestCountByListed(TestCase):
@@ -28,5 +39,25 @@ class TestCountByListed(TestCase):
         legend = Legend(colour_to_name={colour: "贡献者"})
 
         counts = count_by_listed(FakeSite(), sections, legend, {})
+
+        self.assertEqual(counts["2021秋"]["#000000"], 17)
+
+    def test_redirect_titles_are_counted_as_one_song_per_season(self):
+        colour = "#000000"
+        sections = [
+            Section("2021秋", "TOP100", [
+                Entry("Entelecheia", [colour]),
+                *[Entry(f"主榜曲目{i}", [colour]) for i in range(14)],
+            ]),
+            Section("2021秋", "ROOKIE", [
+                Entry("新人曲目A", [colour]),
+                Entry("新人曲目B", [colour]),
+                Entry("隐德来希", [colour]),
+            ]),
+        ]
+        legend = Legend(colour_to_name={colour: "贡献者"})
+        site = FakeSite(redirects={"隐德来希": "Entelecheia"})
+
+        counts = count_by_listed(site, sections, legend, {})
 
         self.assertEqual(counts["2021秋"]["#000000"], 17)

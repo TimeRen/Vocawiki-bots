@@ -23,6 +23,7 @@ become vocawiki-contrib          # 提示符变成 tools.vocawiki-contrib@...
 pwd                              # 应该是 /data/project/vocawiki-contrib
 git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
 cd ~/Vocawiki-bots
+ls bots/vocaloid_collection_contributions.py   # 确认 clone 真的成功
 ```
 
 如果之前在个人 home 里 clone 过，删掉那份，别留着混淆。**注意先 `cd ~` 再删**，
@@ -46,6 +47,17 @@ chmod 600 ~/Vocawiki-bots/user-password.py
 
 后缀是 Special:BotPasswords 里 "Renjian-bot@后缀" 中 `@` 后面的部分，别写成
 `Renjian-bot@后缀` 当用户名。
+
+## 自检（下一步之前、或任何时候卡住时）
+
+先让脚本自己检查缺什么：
+
+```bash
+cd ~/Vocawiki-bots && ./deploy/toolforge/preflight.sh
+```
+
+它会逐项报告仓库、`user-password.py`（含权限）、`pyvenv`、工具账号
+kubeconfig 是否就位，并直接打印该补的命令。全绿再往下走。
 
 ## 4. 建 venv（必须在 job 容器里做）
 
@@ -135,6 +147,22 @@ toolforge jobs list          # 能看到任务才算进去了
 
 当前目录已经被删掉了（比如站在 `~/Vocawiki-bots` 里执行了 `rm -rf ~/Vocawiki-bots`）。
 先 `cd ~` 回到 home 就好，之后的相对路径也会重新变正确。
+
+### `chmod: cannot access '.../user-password.py': No such file or directory`
+
+那一行是**重定向失败**，不是 `chmod` 的问题：目录 `~/Vocawiki-bots` 不存在，
+bash 连文件都建不出来，后面的 `chmod` 自然找不到它。通常是代码没 clone 到工具
+home（clone 到了个人 home 就会被 `become` 挡在外面），或者 clone 那一步根本没成功：
+
+```bash
+ls ~/Vocawiki-bots/bots/vocaloid_collection_contributions.py
+```
+
+没有就先 clone，再 `./deploy/toolforge/preflight.sh` 复核：
+
+```bash
+git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
+```
 
 ### `bad interpreter: No such file or directory`
 

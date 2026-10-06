@@ -150,6 +150,16 @@ cat ~/watcher.out            # entry 脚本已把 stderr 合并进来
 
 `tail -f ~/watcher.out` 可以实时跟着看。
 
+**job 与 SSH 会话无关**：关掉终端（或断网）不会影响它——它是 Kubernetes 上的
+常驻负载，由 Toolforge 托管并在退出后自动重启。要停只能显式删掉：
+
+```bash
+toolforge jobs delete watcher
+```
+
+`jobs.yaml` 里配了 `emails: onfailure`，所以它挂掉时会给你发邮件——不用一直盯着
+终端。
+
 ## 更新代码
 
 ```bash

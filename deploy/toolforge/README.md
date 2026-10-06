@@ -13,11 +13,22 @@
 
 ## 2. 进入工具账号并取代码
 
+**先 `become` 再干活**：`toolforge jobs` 要读工具账号里的 kubeconfig
+（`/data/project/<工具名>/.kube/config`），而且 job 的工作目录就是工具 home。
+在跳板机个人账号下跑，既建不了 job，clone 出来的代码 job 也看不到。
+
 ```bash
 ssh <你的shell用户名>@login.toolforge.org
 become vocawiki-contrib          # 提示符变成 tools.vocawiki-contrib@...
+pwd                              # 应该是 /data/project/vocawiki-contrib
 git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
 cd ~/Vocawiki-bots
+```
+
+如果之前在个人 home 里 clone 过，删掉那份，别留着混淆：
+
+```bash
+rm -rf ~/Vocawiki-bots           # 在 become 之前、个人账号下执行
 ```
 
 ## 3. 放机器人密码
@@ -97,3 +108,32 @@ toolforge jobs restart watcher   # 常驻 job 不会自动重载代码
 - `data/` 是创建者缓存，会随仓库目录一起留在共享存储上，别删（删了只是变慢）。
 - 想用环境变量传密钥可以用 `toolforge envvars`，但本仓库读的是
   `user-password.py`，两种方式选一种即可。
+
+## 排错
+
+### `KubernetesConfigFileNotFoundException` / `Failed to load configuration, did you forget to run 'become <mytool>'?`
+
+`toolforge jobs` 是在**个人账号**下跑的，读的是个人 home 里不存在的
+`/mnt/nfs/labstore-secondary-tools-home/<用户名>/.kube/config`。先切进工具账号：
+
+```bash
+become <工具名>
+toolforge jobs list          # 能看到任务才算进去了
+```
+
+`become: no such tool '<工具名>'` 说明工具还没建好，等几分钟；刚建完工具还要
+**退出 SSH 重登**一次。
+
+### `bad interpreter: No such file or directory`
+
+脚本带了 Windows 的 CRLF。仓库里 `.gitattributes` 已经强制 `*.sh` 用 LF，
+但如果是在 Windows 上改完再拷上去的，在服务器上修一下：
+
+```bash
+sed -i 's/\r$//' deploy/toolforge/*.sh
+```
+
+### `No module named 'pywikibot'`
+
+venv 没建好或没被复用。job 里用的是 `$HOME/pyvenv/bin/python`，
+重跑第 4 步的 `bootstrap-venv` 即可。

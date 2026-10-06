@@ -96,10 +96,10 @@ KNOWN_BOTS = {
     "滥用过滤器", "萌百娘", "重定向修复器",
 }
 
-# Sections whose entries are counted in 相关统计. REMIX and friends are excluded.
+# Sections counted in 相关统计: main rankings and ROOKIE only.
 def is_counted_section(name: str) -> bool:
     upper = name.upper()
-    return upper.startswith("TOP") or upper.startswith("ROOKIE") or name.lower().startswith("neta")
+    return upper.startswith("TOP") or upper.startswith("ROOKIE")
 
 
 HEX = r"#[0-9A-Fa-f]{3,8}"

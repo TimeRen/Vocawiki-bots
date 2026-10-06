@@ -119,11 +119,15 @@ toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 
 | job | 类型 | 作用 |
 | --- | --- | --- |
-| `watcher` | continuous | 常驻监听 recentchanges，近实时维护；退出后自动重启 |
+| `watcher` | continuous | 常驻监听 recentchanges，近实时维护；每 30 分钟再整体兜底一轮；退出后自动重启 |
 
-它启动时就整体跑一轮（含图表），之后每 30 分钟再刷一次图表，所以不需要额外的
-每小时兜底。GitHub Actions 那边每 30 分钟跑一轮，负责 Toolforge 整体挂掉时的
-兜底。
+它启动时就整体跑一轮（含图表），之后**每 30 分钟无条件再整体跑一轮**（`watch.sh`
+里的 `--sweep-interval 1800`，不受"有没有触发"影响）。这就是原先 GitHub Actions
+那条 30 分钟兜底，现在由 watcher 自己扛，不再依赖 GitHub 那边不可靠的 schedule；
+新建条目、watcher 认不出来的改动，最迟 30 分钟内都会被补上。
+
+GitHub Actions 那边仍然每 30 分钟跑一轮，但它现在只负责 **Toolforge 整体挂掉**
+这一种情况——watcher 自己都没了，它内部的定时器自然也停了，只有外面的人才跑得动。
 
 > **如果之前载入过带 `hourly` 的旧定义**，`jobs load` 只会更新文件里出现的
 > job，**不会删掉**已经存在的 `hourly`。要手工删：
@@ -200,10 +204,10 @@ git config core.fileMode false
 - `data/` 是创建者缓存，会随仓库目录一起留在共享存储上，别删（删了只是变慢）。
 - 想用环境变量传密钥可以用 `toolforge envvars`，但本仓库读的是
   `user-password.py`，两种方式选一种即可。
-- **GitHub Actions 是兜底**：`watcher` 上来之后它只每 30 分钟跑一轮、不再驻留
-  watch。两边偶尔同时写同一页时会撞编辑冲突，`save_page()` 会放弃那一轮并重读
-  页面，下一次触发再算——所以看到 `页面刚被其他进程编辑，放弃本轮` 属于正常，
-  不是故障。
+- **GitHub Actions 只兜 Toolforge 整体挂掉**：30 分钟的周期性维护已经由 watcher
+  自己做了（`--sweep-interval`），那边不再驻留 watch，每次只跑一轮。两边偶尔
+  同时写同一页时会撞编辑冲突，`save_page()` 会放弃那一轮并重读页面，下一次触发
+  再算——所以看到 `页面刚被其他进程编辑，放弃本轮` 属于正常，不是故障。
 
 ## 排错
 

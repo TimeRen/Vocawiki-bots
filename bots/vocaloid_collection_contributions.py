@@ -32,15 +32,20 @@ The bot can:
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``watch``   - near-real-time: poll ``list=recentchanges`` and maintain the
-  page whenever a listed entry, or the page itself, changes.  ``--max-runtime``
-  makes the loop return on its own after N seconds (0 = forever); the Toolforge
-  job runs it continuously instead, relying on the platform to restart it.
+  page whenever a listed entry, or the page itself, changes.  A full pass also
+  runs unconditionally every ``--sweep-interval`` seconds (default 1800), so a
+  change polling cannot see - a page whose title is not in the list yet, say -
+  is still picked up; that is the periodic net the GitHub Actions cron used to
+  provide.  ``--max-runtime`` makes the loop return on its own after N seconds
+  (0 = forever); the Toolforge job runs it continuously instead, relying on the
+  platform to restart it.
 
 The page is maintained from two places: the Toolforge ``watcher`` job
-(``deploy/toolforge/``, near-real-time) and this repository's GitHub Actions
-workflow (a fallback that runs a single pass every 30 minutes).  Both may want
-to write at the same moment, so a save that loses the race is abandoned and
-retried by the next pass instead of failing.
+(``deploy/toolforge/``, near-real-time plus its own 30-minute sweep) and this
+repository's GitHub Actions workflow, which is now only the fallback for when
+Toolforge is down altogether.  Both may want to write at the same moment, so a
+save that loses the race is abandoned and retried by the next pass instead of
+failing.
 
 Everything runs in dry-run mode unless ``--write`` is given.
 
@@ -1163,13 +1168,21 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     return save_page(page, text, summary)
 
 
-def watch(site, *, interval: float, settle: float, stats_interval: float,
+def watch(site, *, interval: float, settle: float, sweep_interval: float,
           basis: str, write: bool, summary: Optional[str],
           max_runtime: float = 0) -> None:
     """Near-real-time mode: poll recent changes and maintain the page on the fly.
 
     voca.wiki runs no EventStreams/EventBus, so there is no push stream; polling
     ``list=recentchanges`` every few seconds is the closest available.
+
+    Polling alone can starve: a page whose title is not in the list yet (the
+    cell still holds an older or English title) never counts as a relevant
+    change, so nothing wakes the watcher.  A full pass therefore also runs
+    unconditionally every ``sweep_interval`` seconds - the periodic fallback the
+    GitHub Actions cron used to provide, folded in here so the cadence no longer
+    depends on an unreliable scheduler.  0 disables it.
+
     ``max_runtime`` (seconds, 0 = forever) makes the loop return on its own so a
     CI job can bow out before the runner's hard limit kills it.
     """
@@ -1183,6 +1196,7 @@ def watch(site, *, interval: float, settle: float, stats_interval: float,
 
     refresh()
     pywikibot.output(f"监听 {PAGE_TITLE}：{len(relevant)} 个条目，轮询间隔 {interval}s"
+                     + (f"，兜底间隔 {sweep_interval:.0f}s" if sweep_interval else "")
                      + (f"，本次最多运行 {max_runtime:.0f}s" if deadline else ""))
 
     seen: set = set()
@@ -1191,10 +1205,10 @@ def watch(site, *, interval: float, settle: float, stats_interval: float,
     last_relevant = 0.0
     actions = {"entries", "counts", "colour", "report"}
 
-    # 立刻跑一轮，并带上 stats：定时事件很稀疏，每次开工都该把图表刷到最新，
-    # 之后才受 stats_interval 节流（批量取创建者后这一轮很便宜）
+    # 立刻整体跑一轮（含图表）：定时事件很稀疏，每次开工都该把图表刷到最新。
+    # 之后触发到了就即时跑一轮，没有触发则由 sweep_interval 定时兜底。
     run_once(site, actions | {"stats"}, basis, write, summary)
-    last_stats = time.monotonic()
+    last_sweep = time.monotonic()
 
     while True:
         if deadline and time.monotonic() >= deadline:
@@ -1222,11 +1236,15 @@ def watch(site, *, interval: float, settle: float, stats_interval: float,
         if len(seen) > 20000:
             seen.clear()
 
-        if dirty and time.monotonic() - last_relevant >= settle:
+        now = time.monotonic()
+        # 定时兜底：即使一个触发都没有（新建条目还没进列表时 watcher 认不出它），
+        # 也要在 sweep_interval 内整体跑一轮，把漏掉的改动补上。
+        sweep_due = bool(sweep_interval) and now - last_sweep >= sweep_interval
+        if sweep_due or (dirty and now - last_relevant >= settle):
             todo = set(actions)
-            if time.monotonic() - last_stats >= stats_interval:
+            if sweep_due:
                 todo.add("stats")
-                last_stats = time.monotonic()
+                last_sweep = now
             try:
                 run_once(site, todo, basis, write, summary)
                 refresh()
@@ -1250,8 +1268,10 @@ def main() -> None:
                         help="watch: seconds between recent-changes polls (default 20)")
     parser.add_argument("--settle", type=float, default=15,
                         help="watch: wait this long after the last relevant change (default 15)")
-    parser.add_argument("--stats-interval", type=float, default=1800,
-                        help="watch: minimum seconds between chart recomputations (default 1800)")
+    parser.add_argument("--sweep-interval", type=float, default=1800,
+                        help="watch: seconds between unconditional full passes - the "
+                             "safety net for changes polling cannot see (default 1800; "
+                             "0 disables)")
     parser.add_argument("--max-runtime", type=float, default=0,
                         help="watch: give up after this many seconds (0 = run forever); "
                              "used by CI so a long job ends before the 6h runner limit")
@@ -1261,7 +1281,7 @@ def main() -> None:
     if args.action == "watch":
         try:
             watch(site, interval=args.interval, settle=args.settle,
-                  stats_interval=args.stats_interval, basis=args.basis,
+                  sweep_interval=args.sweep_interval, basis=args.basis,
                   write=args.write, summary=args.summary,
                   max_runtime=args.max_runtime)
         except KeyboardInterrupt:

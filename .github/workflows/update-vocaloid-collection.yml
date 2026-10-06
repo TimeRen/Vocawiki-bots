@@ -21,12 +21,12 @@ name: Update VOCALOID Collection contribution list
 #            -H "Accept: application/vnd.github+json" \
 #            https://api.github.com/repos/TimeRen/Vocawiki-bots/dispatches \
 #            -d '{"event_type":"update-vocaloid-collection"}'
-# 定位：**兜底**。真正的近实时维护在 Toolforge 上跑（见 deploy/toolforge/，
-# watcher 常驻监听），所以这里每次只跑一轮就退出，不再驻留 watch：
-# 两个写入方同时改同一页会产生编辑冲突，而且 schedule 补投本身还会把正在跑的
-# watch 取消掉（实测 watch 只活了几分钟就因 "The runner has received a shutdown
-# signal" 失败）。保留本工作流，是为了在 Toolforge 挂掉或改动还没同步过去时
-# 仍然有人维护页面。
+# 定位：**只兜 Toolforge 整体挂掉**。30 分钟的周期性维护已经搬到 watcher 自己身上
+# 了（deploy/toolforge/watch.sh 的 --sweep-interval 每 30 分钟无条件整体跑一轮），
+# 所以这里的 schedule 不再是"每 30 分钟保证有人跑"的依靠，只是 Toolforge 整体不可用
+# 时的最后一道防线。这里每次只跑一轮就退出，不再驻留 watch：两个写入方同时改同一页
+# 会产生编辑冲突，而且 schedule 补投本身还会把正在跑的 watch 取消掉（实测 watch 只
+# 活了几分钟就因 "The runner has received a shutdown signal" 失败）。
 
 on:
   schedule:

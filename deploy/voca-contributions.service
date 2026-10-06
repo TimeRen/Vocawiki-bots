@@ -10,8 +10,8 @@ Type=simple
 WorkingDirectory=/opt/Vocawiki-bots
 Environment=PYTHONIOENCODING=utf-8
 Environment=PYTHONUNBUFFERED=1
-# 轮询间隔 20s，抖动 15s；图表重算最多每 30 分钟一次
-ExecStart=/opt/Vocawiki-bots/.venv/bin/python bots/vocaloid_collection_contributions.py watch --interval 20 --settle 15 --stats-interval 1800 --write
+# 轮询间隔 20s，抖动 15s；每 30 分钟无条件整体跑一轮（含图表）
+ExecStart=/opt/Vocawiki-bots/.venv/bin/python bots/vocaloid_collection_contributions.py watch --interval 20 --settle 15 --sweep-interval 1800 --write
 Restart=always
 RestartSec=10
 # 运行用户（需能读写 /opt/Vocawiki-bots 与 user-password.py）

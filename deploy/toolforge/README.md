@@ -142,6 +142,9 @@ cat ~/once.out
 
 ## 7. 查看状态与日志
 
+**先 `become <工具名>`**：`toolforge jobs` 只在工具账号下能用，在个人账号下会报
+`Failed to load configuration, did you forget to run 'become <mytool>'?`。
+
 ```bash
 toolforge jobs list
 toolforge jobs show watcher

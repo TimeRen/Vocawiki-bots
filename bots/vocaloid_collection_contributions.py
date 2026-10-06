@@ -16,19 +16,26 @@ The bot can:
 * ``entries`` - 按赛季榜单模板（``Template:The VOCALOID Collection2023夏`` 这类
   Navbox）补正贡献列表：模板按名次列出参赛作品，机器人据此把每个名次格子的
   链接统一改写成规范标题（死链修复、重定向写法归一），新公布的排名不需要人工誊抄；
-  模板里还没有对应页面的标题只报告，不动页面。
+  模板里还没有对应页面的标题只报告，不动页面。模板标题对应的页面若不属于
+  **本赛季**（同名不同曲：2022秋 第 81 名的模板标题 ``スワンプマン`` 其实是
+  2026夏 的 ``SWAMPMAN`` 的重定向）也不动，免得把另一首歌的名字安到这一季的
+  格子上、甚至抹掉人工改过的链接。
 * ``counts``  - recompute every section header ``(已创建/总数)``.
 * ``colour``  - colour uncoloured cells whose page exists, using the creator's
   colour from the legend.  A link whose target does not exist is matched
   against the real page first (e.g. ``[[FrailLaVillanos]]`` for the existing
   ``FrailL'aVillanos``), and a link that points at a redirect is rewritten to
   its target (``[[毒deンぱ]]`` -> ``[[毒电波]]``); both are corrected while
-  colouring.
+  colouring.  A page that is not a participant of that season is left alone:
+  the same name is a different song, and colouring it would credit its
+  creator (and its season) here.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
   A cell's colour is the hand-made creator annotation and wins outright; only
-  entries without a colour fall back to the creator of the local page.  Some
-  of the chart's numbers come from bookkeeping outside the wiki and cannot be
-  derived at all, so a cell is only ever raised, never lowered.
+  entries without a colour fall back to the creator of the local page, and only
+  when that page is a participant of the season - a same-name song from another
+  season is ignored here as well.  Some of the chart's numbers come from
+  bookkeeping outside the wiki and cannot be derived at all, so a cell is only
+  ever raised, never lowered.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``watch``   - near-real-time: poll ``list=recentchanges`` and maintain the
@@ -68,7 +75,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote
 
 import pywikibot
@@ -298,16 +305,33 @@ def season_templates(site, seasons: Iterable[str]) -> Dict[str, Dict[str, Dict[i
     return wanted
 
 
-def template_participants(site, season: str) -> List[str]:
-    """Pages that transclude the season's template (i.e. 参加该赛季的歌曲）。"""
+def template_participants(site, season: str) -> Optional[List[str]]:
+    """Pages that transclude the season's template (i.e. 参加该赛季的歌曲）。
+
+    查询失败返回 ``None``：调用方不能把「没查到」当成「没有」。
+    """
     try:
         data = site.simple_request(action="query", list="embeddedin", formatversion="2",
                                    eititle=f"{SEASON_TEMPLATE}{season}", einamespace=0,
                                    eilimit=500).submit()
     except Exception as exc:  # noqa: BLE001
         pywikibot.error(f"{season}: 无法读取模板引用 ({exc})")
-        return []
+        return None
     return [entry["title"] for entry in data.get("query", {}).get("embeddedin", [])]
+
+
+def belongs_to_season(season: str, target: str,
+                      participants_of: Callable[[str], Optional[set]]) -> bool:
+    """``target`` 能不能算作 ``season`` 的参赛曲目（页面挂了该赛季的 Navbox）。
+
+    同名不同曲会骗过机器人：2022秋 榜单第 81 名的模板标题写作 ``スワンプマン``，
+    而它只是 2026夏 的 ``SWAMPMAN`` 的重定向，重定向页面本身又是 Kim8394 建的。
+    照它改写链接或上色，就会把 2026夏 那首歌连同 Kim8394 一起算进 2022秋。
+    所以只认挂着**本赛季**模板的页面。
+    名单查不到（``None``）时不据此下结论，放行。
+    """
+    members = participants_of(season)
+    return True if members is None else target in members
 
 
 def entry_diffs(text: str, wanted: Dict[str, Dict[str, Dict[int, str]]]
@@ -631,7 +655,9 @@ def season_window(season: str, end_shift_days: int = 0) -> Tuple[datetime, datet
 
 
 def count_by_listed(site, sections: List[Section], legend: Legend,
-                    cache: Dict[str, Optional[str]]) -> Dict[str, Counter]:
+                    cache: Dict[str, Optional[str]],
+                    participants_of: Optional[Callable[[str], Optional[set]]] = None
+                    ) -> Dict[str, Counter]:
     result: Dict[str, Counter] = defaultdict(Counter)
     seen: Dict[str, set] = defaultdict(set)
     counted = [s for s in sections if is_counted_section(s.name)]
@@ -657,6 +683,10 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
             if not exists.get(entry.title):
                 continue  # 页面还没建，等 build 出来再算
             target = resolved.get(entry.title, entry.title)
+            if participants_of is not None and not belongs_to_season(
+                    section.season, target, participants_of):
+                # 同名不同曲，页面是别的赛季的歌：算进来就会给这一季添一个假数字
+                continue
             user = creator_of(site, target, cache)
             if user and user not in KNOWN_BOTS:
                 result[section.season][legend.identity(user)] += 1
@@ -895,26 +925,29 @@ def text_colour(background: str) -> str:
 
 def plan_colours(site, sections: List[Section], legend: Legend,
                  cache: Dict[str, Optional[str]],
-                 exists: Dict[str, bool]) -> Dict[str, Tuple[str, str]]:
+                 exists: Dict[str, bool],
+                 participants_of: Optional[Callable[[str], Optional[set]]] = None
+                 ) -> Dict[str, Tuple[str, str]]:
     """entry title -> (background colour, page title to link to).
 
     Only entries whose page exists are coloured; a link whose target does not
     exist is matched against the real title first and corrected in the same
-    edit (``[[FrailLaVillanos]]`` -> ``[[FrailL'aVillanos]]``).
+    edit (``[[FrailLaVillanos]]`` -> ``[[FrailL'aVillanos]]``).  A page that is
+    not a participant of that season is skipped: same name, different song.
     """
-    uncoloured = [e for s in sections for e in s.entries if not e.colours]
+    uncoloured = [(s.season, e) for s in sections for e in s.entries if not e.colours]
     resolved: Dict[str, str] = {}
-    batch_exists(site, (e.title for e in uncoloured), exists, resolved)
+    batch_exists(site, (e.title for _, e in uncoloured), exists, resolved)
     index: Optional[Dict[str, str]] = None
     plan: Dict[str, Tuple[str, str]] = {}
     targets: Dict[str, str] = {}
-    for entry in uncoloured:
+    for _, entry in uncoloured:
         if not page_exists(site, entry.title, exists):
             continue
         # 链接指向重定向时按真页面取创建者，并把链接改写成真标题
         targets[entry.title] = resolved.get(entry.title, entry.title)
     batch_creators(site, targets.values(), cache)
-    for entry in uncoloured:
+    for season, entry in uncoloured:
         if entry.title in plan:
             continue
         if entry.title in targets:
@@ -926,6 +959,11 @@ def plan_colours(site, sections: List[Section], legend: Legend,
             if not target:
                 continue
             exists[target] = True
+        if participants_of is not None and not belongs_to_season(
+                season, target, participants_of):
+            pywikibot.warning(f"{season}/{entry.title}: {target} 不是本赛季的参赛曲目，"
+                              f"同名不同曲，跳过上色")
+            continue
         user = creator_of(site, target, cache)
         if not user or user in KNOWN_BOTS:
             continue
@@ -1091,15 +1129,26 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     created = None
     plan: Dict[str, Tuple[str, str]] = {}
     exists: Dict[str, bool] = {}
+    seasons = list(dict.fromkeys(s.season for s in sections))
+    participant_lists: Dict[str, Optional[set]] = {}
+
+    def participants_of(season: str) -> Optional[set]:
+        """该赛季参赛页面的标题集合；``None`` 表示没查到，不据此下结论。"""
+        if season not in participant_lists:
+            found = template_participants(site, season)
+            participant_lists[season] = set(found) if found is not None else None
+        return participant_lists[season]
+
     if "entries" in actions:
         # 赛季模板是「哪些歌、第几名、条目该叫什么」的权威来源：只要模板里的标题
         # 有对应页面，就把名次格子统一改写成规范标题（重定向写法一并归一），
         # 模板里还没有页面的标题只报告、不动。
-        wanted = season_templates(site, dict.fromkeys(s.season for s in sections))
+        wanted = season_templates(site, seasons)
         diffs = entry_diffs(text, wanted)
         fixes: Dict[Tuple[str, str, int], str] = {}
         repaired = 0
         normalised = 0
+        foreign: List[str] = []
         if diffs:
             probe: Dict[str, bool] = {}
             redirects: Dict[str, str] = {}
@@ -1111,6 +1160,12 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
                 # 否则会把链接改成一个绕回原地的重定向。
                 target = redirects.get(want, want)
                 if target == current:
+                    continue
+                if not belongs_to_season(season, target, participants_of):
+                    # 同名不同曲：2022秋 的 "スワンプマン" 指向 2026夏 的 SWAMPMAN。
+                    # 改写会把另一首歌的名字安到这一季，也等于抹掉人工改过的链接。
+                    foreign.append(f"{season}/{name} {rank}: {current}"
+                                   f"（模板标题 {want} 不是本赛季的参赛曲目）")
                     continue
                 fixes[(season, name, rank)] = target
                 if not probe.get(current):
@@ -1124,8 +1179,12 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
             pywikibot.output(f"  {note}")
         if len(notes) > 20:
             pywikibot.output(f"  ……另有 {len(notes) - 20} 处未逐条列出")
+        for note in foreign[:20]:
+            pywikibot.output(f"  同名不同曲，不改写: {note}")
+        if len(foreign) > 20:
+            pywikibot.output(f"  ……另有 {len(foreign) - 20} 处同名不同曲未逐条列出")
         missing = [f"{season}/{title}" for season, secs in wanted.items()
-                   for title in sorted(set(template_participants(site, season))
+                   for title in sorted((participants_of(season) or set())
                                        - {t for ranks in secs.values() for t in ranks.values()}
                                        - {"The VOCALOID Collection"})]
         if missing:
@@ -1134,7 +1193,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         if synced:
             sections = parse_sections(text)
     if "colour" in actions:
-        plan = plan_colours(site, sections, legend, cache, exists)
+        plan = plan_colours(site, sections, legend, cache, exists, participants_of)
         text, coloured = apply_colours(text, plan)
         pywikibot.output(f"上色: 处理 {coloured} 个单元格（可自动上色条目 {len(plan)}）")
     if actions & {"counts", "report"}:
@@ -1143,7 +1202,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         text, changed = recompute_counts(text, created)
         pywikibot.output(f"计数: 更新 {changed} 个小节")
     if "stats" in actions:
-        counts = (count_by_listed(site, sections, legend, cache)
+        counts = (count_by_listed(site, sections, legend, cache, participants_of)
                   if basis == "listed" else count_by_window(site, sections))
         text, _ = render_chart(text, sections, legend, counts)
         pywikibot.output(f"统计: 依据 {basis} 重算图表")

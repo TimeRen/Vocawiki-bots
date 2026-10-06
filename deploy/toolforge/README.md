@@ -83,12 +83,15 @@ toolforge jobs run bootstrap-venv --image python3.13 --wait \
 ```bash
 toolforge jobs run dryrun --image python3.13 --wait \
   --command "./Vocawiki-bots/deploy/toolforge/run-once.sh --dry-run"
-tail ~/dryrun.out
+cat ~/dryrun.out
 ```
 
 日志里应出现 `已登录：Renjian-bot`。确认没问题再往下走；去掉 `--dry-run`
-就是正式写入。干跑失败时错误会写在 `~/dryrun.err`（脚本本身缺仓库或缺 venv
-也会在这里给出该补的命令）。
+就是正式写入。
+
+> **日志在 `.out` 里**：entry 脚本已经把 stderr 合并进 stdout
+> （`pywikibot.output()` 写的是 stderr，不合并的话 `工具名.out` 会是空的、
+> 内容全在 `工具名.err`）。如果 `.out` 仍然是空的，看 `~/dryrun.err`。
 
 ## 6. 载入常驻任务
 
@@ -108,8 +111,10 @@ toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 ```bash
 toolforge jobs list
 toolforge jobs show watcher
-tail -f ~/watcher.out        # 或 jobs.yaml 里 filelog-stdout 指定的路径
+cat ~/watcher.out            # entry 脚本已把 stderr 合并进来
 ```
+
+`tail -f ~/watcher.out` 可以实时跟着看。
 
 ## 更新代码
 
@@ -170,6 +175,17 @@ ls ~/Vocawiki-bots/bots/vocaloid_collection_contributions.py
 
 ```bash
 git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
+```
+
+### job 显示 `completed` 但 `工具名.out` 是空的
+
+pywikibot 的 `output()` 写 **stderr**，而 Toolforge 的 `filelog-stdout` 只收
+stdout，所以内容全在 `工具名.err` 里。entry 脚本现在用 `2>&1` 合并了，但如果你
+在用旧版脚本（没 `git pull`），直接看另一个文件：
+
+```bash
+tail ~/dryrun.out        # 可能是空的
+tail ~/dryrun.err        # 真正的内容在这里
 ```
 
 ### job 报 `exitcode 127`（Status: Failed for 3s）

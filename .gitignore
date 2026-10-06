@@ -8,6 +8,7 @@ texts/
 # pywikibot generated files
 *.lwp
 *.ctrl
+apicache/
 apicache-py3/
 logs/
 

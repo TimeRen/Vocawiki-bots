@@ -6,6 +6,7 @@
 #     --command "./Vocawiki-bots/deploy/toolforge/run-once.sh --dry-run"
 source "$(dirname "$0")/common.sh"
 
+# pywikibot.output() 写的是 stderr，合并到一个流里，工具名.out 才是完整日志
 args=(entries,counts,colour,report,stats)
 if [[ "${1:-}" == "--dry-run" ]]; then
     shift            # 只打印将要做的改动，不保存页面
@@ -13,4 +14,4 @@ else
     args+=(--write)
 fi
 
-exec "$VOCA_PYTHON" bots/vocaloid_collection_contributions.py "${args[@]}" "$@"
+exec "$VOCA_PYTHON" bots/vocaloid_collection_contributions.py "${args[@]}" "$@" 2>&1

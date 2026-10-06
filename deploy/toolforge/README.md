@@ -230,6 +230,28 @@ git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
 rm -f ~/dryrun.out ~/dryrun.err
 ```
 
+### 常驻 job 显示 `Status: Failed for 21m48s`
+
+那个时长是**从它第一次失败开始累积**的，不会因为 `jobs load` 更新了定义就归零；
+运行实例也不一定自动重起。先看真正的报错，再强制重启：
+
+```bash
+tail -50 ~/watcher.err          # 旧脚本没合并流时错误在这
+toolforge jobs restart watcher
+toolforge jobs list             # 成功应为 Running for ...，不再是 Failed
+```
+
+对号入座：
+
+| `watcher.err` 里看到 | 原因 | 怎么办 |
+| --- | --- | --- |
+| `./deploy/toolforge/watch.sh: not found` | 旧定义的残留（路径少一层） | 重启即可，新定义已带 `Vocawiki-bots/` |
+| `找不到 venv：…/pyvenv/bin/python` | venv 没了 | 重跑第 4 步 |
+| `找不到仓库：…` | 代码不在 `~/Vocawiki-bots` | clone 到该路径 |
+
+`toolforge jobs list` 里 `hourly` 长期显示 `Pending` 是正常的——它是 `@hourly`
+调度 job，只在触发点之间排队。
+
 ### job 显示 `completed` 但 `工具名.out` 是空的
 
 pywikibot 的 `output()` 写 **stderr**，而 Toolforge 的 `filelog-stdout` 只收

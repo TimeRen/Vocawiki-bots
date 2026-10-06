@@ -169,6 +169,11 @@ toolforge jobs delete watcher
 
 ## 更新代码
 
+**先 `become <工具名>`**（同第 7 节）：`~/Vocawiki-bots` 和 `toolforge jobs` 都只
+存在于工具账号里。在个人账号下 `cd ~/Vocawiki-bots` 会直接报
+`No such file or directory`（那里的 `~` 是你的个人 home），`toolforge jobs` 也会
+因为找不到工具账号的 kubeconfig 而失败。
+
 ```bash
 cd ~/Vocawiki-bots && git pull
 toolforge jobs restart watcher   # 常驻 job 不会自动重载代码

@@ -148,6 +148,10 @@ toolforge jobs restart watcher   # 常驻 job 不会自动重载代码
 - `data/` 是创建者缓存，会随仓库目录一起留在共享存储上，别删（删了只是变慢）。
 - 想用环境变量传密钥可以用 `toolforge envvars`，但本仓库读的是
   `user-password.py`，两种方式选一种即可。
+- **GitHub Actions 是兜底**：`watcher` 上来之后它只每 30 分钟跑一轮、不再驻留
+  watch。两边偶尔同时写同一页时会撞编辑冲突，`save_page()` 会放弃那一轮并重读
+  页面，下一次触发再算——所以看到 `页面刚被其他进程编辑，放弃本轮` 属于正常，
+  不是故障。
 
 ## 排错
 

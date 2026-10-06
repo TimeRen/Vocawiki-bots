@@ -11,7 +11,7 @@ name: Update VOCALOID Collection contribution list
 #
 # 触发方式与可靠性（2026-10-04 实测）：
 #   · push 到 main 且改动到机器人脚本或本工作流 -> 立即运行（改完即可验证）
-#   · schedule 每 5 分钟（UTC）——实测**很不可靠**：工作流注册后 8 小时内约 96 次
+#   · schedule 每 30 分钟（UTC）——实测**很不可靠**：工作流注册后 8 小时内约 96 次
 #     机会只投递了 1 次，且时间落在 12:13 这种非 5 倍数分钟上，属于 GitHub 调度器
 #     延迟后补投。官方说明 schedule 是尽力而为，负载高时会延迟甚至丢事件。
 #     所以 cron 故意避开整点（整点是官方点名的高负载时段），但别指望它准时。
@@ -21,13 +21,17 @@ name: Update VOCALOID Collection contribution list
 #            -H "Accept: application/vnd.github+json" \
 #            https://api.github.com/repos/TimeRen/Vocawiki-bots/dispatches \
 #            -d '{"event_type":"update-vocaloid-collection"}'
-#     想要真正的实时更新，请用 deploy/voca-contributions.service 常驻 watch 模式，
-#     GitHub 的 schedule 只能当作兜底。
+# 定位：**兜底**。真正的近实时维护在 Toolforge 上跑（见 deploy/toolforge/，
+# watcher 常驻监听 + hourly 兜底），所以这里每次只跑一轮就退出，不再驻留 watch：
+# 两个写入方同时改同一页会产生编辑冲突，而且 schedule 补投本身还会把正在跑的
+# watch 取消掉（实测 watch 只活了几分钟就因 "The runner has received a shutdown
+# signal" 失败）。保留本工作流，是为了在 Toolforge 挂掉或改动还没同步过去时
+# 仍然有人维护页面。
 
 on:
   schedule:
-    # 每 5 分钟，但跳过整点（分钟 0），降低被延迟/丢弃的概率
-    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
+    # 每 30 分钟，跳过整点（分钟 0）
+    - cron: '7,37 * * * *'
   push:
     branches: [main]
     paths:
@@ -48,8 +52,8 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-    # GitHub 单个 job 上限 6 小时；watch 用 --max-runtime 提前收工
-    timeout-minutes: 360
+    # 一轮维护约 30 秒，给足余量即可
+    timeout-minutes: 15
     env:
       PYTHONIOENCODING: utf-8
       VOCA_USERNAME: ${{ secrets.VOCA_USERNAME }}
@@ -87,12 +91,6 @@ jobs:
           # 一轮跑全：按模板补名次 + 上色 + 计数 + 报告 + 图表。
           # 图表曾经只在“分钟<5”时才跑，结果 push 触发的运行几乎从不算图表；
           # 现在创建者查询改为批量，冷启动也只需几十个请求，所以每轮都算。
+          # 撞上 Toolforge watcher 正在编辑时，save_page 会放弃本轮并退出 0，
+          # 下一次触发会重新读取再算。
           python bots/vocaloid_collection_contributions.py entries,counts,colour,report,stats --write
-
-      - name: Watch for changes（仅定时/手动/外部心跳触发）
-        # push 触发的运行只做一轮校验；定时事件很稀疏（实测 8 小时才 1 次），
-        # 所以每次触发让机器人驻留几小时，把 cron 的窟窿补成近似连续覆盖。
-        if: github.event_name != 'push'
-        run: |
-          python bots/vocaloid_collection_contributions.py watch \
-            --interval 30 --settle 15 --stats-interval 1800 --max-runtime 19800 --write

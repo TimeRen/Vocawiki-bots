@@ -33,9 +33,14 @@ The bot can:
   not coloured).
 * ``watch``   - near-real-time: poll ``list=recentchanges`` and maintain the
   page whenever a listed entry, or the page itself, changes.  ``--max-runtime``
-  lets a CI job bow out before the runner's 6-hour limit so the next trigger
-  takes over, which is how the unreliable ``schedule`` event still yields
-  near-continuous coverage.
+  makes the loop return on its own after N seconds (0 = forever); the Toolforge
+  job runs it continuously instead, relying on the platform to restart it.
+
+The page is maintained from two places: the Toolforge ``watcher`` job
+(``deploy/toolforge/``, near-real-time) and this repository's GitHub Actions
+workflow (a fallback that runs a single pass every 30 minutes).  Both may want
+to write at the same moment, so a save that loses the race is abandoned and
+retried by the next pass instead of failing.
 
 Everything runs in dry-run mode unless ``--write`` is given.
 
@@ -63,7 +68,7 @@ from urllib.parse import unquote
 
 import pywikibot
 from pywikibot import Page
-from pywikibot.exceptions import NoPageError
+from pywikibot.exceptions import EditConflictError, NoPageError
 
 PAGE_TITLE = "Vocawiki:贡献列表/The VOCALOID Collection"
 DATA_DIR = Path("data")
@@ -1012,25 +1017,58 @@ def ensure_login(site) -> None:
         f"已登录：{site.user()}（权限组：{', '.join(site.userinfo['groups'])}）")
 
 
-def save_page(page: Page, text: str, summary: Optional[str]) -> None:
-    """Save with the bot/tags flags, degrading gracefully if not permitted."""
+def _abandon_round(page: Page, exc: Exception) -> bool:
+    """Drop a save that lost the race, and re-read the page from the wiki."""
+    pywikibot.error(f"页面刚被其他进程编辑，放弃本轮：{exc}")
+    try:
+        # 不清掉本地缓存的话，之后每一轮都会拿着旧版本号去撞同一个冲突
+        page.get(force=True)
+    except Exception as reload_exc:  # noqa: BLE001
+        pywikibot.error(f"重新读取页面失败：{reload_exc}")
+    return False
+
+
+def save_page(page: Page, text: str, summary: Optional[str]) -> bool:
+    """Save, degrading gracefully when the account lacks ``bot``/``changetags``.
+
+    Returns False when someone else edited the page first.  Toolforge's
+    ``watcher`` job and the GitHub Actions fallback both maintain this page, so
+    a race is expected: the round is abandoned rather than overwriting the other
+    writer.
+    """
     page.text = text
     summary = summary or DEFAULT_SUMMARY
     try:
         page.save(summary=summary, minor=True, bot=True, tags="Bot")
-        return
+        return True
+    except EditConflictError as exc:
+        return _abandon_round(page, exc)
     except TypeError:  # older pywikibot: ``bot`` is named ``botflag``
-        page.save(summary=summary, minor=True, botflag=True, tags="Bot")
-        return
+        try:
+            page.save(summary=summary, minor=True, botflag=True, tags="Bot")
+            return True
+        except EditConflictError as exc:
+            return _abandon_round(page, exc)
+        except pywikibot.exceptions.APIError as exc:
+            pywikibot.error(f"带 botflag/tags 保存失败，改用普通保存重试：{exc}")
     except pywikibot.exceptions.APIError as exc:
         # the account may lack the "bot" right or the "changetags" right
         pywikibot.error(f"带 bot/tags 保存失败，改用普通保存重试：{exc}")
-    page.save(summary=summary, minor=True)
+    try:
+        page.save(summary=summary, minor=True)
+        return True
+    except EditConflictError as exc:
+        return _abandon_round(page, exc)
 
 
 def run_once(site, actions, basis: str = "listed", write: bool = False,
              summary: Optional[str] = None) -> bool:
-    """Run one maintenance pass.  Returns True when the page would change."""
+    """Run one maintenance pass.  Returns True when the page changed.
+
+    Returns False when there was nothing to do, and also when the save was
+    skipped because another process (the Toolforge watcher) edited the page
+    first - that round is retried by the next trigger instead.
+    """
     actions = set(actions)
     if write:
         ensure_login(site)
@@ -1122,8 +1160,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         pywikibot.output("\n".join(list(diff)[:200]))
         pywikibot.output("\n[dry-run] 加 --write 以保存。")
         return True
-    save_page(page, text, summary)
-    return True
+    return save_page(page, text, summary)
 
 
 def watch(site, *, interval: float, settle: float, stats_interval: float,

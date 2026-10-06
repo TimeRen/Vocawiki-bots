@@ -25,10 +25,11 @@ git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
 cd ~/Vocawiki-bots
 ```
 
-如果之前在个人 home 里 clone 过，删掉那份，别留着混淆：
+如果之前在个人 home 里 clone 过，删掉那份，别留着混淆。**注意先 `cd ~` 再删**，
+站在目录里删掉它会让 shell 找不到当前目录（`getcwd: cannot access parent directories`）：
 
 ```bash
-rm -rf ~/Vocawiki-bots           # 在 become 之前、个人账号下执行
+cd ~ && rm -rf ~/Vocawiki-bots           # 在 become 之前、个人账号下执行
 ```
 
 ## 3. 放机器人密码
@@ -123,6 +124,17 @@ toolforge jobs list          # 能看到任务才算进去了
 
 `become: no such tool '<工具名>'` 说明工具还没建好，等几分钟；刚建完工具还要
 **退出 SSH 重登**一次。
+
+### `You were added to the group tools.<工具名> after you started this login session.`
+
+工具组建好之前你就登录了，当前这轮 SSH 会话里还没有这个组，所以 `become` 用不了。
+**退出 SSH 再重新登录**即可（`exit` 后重新 `ssh ...@login.toolforge.org`）。
+在跳板机上 `newgrp` 之类是无效的，必须重开会话。
+
+### `shell-init: error retrieving current directory: getcwd: ...`
+
+当前目录已经被删掉了（比如站在 `~/Vocawiki-bots` 里执行了 `rm -rf ~/Vocawiki-bots`）。
+先 `cd ~` 回到 home 就好，之后的相对路径也会重新变正确。
 
 ### `bad interpreter: No such file or directory`
 

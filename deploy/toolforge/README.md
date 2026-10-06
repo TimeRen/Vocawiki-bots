@@ -115,12 +115,30 @@ cat ~/logincheck.out
 toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 ```
 
-会创建两个 job：
+只会创建 `watcher` 这一个 job：
 
 | job | 类型 | 作用 |
 | --- | --- | --- |
 | `watcher` | continuous | 常驻监听 recentchanges，近实时维护；退出后自动重启 |
-| `hourly` | cron `@hourly` | 每小时整体跑一轮，兜底重算图表 |
+
+它启动时就整体跑一轮（含图表），之后每 30 分钟再刷一次图表，所以不需要额外的
+每小时兜底。GitHub Actions 那边每 30 分钟跑一轮，负责 Toolforge 整体挂掉时的
+兜底。
+
+> **如果之前载入过带 `hourly` 的旧定义**，`jobs load` 只会更新文件里出现的
+> job，**不会删掉**已经存在的 `hourly`。要手工删：
+>
+> ```bash
+> toolforge jobs delete hourly
+> ```
+
+需要临时整体跑一轮时，用一次性 job 即可（`run-once.sh` 就是为它留的）：
+
+```bash
+toolforge jobs run once --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-once.sh"
+cat ~/once.out
+```
 
 ## 7. 查看状态与日志
 
@@ -249,8 +267,8 @@ toolforge jobs list             # 成功应为 Running for ...，不再是 Faile
 | `找不到 venv：…/pyvenv/bin/python` | venv 没了 | 重跑第 4 步 |
 | `找不到仓库：…` | 代码不在 `~/Vocawiki-bots` | clone 到该路径 |
 
-`toolforge jobs list` 里 `hourly` 长期显示 `Pending` 是正常的——它是 `@hourly`
-调度 job，只在触发点之间排队。
+`toolforge jobs list` 里连续的 `Failed` 才是问题；`Running for ...` 才是健康的。
+（如果以后又加了 `schedule` 的 job，它在两次触发点之间显示 `Pending` 是正常的。）
 
 ### job 显示 `completed` 但 `工具名.out` 是空的
 

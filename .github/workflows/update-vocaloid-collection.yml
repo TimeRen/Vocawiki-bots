@@ -22,7 +22,7 @@ name: Update VOCALOID Collection contribution list
 #            https://api.github.com/repos/TimeRen/Vocawiki-bots/dispatches \
 #            -d '{"event_type":"update-vocaloid-collection"}'
 # 定位：**兜底**。真正的近实时维护在 Toolforge 上跑（见 deploy/toolforge/，
-# watcher 常驻监听 + hourly 兜底），所以这里每次只跑一轮就退出，不再驻留 watch：
+# watcher 常驻监听），所以这里每次只跑一轮就退出，不再驻留 watch：
 # 两个写入方同时改同一页会产生编辑冲突，而且 schedule 补投本身还会把正在跑的
 # watch 取消掉（实测 watch 只活了几分钟就因 "The runner has received a shutdown
 # signal" 失败）。保留本工作流，是为了在 Toolforge 挂掉或改动还没同步过去时

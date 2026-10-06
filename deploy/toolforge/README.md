@@ -145,12 +145,18 @@ toolforge jobs restart watcher   # 常驻 job 不会自动重载代码
 ```bash
 git diff --stat
 git diff                         # 只有 "old mode 100644 / new mode 100755" 就放心丢
-git checkout -- deploy/toolforge/run-once.sh deploy/toolforge/watch.sh
+git checkout -- deploy/toolforge/          # 整个目录一起丢，别只丢报错点名的那两个
 git pull
 ```
 
 那是早前 `chmod +x` 造成的**权限位**改动（仓库里已经带可执行位了，不再需要
 手动改）。丢掉它不会有损失；`git pull` 之后脚本仍然是可执行的。
+
+想彻底不再被权限位挡住，可以让这个 clone 忽略它（只影响本地）：
+
+```bash
+git config core.fileMode false
+```
 
 ## 注意
 
@@ -243,8 +249,9 @@ tail ~/dryrun.err        # 真正的内容在这里
 ```bash
 git diff --stat
 git diff                                  # 确认只有 old mode 100644 / new mode 100755
-git checkout -- deploy/toolforge/run-once.sh deploy/toolforge/watch.sh
+git checkout -- deploy/toolforge/          # 整个目录一起丢：chmod +x 是批量加的
 git pull
+git config core.fileMode false             # 可选：以后忽略权限位改动
 ```
 
 仓库现在已带可执行位（100755），不需要再 `chmod +x`，也就不会再撞上这个。

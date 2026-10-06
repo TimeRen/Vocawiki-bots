@@ -64,10 +64,12 @@ kubeconfig 是否就位，并直接打印该补的命令。全绿再往下走。
 跳板机没有编译环境，装不了 wheel，所以用一次性 job 引导：
 
 ```bash
-chmod +x ~/Vocawiki-bots/deploy/toolforge/*.sh
 toolforge jobs run bootstrap-venv --image python3.13 --wait \
   --command "./Vocawiki-bots/deploy/toolforge/bootstrap_venv.sh"
 ```
+
+（可执行位已经提交在仓库里，不需要再 `chmod +x`；见排错里那条
+「would be overwritten by merge」。）
 
 **注意 command 里的路径是相对工具 home 的**：job 的工作目录是
 `/data/project/<tool>`，不是仓库目录，所以必须带 `Vocawiki-bots/` 这一层，
@@ -136,6 +138,19 @@ cat ~/watcher.out            # entry 脚本已把 stderr 合并进来
 cd ~/Vocawiki-bots && git pull
 toolforge jobs restart watcher   # 常驻 job 不会自动重载代码
 ```
+
+如果 `git pull` 报 `Your local changes ... would be overwritten by merge`，看一眼
+改动是什么：
+
+```bash
+git diff --stat
+git diff                         # 只有 "old mode 100644 / new mode 100755" 就放心丢
+git checkout -- deploy/toolforge/run-once.sh deploy/toolforge/watch.sh
+git pull
+```
+
+那是早前 `chmod +x` 造成的**权限位**改动（仓库里已经带可执行位了，不再需要
+手动改）。丢掉它不会有损失；`git pull` 之后脚本仍然是可执行的。
 
 ## 注意
 
@@ -219,6 +234,22 @@ stdout，所以内容全在 `工具名.err` 里。entry 脚本现在用 `2>&1` �
 tail ~/dryrun.out        # 可能是空的
 tail ~/dryrun.err        # 真正的内容在这里
 ```
+
+### `git pull` 报 `Your local changes ... would be overwritten by merge`
+
+本地对同一批文件有改动，Git 拒绝覆盖。最常见的是**权限位**：早前按旧说明跑了
+`chmod +x deploy/toolforge/*.sh`，而仓库里这些脚本当时是 644，于是产生改动。
+
+```bash
+git diff --stat
+git diff                                  # 确认只有 old mode 100644 / new mode 100755
+git checkout -- deploy/toolforge/run-once.sh deploy/toolforge/watch.sh
+git pull
+```
+
+仓库现在已带可执行位（100755），不需要再 `chmod +x`，也就不会再撞上这个。
+**`git pull` 失败时不要直接 `toolforge jobs load`**：那会用旧的 `jobs.yaml`
+（路径是 `./deploy/...`）重建 job，于是又回到 `exitcode 127`。
 
 ### job 报 `exitcode 127`（Status: Failed for 3s）
 

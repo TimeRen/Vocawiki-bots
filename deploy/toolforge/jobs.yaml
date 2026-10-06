@@ -1,10 +1,13 @@
 # Toolforge 任务定义，用法见 deploy/toolforge/README.md：
 #   toolforge jobs load deploy/toolforge/jobs.yaml
+#
+# command 的路径是相对**工具 home** 的（不是相对仓库目录），所以要写成
+# ./Vocawiki-bots/...，否则 job 报 exitcode 127。
 ---
 # 常驻监听，近实时维护页面；进程退出后由 Toolforge 自动重启
 - name: watcher
   image: python3.13
-  command: ./deploy/toolforge/watch.sh
+  command: ./Vocawiki-bots/deploy/toolforge/watch.sh
   continuous: true
   mem: 512Mi
   emails: onfailure
@@ -12,7 +15,7 @@
 # 兜底：每小时再整体跑一轮（图表重算、计数、上色、异常报告）
 - name: hourly
   image: python3.13
-  command: ./deploy/toolforge/run-once.sh
+  command: ./Vocawiki-bots/deploy/toolforge/run-once.sh
   schedule: "@hourly"
   timeout: 3600
   mem: 512Mi

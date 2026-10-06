@@ -64,11 +64,14 @@ kubeconfig 是否就位，并直接打印该补的命令。全绿再往下走。
 跳板机没有编译环境，装不了 wheel，所以用一次性 job 引导：
 
 ```bash
-chmod +x deploy/toolforge/*.sh
-toolforge jobs run bootstrap-venv \
-  --command "cd $PWD && ./deploy/toolforge/bootstrap_venv.sh" \
-  --image python3.13 --wait
+chmod +x ~/Vocawiki-bots/deploy/toolforge/*.sh
+toolforge jobs run bootstrap-venv --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/bootstrap_venv.sh"
 ```
+
+**注意 command 里的路径是相对工具 home 的**：job 的工作目录是
+`/data/project/<tool>`，不是仓库目录，所以必须带 `Vocawiki-bots/` 这一层，
+写成 `./deploy/...` 会报 `exitcode 127`。
 
 结束时会打印 `pywikibot <版本> on Python 3.x`。容器里的 `$HOME` 就是工具的
 `/data/project/<tool>`，所以 `pyvenv` 建在共享存储上，后续 job 直接复用。
@@ -79,12 +82,13 @@ toolforge jobs run bootstrap-venv \
 
 ```bash
 toolforge jobs run dryrun --image python3.13 --wait \
-  --command "./deploy/toolforge/run-once.sh --dry-run"
+  --command "./Vocawiki-bots/deploy/toolforge/run-once.sh --dry-run"
 tail ~/dryrun.out
 ```
 
 日志里应出现 `已登录：Renjian-bot`。确认没问题再往下走；去掉 `--dry-run`
-就是正式写入。
+就是正式写入。干跑失败时错误会写在 `~/dryrun.err`（脚本本身缺仓库或缺 venv
+也会在这里给出该补的命令）。
 
 ## 6. 载入常驻任务
 
@@ -116,6 +120,10 @@ toolforge jobs restart watcher   # 常驻 job 不会自动重载代码
 
 ## 注意
 
+- **job 的工作目录是工具 home**（`/data/project/<tool>`），所以 command 里的
+  路径都要以 `./Vocawiki-bots/` 开头；脚本内部会自己 `cd` 进仓库。
+- 代码必须 clone 在 `~/Vocawiki-bots`。想放别处就设 `VOCA_REPO` 环境变量
+  （`toolforge envvars create VOCA_REPO /data/project/<tool>/某目录`）。
 - 改了 `jobs.yaml` 后重新 `toolforge jobs load`；同名 job 定义有变化会被替换。
 - 新增依赖时重跑第 4 步的引导脚本（会重建 venv）。
 - `data/` 是创建者缓存，会随仓库目录一起留在共享存储上，别删（删了只是变慢）。
@@ -163,6 +171,36 @@ ls ~/Vocawiki-bots/bots/vocaloid_collection_contributions.py
 ```bash
 git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
 ```
+
+### job 报 `exitcode 127`（Status: Failed for 3s）
+
+命令找不到。job 的工作目录是**工具 home**，不是仓库目录，所以
+`--command "./deploy/toolforge/run-once.sh"` 找不到文件。要带上仓库那一层：
+
+```bash
+toolforge jobs run dryrun --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-once.sh --dry-run"
+```
+
+同样的原因也适用于 `jobs.yaml` 里的 `command`（已写成 `./Vocawiki-bots/...`）。
+先看错误日志确认：
+
+```bash
+cat ~/dryrun.err
+```
+
+### `找不到仓库：/data/project/<tool>/Vocawiki-bots`
+
+脚本找不到代码。要么没 clone，要么 clone 到了个人 home：
+
+```bash
+ls ~/Vocawiki-bots/bots/vocaloid_collection_contributions.py
+git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
+```
+
+### `找不到 venv：/data/project/<tool>/pyvenv/bin/python`
+
+重跑第 4 步的 `bootstrap-venv`。
 
 ### `bad interpreter: No such file or directory`
 

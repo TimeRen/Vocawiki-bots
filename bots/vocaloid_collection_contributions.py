@@ -1262,11 +1262,10 @@ def watch(site, *, interval: float, settle: float, sweep_interval: float,
     last_ts = pywikibot.Timestamp.now() - timedelta(seconds=60)
     dirty = False
     last_relevant = 0.0
-    actions = {"entries", "counts", "colour", "report"}
+    actions = {"entries", "counts", "colour", "report", "stats"}
 
-    # 立刻整体跑一轮（含图表）：定时事件很稀疏，每次开工都该把图表刷到最新。
-    # 之后触发到了就即时跑一轮，没有触发则由 sweep_interval 定时兜底。
-    run_once(site, actions | {"stats"}, basis, write, summary)
+    # 启动、相关变更触发、定时兜底都整体维护，避免榜单与图表分成不同修订。
+    run_once(site, actions, basis, write, summary)
     last_sweep = time.monotonic()
 
     while True:
@@ -1302,7 +1301,6 @@ def watch(site, *, interval: float, settle: float, sweep_interval: float,
         if sweep_due or (dirty and now - last_relevant >= settle):
             todo = set(actions)
             if sweep_due:
-                todo.add("stats")
                 last_sweep = now
             try:
                 run_once(site, todo, basis, write, summary)

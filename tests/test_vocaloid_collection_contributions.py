@@ -1,4 +1,7 @@
 from unittest import TestCase
+from unittest.mock import patch
+
+import bots.vocaloid_collection_contributions as contributions
 
 from bots.vocaloid_collection_contributions import (
     Entry,
@@ -61,3 +64,30 @@ class TestCountByListed(TestCase):
         counts = count_by_listed(site, sections, legend, {})
 
         self.assertEqual(counts["2021秋"]["#000000"], 17)
+
+
+class TestWatch(TestCase):
+    @patch.object(contributions.time, "sleep")
+    @patch.object(contributions.time, "monotonic", side_effect=[0, 0, 0, 0, 0, 2])
+    @patch.object(contributions, "run_once")
+    @patch.object(contributions, "Page")
+    def test_relevant_change_recomputes_stats_in_same_pass(
+            self, page_class, run_once, _monotonic, _sleep):
+        page_class.return_value.text = ""
+        site = FakeSite()
+        site.recentchanges = lambda **kwargs: [{
+            "rcid": 1,
+            "title": contributions.PAGE_TITLE,
+            "user": "editor",
+            "timestamp": None,
+        }]
+
+        contributions.watch(
+            site, interval=0, settle=0, sweep_interval=0, basis="listed",
+            write=False, summary=None, max_runtime=1)
+
+        self.assertEqual(run_once.call_count, 2)
+        initial_actions = run_once.call_args_list[0].args[1]
+        triggered_actions = run_once.call_args_list[1].args[1]
+        self.assertIn("stats", triggered_actions)
+        self.assertEqual(initial_actions, triggered_actions)

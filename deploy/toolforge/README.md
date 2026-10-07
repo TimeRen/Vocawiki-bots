@@ -125,6 +125,8 @@ toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 里的 `--sweep-interval 1800`，不受"有没有触发"影响）。这就是原先 GitHub Actions
 那条 30 分钟兜底，现在由 watcher 自己扛，不再依赖 GitHub 那边不可靠的 schedule；
 新建条目、watcher 认不出来的改动，最迟 30 分钟内都会被补上。
+监听到榜单条目的相关更改后，也会在短暂等待后整体重算（含用户统计图），同一次页面保存
+会同时更新榜单和统计，避免两者出现在不同修订中。
 
 GitHub Actions 那边仍然每 30 分钟跑一轮，但它现在只负责 **Toolforge 整体挂掉**
 这一种情况——watcher 自己都没了，它内部的定时器自然也停了，只有外面的人才跑得动。

@@ -9,29 +9,22 @@ name: Update VOCALOID Collection contribution list
 #   VOCA_USERNAME（可选）= voca.wiki 上的机器人账号名；不设则用 user-config.py 里的默认值 Renjian-bot
 # user-config.py 已经提交在仓库里（family_files['voca'] 指向 https://voca.wiki/api.php）。
 #
-# 触发方式与可靠性（2026-10-04 实测）：
+# 触发方式：
 #   · push 到 main 且改动到机器人脚本或本工作流 -> 立即运行（改完即可验证）
-#   · schedule 每 30 分钟（UTC）——实测**很不可靠**：工作流注册后 8 小时内约 96 次
-#     机会只投递了 1 次，且时间落在 12:13 这种非 5 倍数分钟上，属于 GitHub 调度器
-#     延迟后补投。官方说明 schedule 是尽力而为，负载高时会延迟甚至丢事件。
-#     所以 cron 故意避开整点（整点是官方点名的高负载时段），但别指望它准时。
+#   · schedule 每小时运行一次完整维护（UTC 分钟 47）；Toolforge 在分钟 17 运行，
+#     两处错开，且都不依赖 recentchanges 增量列表
 #   · workflow_dispatch -> Actions 页面手动 Run workflow
 #   · repository_dispatch -> 外部心跳（自建 VPS / cron 服务）即时触发：
 #       curl -X POST -H "Authorization: Bearer <PAT>" \
 #            -H "Accept: application/vnd.github+json" \
 #            https://api.github.com/repos/TimeRen/Vocawiki-bots/dispatches \
 #            -d '{"event_type":"update-vocaloid-collection"}'
-# 定位：**只兜 Toolforge 整体挂掉**。30 分钟的周期性维护已经搬到 watcher 自己身上
-# 了（deploy/toolforge/watch.sh 的 --sweep-interval 每 30 分钟无条件整体跑一轮），
-# 所以这里的 schedule 不再是"每 30 分钟保证有人跑"的依靠，只是 Toolforge 整体不可用
-# 时的最后一道防线。这里每次只跑一轮就退出，不再驻留 watch：两个写入方同时改同一页
-# 会产生编辑冲突，而且 schedule 补投本身还会把正在跑的 watch 取消掉（实测 watch 只
-# 活了几分钟就因 "The runner has received a shutdown signal" 失败）。
+# Actions 与 Toolforge 都是单次定时运行，不会常驻轮询。
 
 on:
   schedule:
-    # 每 30 分钟，跳过整点（分钟 0）
-    - cron: '7,37 * * * *'
+    # 每小时一次；与 Toolforge 的 :17 错开
+    - cron: '47 * * * *'
   push:
     branches: [main]
     paths:
@@ -86,11 +79,7 @@ jobs:
           key: voca-creator-cache-${{ github.run_id }}
           restore-keys: voca-creator-cache-
 
-      - name: Run maintenance bot
+      - name: Run hourly maintenance
         run: |
-          # 一轮跑全：按模板补名次 + 上色 + 计数 + 报告 + 图表。
-          # 图表曾经只在“分钟<5”时才跑，结果 push 触发的运行几乎从不算图表；
-          # 现在创建者查询改为批量，冷启动也只需几十个请求，所以每轮都算。
-          # 撞上 Toolforge watcher 正在编辑时，save_page 会放弃本轮并退出 0，
-          # 下一次触发会重新读取再算。
+          # 每次定时触发都完整重算一遍，不靠 recentchanges 决定是否需要运行。
           python bots/vocaloid_collection_contributions.py entries,counts,colour,report,stats --write

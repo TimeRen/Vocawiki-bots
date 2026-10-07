@@ -109,34 +109,22 @@ cat ~/logincheck.out
 > stderr，不合并则 `工具名.out` 是空的、内容全在 `工具名.err`）。还在用旧版脚本
 > 就直接看 `工具名.err`。
 
-## 6. 载入常驻任务
+## 6. 载入每小时定时任务
 
 ```bash
+toolforge jobs delete watcher   # 如果之前部署过旧版常驻 watcher
 toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 ```
 
-只会创建 `watcher` 这一个 job：
+会创建或更新 `hourly` 任务：
 
 | job | 类型 | 作用 |
 | --- | --- | --- |
-| `watcher` | continuous | 常驻监听 recentchanges，近实时维护；每 30 分钟再整体兜底一轮；退出后自动重启 |
+| `hourly` | schedule（每小时 :17） | 单次完整维护榜单、计数、颜色、报告和统计图；不常驻轮询 |
 
-它启动时就整体跑一轮（含图表），之后**每 30 分钟无条件再整体跑一轮**（`watch.sh`
-里的 `--sweep-interval 1800`，不受"有没有触发"影响）。这就是原先 GitHub Actions
-那条 30 分钟兜底，现在由 watcher 自己扛，不再依赖 GitHub 那边不可靠的 schedule；
-新建条目、watcher 认不出来的改动，最迟 30 分钟内都会被补上。
-监听到榜单条目的相关更改后，也会在短暂等待后整体重算（含用户统计图），同一次页面保存
-会同时更新榜单和统计，避免两者出现在不同修订中。
-
-GitHub Actions 那边仍然每 30 分钟跑一轮，但它现在只负责 **Toolforge 整体挂掉**
-这一种情况——watcher 自己都没了，它内部的定时器自然也停了，只有外面的人才跑得动。
-
-> **如果之前载入过带 `hourly` 的旧定义**，`jobs load` 只会更新文件里出现的
-> job，**不会删掉**已经存在的 `hourly`。要手工删：
->
-> ```bash
-> toolforge jobs delete hourly
-> ```
+GitHub Actions 也会在每小时 :47 跑一次完整维护，作为错时的备份。完整扫描而不是
+依赖 `recentchanges`，因此即使条目尚未出现在当前列表中，也会由下一次定时任务发现。
+Toolforge 的 `schedule` 任务在两次运行之间显示 `Pending` 是正常的。
 
 需要临时整体跑一轮时，用一次性 job 即可（`run-once.sh` 就是为它留的）：
 
@@ -153,21 +141,17 @@ cat ~/once.out
 
 ```bash
 toolforge jobs list
-toolforge jobs show watcher
-cat ~/watcher.out            # entry 脚本已把 stderr 合并进来
+toolforge jobs show hourly
+cat ~/hourly.out              # entry 脚本已把 stderr 合并进来
 ```
 
-`tail -f ~/watcher.out` 可以实时跟着看。
-
-**job 与 SSH 会话无关**：关掉终端（或断网）不会影响它——它是 Kubernetes 上的
-常驻负载，由 Toolforge 托管并在退出后自动重启。要停只能显式删掉：
+要停用定时任务，显式删除即可：
 
 ```bash
-toolforge jobs delete watcher
+toolforge jobs delete hourly
 ```
 
-`jobs.yaml` 里配了 `emails: onfailure`，所以它挂掉时会给你发邮件——不用一直盯着
-终端。
+`jobs.yaml` 里配了 `emails: onfailure`，所以任务失败时会给你发邮件。
 
 ## 更新代码
 
@@ -178,7 +162,7 @@ toolforge jobs delete watcher
 
 ```bash
 cd ~/Vocawiki-bots && git pull
-toolforge jobs restart watcher   # 常驻 job 不会自动重载代码
+toolforge jobs load deploy/toolforge/jobs.yaml
 ```
 
 如果 `git pull` 报 `Your local changes ... would be overwritten by merge`，看一眼
@@ -211,10 +195,10 @@ git config core.fileMode false
 - `data/` 是创建者缓存，会随仓库目录一起留在共享存储上，别删（删了只是变慢）。
 - 想用环境变量传密钥可以用 `toolforge envvars`，但本仓库读的是
   `user-password.py`，两种方式选一种即可。
-- **GitHub Actions 只兜 Toolforge 整体挂掉**：30 分钟的周期性维护已经由 watcher
-  自己做了（`--sweep-interval`），那边不再驻留 watch，每次只跑一轮。两边偶尔
-  同时写同一页时会撞编辑冲突，`save_page()` 会放弃那一轮并重读页面，下一次触发
-  再算——所以看到 `页面刚被其他进程编辑，放弃本轮` 属于正常，不是故障。
+- GitHub Actions 在每小时 :47 运行；Toolforge 在 :17 运行。两边均单次完整扫描，
+  不依赖 `recentchanges` 增量列表，也不会常驻轮询。
+- 若部署在普通 Linux 主机而非 Toolforge，可用 `deploy/voca-contributions.service`
+  与 `deploy/voca-contributions.timer` 配对；启用 timer，不要再用常驻重启服务。
 
 ## 排错
 
@@ -272,27 +256,17 @@ git clone https://github.com/TimeRen/Vocawiki-bots.git ~/Vocawiki-bots
 rm -f ~/dryrun.out ~/dryrun.err
 ```
 
-### 常驻 job 显示 `Status: Failed for 21m48s`
+### 定时 job 显示失败
 
-那个时长是**从它第一次失败开始累积**的，不会因为 `jobs load` 更新了定义就归零；
-运行实例也不一定自动重起。先看真正的报错，再强制重启：
+先看任务日志；更新代码或 `jobs.yaml` 后重新载入定义：
 
 ```bash
-tail -50 ~/watcher.err          # 旧脚本没合并流时错误在这
-toolforge jobs restart watcher
-toolforge jobs list             # 成功应为 Running for ...，不再是 Failed
+tail -50 ~/hourly.err           # 旧脚本没合并流时错误在这
+toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
+toolforge jobs list
 ```
 
-对号入座：
-
-| `watcher.err` 里看到 | 原因 | 怎么办 |
-| --- | --- | --- |
-| `./deploy/toolforge/watch.sh: not found` | 旧定义的残留（路径少一层） | 重启即可，新定义已带 `Vocawiki-bots/` |
-| `找不到 venv：…/pyvenv/bin/python` | venv 没了 | 重跑第 4 步 |
-| `找不到仓库：…` | 代码不在 `~/Vocawiki-bots` | clone 到该路径 |
-
-`toolforge jobs list` 里连续的 `Failed` 才是问题；`Running for ...` 才是健康的。
-（如果以后又加了 `schedule` 的 job，它在两次触发点之间显示 `Pending` 是正常的。）
+如果旧版 `watcher` 仍存在，需先执行 `toolforge jobs delete watcher`，否则它会继续常驻。
 
 ### job 显示 `completed` 但 `工具名.out` 是空的
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Vocawiki contribution list maintenance hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=voca-contributions.service
+
+[Install]
+WantedBy=timers.target

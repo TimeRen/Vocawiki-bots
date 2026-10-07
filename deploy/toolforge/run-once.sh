@@ -7,7 +7,7 @@
 source "$(dirname "$0")/common.sh"
 
 # pywikibot.output() 写的是 stderr，合并到一个流里，工具名.out 才是完整日志
-args=(entries,counts,colour,report,stats)
+args=(all)
 if [[ "${1:-}" == "--dry-run" ]]; then
     shift            # 只打印将要做的改动，不保存页面
 else

@@ -38,21 +38,13 @@ The bot can:
   ever raised, never lowered.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
-* ``watch``   - near-real-time: poll ``list=recentchanges`` and maintain the
-  page whenever a listed entry, or the page itself, changes.  A full pass also
-  runs unconditionally every ``--sweep-interval`` seconds (default 1800), so a
-  change polling cannot see - a page whose title is not in the list yet, say -
-  is still picked up; that is the periodic net the GitHub Actions cron used to
-  provide.  ``--max-runtime`` makes the loop return on its own after N seconds
-  (0 = forever); the Toolforge job runs it continuously instead, relying on the
-  platform to restart it.
+* ``all``      - run all maintenance actions once. Toolforge and GitHub Actions
+  schedule this full pass hourly; it does not poll ``list=recentchanges``, whose
+  results can omit entries that have not yet appeared in the maintained list.
 
-The page is maintained from two places: the Toolforge ``watcher`` job
-(``deploy/toolforge/``, near-real-time plus its own 30-minute sweep) and this
-repository's GitHub Actions workflow, which is now only the fallback for when
-Toolforge is down altogether.  Both may want to write at the same moment, so a
-save that loses the race is abandoned and retried by the next pass instead of
-failing.
+The page is maintained hourly by Toolforge and GitHub Actions, at staggered
+minutes. Each run is a full pass, so new or previously unlisted entries are not
+dependent on recent-changes polling.
 
 Everything runs in dry-run mode unless ``--write`` is given.
 
@@ -471,23 +463,6 @@ def recompute_counts(text: str, created: Dict[Tuple[str, str], int]) -> Tuple[st
 # --------------------------------------------------------------------------- #
 def strip_prefix(user: str) -> str:
     return user.split(">", 1)[1] if ">" in user else user
-
-
-def rc_timestamp(value):
-    """Normalise a recent-changes timestamp.
-
-    ``list=recentchanges`` hands the timestamp back as a plain string
-    (``'2026-10-02T09:11:54Z'``), which cannot be compared with the
-    ``Timestamp`` cursor the watch loop keeps; that raised
-    ``TypeError: '>' not supported between instances of 'str' and 'Timestamp'``
-    on every poll and left the watcher blind.
-    """
-    if isinstance(value, pywikibot.Timestamp) or value is None:
-        return value
-    try:
-        return pywikibot.Timestamp.fromISOformat(str(value))
-    except ValueError:
-        return None
 
 
 def load_cache(path: Path) -> Dict[str, Optional[str]]:
@@ -1074,10 +1049,9 @@ def _abandon_round(page: Page, exc: Exception) -> bool:
 def save_page(page: Page, text: str, summary: Optional[str]) -> bool:
     """Save, degrading gracefully when the account lacks ``bot``/``changetags``.
 
-    Returns False when someone else edited the page first.  Toolforge's
-    ``watcher`` job and the GitHub Actions fallback both maintain this page, so
-    a race is expected: the round is abandoned rather than overwriting the other
-    writer.
+    Returns False when someone else edited the page first. Toolforge and
+    GitHub Actions both maintain this page on staggered hourly schedules, so a
+    race is abandoned rather than overwriting the other writer.
     """
     page.text = text
     summary = summary or DEFAULT_SUMMARY
@@ -1109,7 +1083,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     """Run one maintenance pass.  Returns True when the page changed.
 
     Returns False when there was nothing to do, and also when the save was
-    skipped because another process (the Toolforge watcher) edited the page
+    skipped because another scheduled process edited the page
     first - that round is retried by the next trigger instead.
     """
     actions = set(actions)
@@ -1230,108 +1204,39 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
 def watch(site, *, interval: float, settle: float, sweep_interval: float,
           basis: str, write: bool, summary: Optional[str],
           max_runtime: float = 0) -> None:
-    """Near-real-time mode: poll recent changes and maintain the page on the fly.
-
-    voca.wiki runs no EventStreams/EventBus, so there is no push stream; polling
-    ``list=recentchanges`` every few seconds is the closest available.
-
-    Polling alone can starve: a page whose title is not in the list yet (the
-    cell still holds an older or English title) never counts as a relevant
-    change, so nothing wakes the watcher.  A full pass therefore also runs
-    unconditionally every ``sweep_interval`` seconds - the periodic fallback the
-    GitHub Actions cron used to provide, folded in here so the cadence no longer
-    depends on an unreliable scheduler.  0 disables it.
-
-    ``max_runtime`` (seconds, 0 = forever) makes the loop return on its own so a
-    CI job can bow out before the runner's hard limit kills it.
-    """
+    """Compatibility entry point: run one full pass, without polling."""
     page = Page(site, PAGE_TITLE)
     relevant: set = set()
-    deadline = time.monotonic() + max_runtime if max_runtime else 0.0
-
     def refresh() -> None:
         nonlocal relevant
         relevant = {e.title for s in parse_sections(page.text) for e in s.entries}
 
     refresh()
-    pywikibot.output(f"监听 {PAGE_TITLE}：{len(relevant)} 个条目，轮询间隔 {interval}s"
-                     + (f"，兜底间隔 {sweep_interval:.0f}s" if sweep_interval else "")
-                     + (f"，本次最多运行 {max_runtime:.0f}s" if deadline else ""))
+    pywikibot.output(f"单次完整维护 {PAGE_TITLE}（{len(relevant)} 个条目）")
 
-    seen: set = set()
-    last_ts = pywikibot.Timestamp.now() - timedelta(seconds=60)
-    dirty = False
-    last_relevant = 0.0
     actions = {"entries", "counts", "colour", "report", "stats"}
 
-    # 启动、相关变更触发、定时兜底都整体维护，避免榜单与图表分成不同修订。
+    # Keep accepting legacy watch arguments, but only run one full pass.
     run_once(site, actions, basis, write, summary)
-    last_sweep = time.monotonic()
-
-    while True:
-        if deadline and time.monotonic() >= deadline:
-            pywikibot.output("本轮监听结束，交给下一次触发。")
-            return
-        try:
-            for rc in site.recentchanges(namespaces=[0], start=last_ts, reverse=True):
-                key = rc.get("rcid") or (rc.get("title"), str(rc.get("timestamp")), rc.get("user"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                timestamp = rc_timestamp(rc.get("timestamp"))
-                if timestamp is not None and timestamp > last_ts:
-                    last_ts = timestamp
-                title = rc.get("title")
-                if title == PAGE_TITLE or title in relevant:
-                    dirty = True
-                    last_relevant = time.monotonic()
-                    pywikibot.output(f"检测到变更: {title}（{rc.get('user')}）")
-        except KeyboardInterrupt:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            pywikibot.error(f"读取最近更改失败: {exc}")
-
-        if len(seen) > 20000:
-            seen.clear()
-
-        now = time.monotonic()
         # 定时兜底：即使一个触发都没有（新建条目还没进列表时 watcher 认不出它），
         # 也要在 sweep_interval 内整体跑一轮，把漏掉的改动补上。
-        sweep_due = bool(sweep_interval) and now - last_sweep >= sweep_interval
-        if sweep_due or (dirty and now - last_relevant >= settle):
-            todo = set(actions)
-            if sweep_due:
-                last_sweep = now
-            try:
-                run_once(site, todo, basis, write, summary)
-                refresh()
-            except Exception as exc:  # noqa: BLE001
-                pywikibot.error(f"维护失败: {exc}")
-            dirty = False
-
-        time.sleep(interval)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", default="all",
-                        help="all | watch | one or more of counts,colour,stats,report "
+                        help="all | watch (single pass) | one or more of counts,colour,stats,report "
                              "(comma separated, e.g. counts,colour,report)")
     parser.add_argument("--basis", choices=["listed", "window"], default="listed",
                         help="how to resolve creators when recomputing the chart")
     parser.add_argument("--write", action="store_true", help="save the page (default: dry-run)")
     parser.add_argument("--summary", default=None)
     parser.add_argument("--interval", type=float, default=20,
-                        help="watch: seconds between recent-changes polls (default 20)")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--settle", type=float, default=15,
-                        help="watch: wait this long after the last relevant change (default 15)")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--sweep-interval", type=float, default=1800,
-                        help="watch: seconds between unconditional full passes - the "
-                             "safety net for changes polling cannot see (default 1800; "
-                             "0 disables)")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--max-runtime", type=float, default=0,
-                        help="watch: give up after this many seconds (0 = run forever); "
-                             "used by CI so a long job ends before the 6h runner limit")
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     site = pywikibot.Site()

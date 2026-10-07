@@ -1,5 +1,5 @@
 #!/bin/bash
-# run-once.sh / watch.sh 共用的环境准备：定位仓库、检查 venv。
+# run-once.sh 共用的环境准备：定位仓库、检查 venv。
 # 被 source 使用，不单独执行。
 set -euo pipefail
 

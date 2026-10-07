@@ -593,7 +593,8 @@ def title_index(site) -> Dict[str, str]:
     The page links songs by hand, so a typo such as ``[[FrailLaVillanos]]``
     (the page is ``FrailL'aVillanos``) cannot be derived from the page alone.
     One sweep of the wiki's titles makes every such link resolvable - and the
-    sweep is cached, so a long-running ``watch`` process does not repeat it.
+    sweep is cached so each scheduled maintenance run does not repeat the full
+    mainspace scan.
     """
     try:
         with open(TITLE_INDEX, "rb") as f:

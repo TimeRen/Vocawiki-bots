@@ -1201,54 +1201,18 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     return save_page(page, text, summary)
 
 
-def watch(site, *, interval: float, settle: float, sweep_interval: float,
-          basis: str, write: bool, summary: Optional[str],
-          max_runtime: float = 0) -> None:
-    """Compatibility entry point: run one full pass, without polling."""
-    page = Page(site, PAGE_TITLE)
-    relevant: set = set()
-    def refresh() -> None:
-        nonlocal relevant
-        relevant = {e.title for s in parse_sections(page.text) for e in s.entries}
-
-    refresh()
-    pywikibot.output(f"单次完整维护 {PAGE_TITLE}（{len(relevant)} 个条目）")
-
-    actions = {"entries", "counts", "colour", "report", "stats"}
-
-    # Keep accepting legacy watch arguments, but only run one full pass.
-    run_once(site, actions, basis, write, summary)
-        # 定时兜底：即使一个触发都没有（新建条目还没进列表时 watcher 认不出它），
-        # 也要在 sweep_interval 内整体跑一轮，把漏掉的改动补上。
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", default="all",
-                        help="all | watch (single pass) | one or more of counts,colour,stats,report "
+                        help="all | one or more of counts,colour,stats,report "
                              "(comma separated, e.g. counts,colour,report)")
     parser.add_argument("--basis", choices=["listed", "window"], default="listed",
                         help="how to resolve creators when recomputing the chart")
     parser.add_argument("--write", action="store_true", help="save the page (default: dry-run)")
     parser.add_argument("--summary", default=None)
-    parser.add_argument("--interval", type=float, default=20,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--settle", type=float, default=15,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--sweep-interval", type=float, default=1800,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--max-runtime", type=float, default=0,
-                        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     site = pywikibot.Site()
-    if args.action == "watch":
-        try:
-            watch(site, interval=args.interval, settle=args.settle,
-                  sweep_interval=args.sweep_interval, basis=args.basis,
-                  write=args.write, summary=args.summary,
-                  max_runtime=args.max_runtime)
-        except KeyboardInterrupt:
-            pywikibot.output("已停止监听。")
-        return
     if args.action == "all":
         actions = set(ALL_ACTIONS)
     else:

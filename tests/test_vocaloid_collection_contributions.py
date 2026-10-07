@@ -66,17 +66,15 @@ class TestCountByListed(TestCase):
         self.assertEqual(counts["2021秋"]["#000000"], 17)
 
 
-class TestWatch(TestCase):
+class TestScheduledMaintenance(TestCase):
+    @patch("sys.argv", ["vocaloid_collection_contributions.py", "all", "--write"])
+    @patch.object(contributions.pywikibot, "Site")
     @patch.object(contributions, "run_once")
-    @patch.object(contributions, "Page")
-    def test_watch_runs_one_full_pass_without_polling_recent_changes(
-            self, page_class, run_once):
-        page_class.return_value.text = ""
-        site = FakeSite()
-        contributions.watch(
-            site, interval=0, settle=0, sweep_interval=0, basis="listed",
-            write=False, summary=None, max_runtime=1)
+    def test_full_pass_runs_all_actions_without_recent_changes_polling(
+            self, run_once, site_factory):
+        site = site_factory.return_value
+
+        contributions.main()
 
         run_once.assert_called_once_with(
-            site, {"entries", "counts", "colour", "report", "stats"},
-            "listed", False, None)
+            site, set(contributions.ALL_ACTIONS), "listed", True, None)

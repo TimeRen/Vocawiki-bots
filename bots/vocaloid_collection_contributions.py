@@ -1170,6 +1170,8 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     if "colour" in actions:
         plan = plan_colours(site, sections, legend, cache, exists, participants_of)
         text, coloured = apply_colours(text, plan)
+        if coloured:
+            sections = parse_sections(text)
         pywikibot.output(f"上色: 处理 {coloured} 个单元格（可自动上色条目 {len(plan)}）")
     if actions & {"counts", "report"}:
         created = compute_created(site, sections, cache, exists, set(plan))

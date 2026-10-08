@@ -78,3 +78,37 @@ class TestScheduledMaintenance(TestCase):
 
         run_once.assert_called_once_with(
             site, set(contributions.ALL_ACTIONS), "listed", True, None)
+
+    @patch.object(contributions, "load_cache", return_value={})
+    @patch.object(contributions, "save_cache")
+    @patch.object(contributions, "DATA_DIR")
+    @patch.object(contributions, "render_chart", return_value=("", {}))
+    @patch.object(contributions, "count_by_listed", return_value={})
+    @patch.object(contributions, "plan_colours",
+                  return_value={"Song": ("#123456", "Canonical song")})
+    @patch.object(contributions, "Page")
+    def test_stats_uses_entries_after_colouring_and_title_correction(
+            self, page_factory, _plan_colours, count_by_listed,
+            render_chart, _data_dir, _save_cache, _load_cache):
+        page_factory.return_value.text = (
+            "=== 2024春 ===\n"
+            "{{multicol}}\n"
+            "<poem>;TOP100 (0/1)\n"
+            "{| class=\"wikitable\"\n"
+            "|-\n"
+            "| [[Song|1]]\n"
+            "|}\n"
+            "{{Echart|data=<nowiki>{"
+            "\"legend\":{\"data\":[\"ボカコレ2024春\"]},"
+            "\"yAxis\":{\"data\":[\"Creator\"]},"
+            "\"series\":[{\"name\":\"ボカコレ2024春\",\"data\":[0]}]"
+            "}</nowiki>}}\n"
+        )
+        render_chart.side_effect = lambda text, *_: (text, {})
+
+        contributions.run_once(object(), {"colour", "stats"})
+
+        updated_sections = count_by_listed.call_args.args[1]
+        self.assertEqual(updated_sections[0].entries[0].title, "Canonical song")
+        self.assertEqual(updated_sections[0].entries[0].colours, ["#123456"])
+        render_chart.assert_called_once()

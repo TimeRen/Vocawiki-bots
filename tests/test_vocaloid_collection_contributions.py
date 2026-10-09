@@ -100,6 +100,21 @@ class TestCountByListed(TestCase):
         self.assertEqual(participants, ["榜内歌曲", "榜外歌曲"])
         self.assertEqual(site.requests[1]["eicontinue"], "page|123")
 
+    def test_template_participants_skips_pages_that_are_not_songs(self):
+        # 总条目挂着全部赛季的模板，会被 embeddedin 当成每一季的参赛曲目；
+        # 不排掉它，创建总条目的用户就凭空多出 12 份贡献。
+        site = PagedSite([
+            {"query": {"embeddedin": [
+                {"title": "榜内歌曲"},
+                {"title": "The VOCALOID Collection"},
+                {"title": "榜外歌曲"},
+            ]}},
+        ])
+
+        participants = contributions.template_participants(site, "2021秋")
+
+        self.assertEqual(participants, ["榜内歌曲", "榜外歌曲"])
+
     def test_redirect_titles_are_counted_as_one_song_per_season(self):
         colour = "#000000"
         sections = [

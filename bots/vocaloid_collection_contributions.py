@@ -31,10 +31,12 @@ The bot can:
   creator (and its season) here.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
   The season's template participants are counted, including songs outside
-  TOP/ROOKIE rankings. A cell's colour is the hand-made creator annotation and
-  wins outright; other entries use the creator of the local page. Some chart
-  numbers come from bookkeeping outside the wiki and cannot be derived at all,
-  so a cell is only ever raised, never lowered.
+  TOP/ROOKIE rankings. A page that merely carries the season's navbox without
+  being a song (the overview article) is not a participant and is skipped.
+  A cell's colour is the hand-made creator annotation and wins outright; other
+  entries use the creator of the local page. Some chart numbers come from
+  bookkeeping outside the wiki and cannot be derived at all, so a cell is only
+  ever raised, never lowered.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``all``      - run all maintenance actions once. Toolforge and GitHub Actions
@@ -86,6 +88,12 @@ KNOWN_BOTS = {
     "星海-interfacebot", "星海-oversightbot", "机娘史蒂文", "机娘史蒂夫", "机娘星海酱", "机娘鬼影233号",
     "滥用过滤器", "萌百娘", "重定向修复器",
 }
+
+# 挂着赛季导航模板、本身却不是参赛曲目的页面。总条目 The VOCALOID Collection
+# 把 12 个赛季的模板全挂上了，``list=embeddedin`` 于是认为它是每一季的参赛曲目，
+# 创建这个总条目的用户会凭空拿到 12 份贡献（2026-10-10 那次编辑就是被它搞坏的）。
+# 它是一篇条目，不是歌，所以要从「参赛曲目」里排掉。
+NON_SONG_PAGES = {"The VOCALOID Collection"}
 
 # Explicit ranking sections; the chart also adds every season-template participant.
 def is_counted_section(name: str) -> bool:
@@ -299,6 +307,9 @@ def season_templates(site, seasons: Iterable[str]) -> Dict[str, Dict[str, Dict[i
 def template_participants(site, season: str) -> Optional[List[str]]:
     """Pages that transclude the season's template (i.e. 参加该赛季的歌曲）。
 
+    挂着模板但不是歌曲的页面（见 ``NON_SONG_PAGES``）不算参赛曲目：总条目挂着
+    全部赛季的模板，不排掉它就会给每一季都多算一份贡献。
+
     查询失败返回 ``None``：调用方不能把「没查到」当成「没有」。
     """
     titles: List[str] = []
@@ -310,7 +321,8 @@ def template_participants(site, season: str) -> Optional[List[str]]:
                 eititle=f"{SEASON_TEMPLATE}{season}", einamespace=0,
                 eilimit="max", **params).submit()
             titles.extend(entry["title"]
-                          for entry in data.get("query", {}).get("embeddedin", []))
+                          for entry in data.get("query", {}).get("embeddedin", [])
+                          if entry["title"] not in NON_SONG_PAGES)
             continuation = data.get("continue")
             if not continuation:
                 return titles
@@ -1194,7 +1206,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         missing = [f"{season}/{title}" for season, secs in wanted.items()
                    for title in sorted((participants_of(season) or set())
                                        - {t for ranks in secs.values() for t in ranks.values()}
-                                       - {"The VOCALOID Collection"})]
+                                       - NON_SONG_PAGES)]
         if missing:
             pywikibot.output(f"有赛季模板但不在该赛季榜单里: {len(missing)} 条，例如："
                              + "；".join(missing[:8]))

@@ -491,10 +491,10 @@ def save_cache(path: Path, cache: Dict[str, Optional[str]]) -> None:
 
 def batch_creators(site, titles: Iterable[str], cache: Dict[str, Optional[str]],
                    resolved: Optional[Dict[str, str]] = None) -> None:
-    """Fill ``cache`` for many titles using batched oldest-revision queries.
+    """Fill ``cache`` for many titles using oldest-revision queries.
 
-    ``creator_of`` costs one request per song, which makes a cold ``stats`` run
-    take minutes; 45 titles per request brings that down to tens of requests.
+    MediaWiki only permits ``rvdir=newer`` on single-page requests, so the first
+    revision creator must be fetched once per title.
     Only real answers are cached, so a song that does not exist yet is retried
     on the next run.
     """
@@ -504,25 +504,8 @@ def batch_creators(site, titles: Iterable[str], cache: Dict[str, Optional[str]],
         target = resolved.get(title, title)
         if target and target not in cache and target not in pending:
             pending.append(target)
-    for i in range(0, len(pending), 45):
-        batch = pending[i:i + 45]
-        try:
-            data = site.simple_request(action="query", prop="revisions", rvprop="user",
-                                       rvlimit=1, rvdir="newer", formatversion=2,
-                                       titles="|".join(batch)).submit()
-        except Exception as exc:  # noqa: BLE001
-            pywikibot.error(f"批量创建者查询失败: {exc}")
-            continue
-        query = data.get("query", {})
-        normalized = {n["from"]: n["to"] for n in query.get("normalized", [])}
-        found: Dict[str, Optional[str]] = {}
-        for page in query.get("pages", []):
-            revisions = page.get("revisions")
-            found[page["title"]] = strip_prefix(revisions[0]["user"]) if revisions else None
-        for title in batch:
-            user = found.get(normalized.get(title, title))
-            if user:
-                cache[title] = user
+    for title in pending:
+        creator_of(site, title, cache)
 
 
 def creator_of(site, title: str, cache: Dict[str, Optional[str]]):

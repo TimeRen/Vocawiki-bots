@@ -44,6 +44,22 @@ class PagedSite:
 
 
 class TestCountByListed(TestCase):
+    @patch.object(contributions, "Page")
+    def test_batch_creators_uses_single_page_oldest_revision_queries(
+            self, page_factory):
+        site = object()
+        page = page_factory.return_value
+        page.revisions.return_value = iter([{"user": "User"}])
+        cache = {"Cached": "Existing"}
+
+        contributions.batch_creators(
+            site, ["Alias", "Target", "Cached"], cache, {"Alias": "Target"})
+
+        self.assertEqual(cache, {"Cached": "Existing", "Target": "User"})
+        page_factory.assert_called_once_with(site, "Target")
+        page.revisions.assert_called_once_with(
+            total=1, reverse=True, content=False)
+
     @patch.object(contributions, "creator_of")
     @patch.object(contributions, "batch_creators")
     def test_outside_ranking_participants_are_included_in_season_stats(

@@ -30,20 +30,59 @@ class FakeSite:
         return {"query": {"pages": pages, "redirects": redirects}}
 
 
+class PagedSite:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.requests = []
+
+    def simple_request(self, **kwargs):
+        self.requests.append(kwargs)
+        return self
+
+    def submit(self):
+        return next(self.responses)
+
+
 class TestCountByListed(TestCase):
-    def test_neta_entries_are_not_included_in_season_stats(self):
-        colour = "#000000"
+    @patch.object(contributions, "creator_of")
+    @patch.object(contributions, "batch_creators")
+    def test_outside_ranking_participants_are_included_in_season_stats(
+            self, batch_creators, creator_of):
+        ranked_colour = "#000000"
+        outside_colour = "#123456"
         sections = [
-            Section("2021秋", "TOP100", [Entry(f"主榜曲目{i}", [colour]) for i in range(15)]),
-            Section("2021秋", "ROOKIE", [Entry(f"新人曲目{i}", [colour]) for i in range(2)]),
-            Section("2021秋", "neta", [Entry("neta曲目", [colour])]),
-            Section("2021秋", "REMIX", [Entry("remix曲目", [colour])]),
+            Section("2021秋", "TOP100", [Entry("榜内歌曲", [ranked_colour])]),
+            Section("2021秋", "neta", [Entry("榜外有颜色歌曲", [outside_colour])]),
+            Section("2021秋", "REMIX", [Entry("混音歌曲", [])]),
         ]
-        legend = Legend(colour_to_name={colour: "贡献者"})
+        legend = Legend(colour_to_name={
+            ranked_colour: "榜内创建者",
+            outside_colour: "榜外标注创建者",
+        })
+        creator_of.side_effect = lambda _site, title, _cache: {
+            "混音歌曲": "榜外页面创建者",
+            "榜外未列出歌曲": "榜外页面创建者",
+        }.get(title)
 
-        counts = count_by_listed(FakeSite(), sections, legend, {})
+        counts = count_by_listed(
+            FakeSite(), sections, legend, {},
+            lambda _season: {"榜内歌曲", "榜外有颜色歌曲", "混音歌曲", "榜外未列出歌曲"})
 
-        self.assertEqual(counts["2021秋"]["#000000"], 17)
+        self.assertEqual(counts["2021秋"]["#000000"], 1)
+        self.assertEqual(counts["2021秋"]["#123456"], 1)
+        self.assertEqual(counts["2021秋"]["榜外页面创建者"], 2)
+
+    def test_template_participants_follows_api_continuation(self):
+        site = PagedSite([
+            {"query": {"embeddedin": [{"title": "榜内歌曲"}]},
+             "continue": {"continue": "-||", "eicontinue": "page|123"}},
+            {"query": {"embeddedin": [{"title": "榜外歌曲"}]}},
+        ])
+
+        participants = contributions.template_participants(site, "2021秋")
+
+        self.assertEqual(participants, ["榜内歌曲", "榜外歌曲"])
+        self.assertEqual(site.requests[1]["eicontinue"], "page|123")
 
     def test_redirect_titles_are_counted_as_one_song_per_season(self):
         colour = "#000000"

@@ -30,12 +30,11 @@ The bot can:
   the same name is a different song, and colouring it would credit its
   creator (and its season) here.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
-  A cell's colour is the hand-made creator annotation and wins outright; only
-  entries without a colour fall back to the creator of the local page, and only
-  when that page is a participant of the season - a same-name song from another
-  season is ignored here as well.  Some of the chart's numbers come from
-  bookkeeping outside the wiki and cannot be derived at all, so a cell is only
-  ever raised, never lowered.
+  The season's template participants are counted, including songs outside
+  TOP/ROOKIE rankings. A cell's colour is the hand-made creator annotation and
+  wins outright; other entries use the creator of the local page. Some chart
+  numbers come from bookkeeping outside the wiki and cannot be derived at all,
+  so a cell is only ever raised, never lowered.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``all``      - run all maintenance actions once. Toolforge and GitHub Actions
@@ -88,7 +87,7 @@ KNOWN_BOTS = {
     "滥用过滤器", "萌百娘", "重定向修复器",
 }
 
-# Sections counted in 相关统计: main rankings and ROOKIE only.
+# Explicit ranking sections; the chart also adds every season-template participant.
 def is_counted_section(name: str) -> bool:
     upper = name.upper()
     return upper.startswith("TOP") or upper.startswith("ROOKIE")
@@ -302,14 +301,23 @@ def template_participants(site, season: str) -> Optional[List[str]]:
 
     查询失败返回 ``None``：调用方不能把「没查到」当成「没有」。
     """
+    titles: List[str] = []
+    params = {}
     try:
-        data = site.simple_request(action="query", list="embeddedin", formatversion="2",
-                                   eititle=f"{SEASON_TEMPLATE}{season}", einamespace=0,
-                                   eilimit=500).submit()
+        while True:
+            data = site.simple_request(
+                action="query", list="embeddedin", formatversion="2",
+                eititle=f"{SEASON_TEMPLATE}{season}", einamespace=0,
+                eilimit="max", **params).submit()
+            titles.extend(entry["title"]
+                          for entry in data.get("query", {}).get("embeddedin", []))
+            continuation = data.get("continue")
+            if not continuation:
+                return titles
+            params = continuation
     except Exception as exc:  # noqa: BLE001
         pywikibot.error(f"{season}: 无法读取模板引用 ({exc})")
         return None
-    return [entry["title"] for entry in data.get("query", {}).get("embeddedin", [])]
 
 
 def belongs_to_season(season: str, target: str,
@@ -634,15 +642,41 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     cache: Dict[str, Optional[str]],
                     participants_of: Optional[Callable[[str], Optional[set]]] = None
                     ) -> Dict[str, Counter]:
+    """Count listed rankings and all other pages participating in each season.
+
+    A ranked cell's colour is its creator annotation. Participants outside the
+    ranked cells, including unlisted songs, are attributed to their first page
+    creator. Redirects and pages listed more than once count only once.
+    """
     result: Dict[str, Counter] = defaultdict(Counter)
     seen: Dict[str, set] = defaultdict(set)
     counted = [s for s in sections if is_counted_section(s.name)]
+    seasons = dict.fromkeys(s.season for s in counted)
+    participants: Dict[str, set] = {}
+    if participants_of is not None:
+        for season in seasons:
+            members = participants_of(season)
+            if members is not None:
+                participants[season] = members
+
     exists: Dict[str, bool] = {}
     resolved: Dict[str, str] = {}
-    batch_exists(site, (e.title for s in counted for e in s.entries), exists, resolved)
+    all_entries = [s for s in sections if s.season in seasons]
+    batch_exists(site, (e.title for s in all_entries for e in s.entries), exists, resolved)
+    batch_exists(site, (title for members in participants.values() for title in members),
+                 exists, resolved)
     # 先把要按"谁建的页面"归属的条目一次性查出来，避免每条一次请求
-    batch_creators(site, (e.title for s in counted for e in s.entries
+    batch_creators(site, (e.title for s in all_entries for e in s.entries
                           if not e.colours and exists.get(e.title)), cache, resolved)
+    batch_creators(site, (title for members in participants.values() for title in members
+                          if exists.get(title)), cache, resolved)
+    colours_by_target: Dict[str, List[str]] = {}
+    for section in all_entries:
+        for entry in section.entries:
+            target = resolved.get(entry.title, entry.title)
+            if entry.colours:
+                colours_by_target.setdefault(target, entry.colours)
+
     for section in counted:
         for entry in section.entries:
             target = resolved.get(entry.title, entry.title)
@@ -666,6 +700,22 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
             user = creator_of(site, target, cache)
             if user and user not in KNOWN_BOTS:
                 result[section.season][legend.identity(user)] += 1
+
+    for season, members in participants.items():
+        for title in members:
+            target = resolved.get(title, title)
+            if target in seen[season] or not exists.get(title):
+                continue
+            seen[season].add(target)
+            colours = colours_by_target.get(target, [])
+            if colours:
+                for colour in dict.fromkeys(colours):
+                    if colour in legend.colour_to_name:
+                        result[season][colour] += 1
+                continue
+            user = creator_of(site, target, cache)
+            if user and user not in KNOWN_BOTS:
+                result[season][legend.identity(user)] += 1
     return result
 
 

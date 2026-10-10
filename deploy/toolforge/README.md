@@ -216,13 +216,20 @@ call`，连 pywikibot 探测模块参数的 `action=paraminfo` 都挡），而�
 
 `user-config.py`（会提交到仓库）**不填** `usernames['zh']`——账号不进公开仓库，
 `bots/vocaloid_collection_contributions.py` 直接从上面这个文件读。GitHub Actions
-那边要把这一条也加进 secret `USER_PASSWORD_PY`，CI 才有官方站可用；否则两边都退回
-镜像（行为跟以前一样，这些条目继续不归属）。
+那边要把这一条也加进 secret `USER_PASSWORD_PY`。
+
+**但云 IP 登录不上**：2026-10-10 实测，从 Toolforge（Wikimedia 云 IP）发
+`action=login` 会被回 `Incorrect username or password entered. Please try again.`
+——同一组凭据在本机（住宅网络）是能登进去的（日志会打出对面这句话，看到它就说明
+不是密码写错）。所以云上的跑法基本取不到官方站，代码里因此留了一张核对表
+`MOEGIRL_FALLBACK`：只在这 13 条「镜像没有、官方站又问不到」的条目上用**当天查实
+的**结论兜底（表里有它们对应的萌百源条目名与创建者），在线结果永远优先。等哪天云
+上也能登录，把那张表删掉即可。
 
 官方站的结论缓存在同一个 `data/vocaloid_collection_moegirl.pickle` 里，多存一位
-来源（`icu` / `zh`）：官方站说「没有」才算定论，7 天内不再问。它握手超时很常见
-（实测重试一两次就能过），所以每条最多试 `MOEGIRL_OFFICIAL_ATTEMPTS` 次，登录失败
-也只影响这一轮——问不到就保持「未知」，不会把「没问到」写成「没有」。
+来源（`icu` / `zh` / `table`）：官方站说「没有」才算定论，7 天内不再问。它握手
+超时很常见（实测重试一两次就能过），所以每条最多试 `MOEGIRL_OFFICIAL_ATTEMPTS`
+次，登录失败也只影响这一轮——问不到就保持「未知」，不会把「没问到」写成「没有」。
 
 每小时任务也会查镜像：跨站导入的条目要靠它找真正的创建者（见上一节），查到的
 结果同样缓存在 `data/vocaloid_collection_moegirl.pickle`。镜像不是自己的 wiki，

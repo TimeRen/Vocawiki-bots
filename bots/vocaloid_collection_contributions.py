@@ -148,6 +148,31 @@ MOEGIRL_OFFICIAL_DELAY = 0.5
 MOEGIRL_CACHE_TTL = 7 * 24 * 3600  # 「萌娘没有这条」过一阵要重新确认
 MOEGIRL_SOURCE_MIRROR = "icu"  # 缓存里的答案是谁给的：镜像站
 MOEGIRL_SOURCE_OFFICIAL = "zh"  # 官方站（这时「没有」才算定论）
+MOEGIRL_SOURCE_FALLBACK = "table"  # 下面那张核对表
+
+# 「voca 条目名 -> (萌百源条目名, 源条目创建者)」核对表，只在**问不到官方站**时兜底。
+#
+# 这些条目在萌百都是「待审核」页面：镜像站抓不到，只能问官方站；而官方站只认住宅
+# 网络——2026-10-10 实测，从 Toolforge（Wikimedia 云 IP）登录会被回
+# ``Incorrect username or password``，机房 IP 基本都是这个下场。没有这张表，云上
+# 的每小时任务会把它们算成「无归属」，图表每轮重算时那些数字就会被慢慢磨回去。
+# 表里的名字是那天用机器人密码从官方站查实的（源条目最旧一版的作者）。在线结果
+# 优先于这张表；哪天云上也能登录了，整张表删掉即可。
+MOEGIRL_FALLBACK: Dict[str, Tuple[str, str]] = {
+    "Flare(PedestrianP)": ("Flare(初音未来)", "实验性：无用论废人"),
+    "Handicapper": ("Handicapper", "红茶大包子"),
+    "Hello, world(Lastscaler)": ("Hello, world(夏色花梨)", "Sandyzikun"),
+    "Lethe(Aliey:S)": ("Lethe", "Tibbie2017tibbie2018"),
+    "哦齁爱": ("哦齁爱", "高级火法"),
+    "奔向暗影，由阳光刺穿，闪耀着。": ("奔向暗影、由阳光刺穿、闪耀着。", "Luxzhuge"),
+    "完成(巡巡)": ("完成(初音未来)", "Wecury"),
+    "情感Metanoia": ("情感Metanoia", "雷欧妮"),
+    "拨云摘星": ("拨云摘星", "实验性：无用论废人"),
+    "毒素感伤文": ("毒素感伤文", "雷欧妮"),
+    "过敏症(szri)": ("Anaphylaxie", "Kim8394"),
+    "遗书(Nejimaki)": ("遗书(歌爱雪)", "粉丝12323"),
+    "喋喋不休吵死了！#小春六花版": ("喋喋不休吵死了！", "りょう ゆそう"),
+}
 
 # Bots / import accounts must not appear in the statistics.
 KNOWN_BOTS = {
@@ -1540,15 +1565,21 @@ class MoegirlSession:
             return None
         # 登录只发一次：第一次其实可能已经成功（响应读断了而已），再发一次会被回
         # 「BotPassword 会话不能重复登录」。所以随后用 userinfo 判断到底登进去没有。
-        self._submit({"action": "login", "lgname": name, "lgpassword": password,
-                      "lgtoken": tokens["logintoken"]}, post=True, attempts=1)
+        response = self._submit({"action": "login", "lgname": name,
+                                 "lgpassword": password,
+                                 "lgtoken": tokens["logintoken"]},
+                                post=True, attempts=1)
         info = (self._submit({"action": "query", "meta": "userinfo"},
                              attempts=MOEGIRL_OFFICIAL_ATTEMPTS) or {}
                 ).get("query", {}).get("userinfo") or {}
         if info.get("name") and not info.get("anon"):
             pywikibot.output(f"萌百官方站：已登录 {info['name']}")
             return self._opener
-        pywikibot.warning(f"萌百官方站：登录 {name} 失败，只用镜像")
+        # 把对面的原话带上：机房 IP（Toolforge 这类）会被回
+        # 「Incorrect username or password」，看到这句就知道不是密码写错了。
+        reason = ((response or {}).get("login") or {}).get("reason")
+        pywikibot.warning(f"萌百官方站：登录 {name} 失败"
+                          + (f"（{reason}）" if reason else "") + "，只用镜像")
         self._opener = None
         return None
 
@@ -1695,29 +1726,47 @@ def moegirl_source_title(editor: str, stamp, session: Optional[MoegirlSession] =
     return True, None
 
 
+def moegirl_fallback_creator(title: str, moe_cache: Optional[Dict] = None
+                             ) -> Optional[str]:
+    """核对表兜底：``MOEGIRL_FALLBACK`` 里记的源条目创建者。
+
+    只该在**问不到官方站**（没凭据、云 IP 被拒、网络失败）时用——在线结果是活的，
+    这张表是死的。
+    """
+    entry = MOEGIRL_FALLBACK.get(title)
+    if not entry:
+        return None
+    moe_title, creator = entry
+    if moe_cache is not None:
+        moe_cache[title] = (moe_title, creator, time.time(),
+                            MOEGIRL_SOURCE_FALLBACK)
+    return creator
+
+
 def moegirl_imported_creator(title: str, editor: Optional[str], stamp,
                              moe_cache: Optional[Dict] = None) -> Optional[str]:
     """镜像站没有的导入条目，改去官方站找它真正的创建者。
 
     先按标题（含标点变体）找；对不上时，拿导入版记的「源站那一版作者 + 时间」
-    反查源条目名再找一遍——voca 的条目名常被改成自己的消歧写法。问不到就返回
-    ``None``（不缓存），查明白了才把结论写进 ``moe_cache``。
+    反查源条目名再找一遍——voca 的条目名常被改成自己的消歧写法。都问不到就查
+    核对表 ``MOEGIRL_FALLBACK``；连表里也没有就返回 ``None``（不缓存），只有
+    官方站真给了结论才把「萌百没有这条」写进 ``moe_cache``。
     """
     cache = moe_cache if moe_cache is not None else {}
     cached = moegirl_cached(cache, title)
-    if cached is not None and cached[2] == MOEGIRL_SOURCE_OFFICIAL:
+    if cached is not None and cached[2] in (MOEGIRL_SOURCE_OFFICIAL,
+                                            MOEGIRL_SOURCE_FALLBACK):
         return cached[1]
     page = moegirl_official_page(title)
     if page is None:
-        return None
+        # 官方站整个问不到（没凭据、被 IP 拦、网络断）：只信核对表
+        return moegirl_fallback_creator(title, cache)
     if page.title:
         cache[title] = (page.title, page.creator, time.time(),
                         MOEGIRL_SOURCE_OFFICIAL)
         return page.creator
     asked, source = moegirl_source_title(editor, stamp) if editor else (True, None)
-    if not asked:
-        return None
-    if source and source != title:
+    if asked and source and source != title:
         found = moegirl_official_page(source)
         if found is not None and found.title and found.creator:
             pywikibot.output(f"{title}: 萌百源条目是《{found.title}》"
@@ -1725,6 +1774,11 @@ def moegirl_imported_creator(title: str, editor: Optional[str], stamp,
             cache[title] = (found.title, found.creator, time.time(),
                             MOEGIRL_SOURCE_OFFICIAL)
             return found.creator
+    fallback = moegirl_fallback_creator(title, cache)
+    if fallback is not None:
+        return fallback
+    if not asked:
+        return None  # 没问到，不下结论、也不写缓存
     cache[title] = (None, None, time.time(), MOEGIRL_SOURCE_OFFICIAL)
     return None
 

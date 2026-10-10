@@ -816,16 +816,22 @@ class TestMoegirlOfficial(TestCase):
     def test_login_that_never_lands_leaves_the_session_unusable(self):
         opener = FakeOpener([
             {"query": {"tokens": {"logintoken": "tok"}}},
-            {"login": {"result": "WrongPass"}},
+            {"login": {"result": "Failed",
+                       "reason": "Incorrect username or password entered."}},
             {"query": {"userinfo": {"name": "1.2.3.4", "anon": True}}},
         ])
         session = contributions.MoegirlSession(("人间百态@vclc", "secret"))
 
         with patch.object(contributions.urllib.request, "build_opener",
                           return_value=opener), \
-                patch.object(contributions.time, "sleep"):
+                patch.object(contributions.time, "sleep"), \
+                patch.object(contributions.pywikibot, "warning") as warning:
             self.assertFalse(session.ready())
             self.assertIsNone(session.api({"action": "query", "meta": "tokens"}))
+
+        # 机房 IP 会被回一句「密码不对」，得把对面的原话带出来，才知道不是写错了
+        self.assertIn("Incorrect username or password",
+                      " ".join(str(call) for call in warning.call_args_list))
 
     def test_missing_token_leaves_the_session_unusable(self):
         opener = FakeOpener([{"query": {}}])
@@ -940,20 +946,76 @@ class TestMoegirlOfficial(TestCase):
         cache = {}
 
         creator = contributions.moegirl_imported_creator(
-            "Flare(PedestrianP)", "源站编辑者", "2024-01-01T00:00:00Z", cache)
+            "无准备条目(作曲者)", "源站编辑者", "2024-01-01T00:00:00Z", cache)
 
         self.assertEqual(creator, "源站创建者")
-        self.assertEqual(cache["Flare(PedestrianP)"][:2],
+        self.assertEqual(cache["无准备条目(作曲者)"][:2],
                          ("Flare(初音未来)", "源站创建者"))
-        self.assertEqual(cache["Flare(PedestrianP)"][3],
+        self.assertEqual(cache["无准备条目(作曲者)"][3],
                          contributions.MOEGIRL_SOURCE_OFFICIAL)
+
+    @patch.object(contributions, "moegirl_official_page", return_value=None)
+    def test_imported_creator_uses_the_checked_table_when_it_cannot_ask(
+            self, _page):
+        # 机房 IP（Toolforge 那种）登录会被回「Incorrect username or password」，
+        # 2026-10-10 查实的结论就写在那张表里，别让云上的跑法把它们算丢。
+        self.assertIn("Flare(PedestrianP)", contributions.MOEGIRL_FALLBACK)
+        cache = {}
+
+        creator = contributions.moegirl_imported_creator(
+            "Flare(PedestrianP)", "实验性：无用论废人", "2022-07-02T07:47:18Z",
+            cache)
+
+        self.assertEqual(creator, "实验性：无用论废人")
+        self.assertEqual(cache["Flare(PedestrianP)"],
+                         ("Flare(初音未来)", "实验性：无用论废人",
+                          cache["Flare(PedestrianP)"][2],
+                          contributions.MOEGIRL_SOURCE_FALLBACK))
+
+    @patch.object(contributions, "moegirl_source_title", return_value=(True, None))
+    @patch.object(contributions, "moegirl_official_page")
+    def test_online_answers_win_over_the_checked_table(self, official_page,
+                                                        _source_title):
+        # 官方站说没有、时间戳也反查不到，但表里有：照表记，并且不写「没有这条」
+        official_page.side_effect = [contributions.MoePage(None, None, True)]
+        cache = {}
+
+        creator = contributions.moegirl_imported_creator(
+            "Handicapper", "Acmida", "2024-11-23T16:04:55Z", cache)
+
+        self.assertEqual(creator, "红茶大包子")
+        self.assertEqual(cache["Handicapper"][3],
+                         contributions.MOEGIRL_SOURCE_FALLBACK)
+
+    @patch.object(contributions, "moegirl_source_title", return_value=(True, None))
+    @patch.object(contributions, "moegirl_official_page")
+    def test_a_title_outside_the_table_is_still_cached_as_absent(
+            self, official_page, _source_title):
+        official_page.side_effect = [contributions.MoePage(None, None, True)]
+        cache = {}
+
+        self.assertIsNone(contributions.moegirl_imported_creator(
+            "谁都没听过的曲", "某人", "2024-01-01T00:00:00Z", cache))
+        self.assertEqual(cache["谁都没听过的曲"],
+                         (None, None, cache["谁都没听过的曲"][2],
+                          contributions.MOEGIRL_SOURCE_OFFICIAL))
+
+    @patch.object(contributions, "moegirl_official_page")
+    def test_a_table_answer_is_not_asked_again(self, official_page):
+        cache = {"Handicapper": ("Handicapper", "红茶大包子", time.time(),
+                                 contributions.MOEGIRL_SOURCE_FALLBACK)}
+
+        self.assertEqual(contributions.moegirl_imported_creator(
+            "Handicapper", "Acmida", "2024-11-23T16:04:55Z", cache),
+            "红茶大包子")
+        official_page.assert_not_called()
 
     @patch.object(contributions, "moegirl_official_page", return_value=None)
     def test_imported_creator_does_not_cache_a_query_it_could_not_make(self, _page):
         cache = {}
 
         self.assertIsNone(contributions.moegirl_imported_creator(
-            "曲", "源站编辑者", "2024-01-01T00:00:00Z", cache))
+            "没人认识的新曲", "源站编辑者", "2024-01-01T00:00:00Z", cache))
 
         self.assertEqual(cache, {})
 

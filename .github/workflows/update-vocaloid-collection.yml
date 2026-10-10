@@ -45,8 +45,8 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-    # 一轮维护约 30 秒，给足余量即可
-    timeout-minutes: 15
+    # 一轮维护约 30 秒；缓存换格式那一次要重查创建者，给足余量
+    timeout-minutes: 30
     env:
       PYTHONIOENCODING: utf-8
       VOCA_USERNAME: ${{ secrets.VOCA_USERNAME }}

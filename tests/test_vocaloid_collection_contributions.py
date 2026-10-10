@@ -58,15 +58,53 @@ class TestCountByListed(TestCase):
         site = object()
         page = page_factory.return_value
         page.revisions.return_value = iter([{"user": "User"}])
-        cache = {"Cached": "Existing"}
+        cache = {"Cached": ("Existing", "")}
 
         contributions.batch_creators(
             site, ["Alias", "Target", "Cached"], cache, {"Alias": "Target"})
 
-        self.assertEqual(cache, {"Cached": "Existing", "Target": "User"})
+        self.assertEqual(cache["Target"], ("User", ""))
+        self.assertEqual(cache["Cached"], ("Existing", ""))
         page_factory.assert_called_once_with(site, "Target")
         page.revisions.assert_called_once_with(
             total=1, reverse=True, content=False)
+
+    @patch.object(contributions, "Page")
+    def test_creator_of_keeps_the_cross_wiki_prefix(self, page_factory):
+        # zhmoe>某人：voca 抄的是源站最后一版的作者，来源得留着，page_creator
+        # 才知道不能拿这个人当创建者
+        page_factory.return_value.revisions.return_value = iter(
+            [{"user": "zhmoe>源站编辑者"}])
+        cache = {}
+
+        self.assertEqual(contributions.creator_of(object(), "曲", cache),
+                         "zhmoe>源站编辑者")
+        self.assertEqual(cache["曲"], ("zhmoe>源站编辑者", "zhmoe"))
+
+    @patch.object(contributions, "Page")
+    def test_creator_of_requeries_legacy_cache_entries(self, page_factory):
+        # 旧缓存只存了剥掉前缀的用户名，分辨不出来源，只能重查一次
+        page_factory.return_value.revisions.return_value = iter(
+            [{"user": "本站用户"}])
+        cache = {"曲": "本站用户"}
+
+        contributions.creator_of(object(), "曲", cache)
+
+        page_factory.assert_called_once()
+        self.assertEqual(cache["曲"], ("本站用户", ""))
+
+    def test_season_template_ignores_links_that_are_not_articles(self):
+        # Navbox 尾巴上的 [[Category:...]] 会落进最后一个 list 参数，被当成一首歌
+        # 收下来，最后给创建那个分类页的人记一份贡献。
+        text = (
+            "| title = 其他歌曲\n"
+            "| group1 = 未上榜歌曲\n"
+            "| list1 = [[榜外歌曲]] • [[Category:The VOCALOID Collection导航模板]]\n"
+        )
+
+        parsed = contributions.parse_season_template(text)
+
+        self.assertEqual(set(parsed["neta:未上榜歌曲"].values()), {"榜外歌曲"})
 
     @patch.object(contributions, "creator_of")
     @patch.object(contributions, "batch_creators")
@@ -328,6 +366,35 @@ class TestScheduledMaintenance(TestCase):
         render_chart.assert_called_once()
 
 
+class TestPageCreator(TestCase):
+    """跨站导入的首版挂的是源站最后一版的作者，不能拿来当创建者。"""
+
+    @patch.object(contributions, "creator_of", return_value="本站用户")
+    @patch.object(contributions, "moegirl_creator_of")
+    def test_local_creator_is_used_as_is(self, moegirl, _creator_of):
+        self.assertEqual(contributions.page_creator(None, "曲", {}, {}), "本站用户")
+        moegirl.assert_not_called()
+
+    @patch.object(contributions, "creator_of", return_value="zhmoe>源站最后编辑者")
+    @patch.object(contributions, "moegirl_creator_of", return_value="真正的作者")
+    def test_imported_revision_defers_to_the_source_article(
+            self, _moegirl, _creator_of):
+        self.assertEqual(contributions.page_creator(None, "曲", {}, {}), "真正的作者")
+
+    @patch.object(contributions, "creator_of", return_value="zhmoe>源站最后编辑者")
+    @patch.object(contributions, "moegirl_creator_of", return_value=None)
+    def test_imports_are_not_credited_when_the_source_is_unknown(
+            self, _moegirl, _creator_of):
+        # 宁可不归属，也不拿源站的最后一位编辑者顶替
+        self.assertIsNone(contributions.page_creator(None, "曲", {}, {}))
+
+    @patch.object(contributions, "creator_of", return_value="wikipedia>某人")
+    @patch.object(contributions, "moegirl_creator_of")
+    def test_other_wikis_are_not_credited(self, moegirl, _creator_of):
+        self.assertIsNone(contributions.page_creator(None, "曲", {}, {}))
+        moegirl.assert_not_called()
+
+
 class TestMoegirlCrossCheck(TestCase):
     """voca 上说不出创建者时，拿萌娘百科的同名条目当参照。"""
 
@@ -431,6 +498,23 @@ class TestMoegirlCrossCheck(TestCase):
         self.assertIn("萌娘《同曲》（经重定向）创建者 萌娘用户", report)
         self.assertIn("萌娘用户：+1", report)
         self.assertIn("只出报告", report)
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "batch_exists")
+    def test_report_marks_imported_first_revisions(
+            self, batch_exists, batch_creators):
+        # 「voca 首版」其实来自源站最后一版时要写清楚，否则看报告的人会把
+        # 那当成创建者。
+        sections = [Section("2021秋", "TOP100", [Entry("曲", [])])]
+        cache = {"曲": ("zhmoe>源站最后编辑者", "zhmoe")}
+        pages = {"曲": contributions.MoePage("同曲", "真正的作者", True)}
+
+        with patch.object(contributions, "moegirl_lookup", return_value=pages):
+            report = contributions.moegirl_report(
+                object(), sections, Legend(), cache, {}, moe_cache={})
+
+        self.assertIn("voca 首版 源站最后编辑者（萌百导入）", report)
+        self.assertIn("最后一版", report)
 
     @patch.object(contributions, "batch_creators")
     @patch.object(contributions, "batch_exists")

@@ -67,6 +67,14 @@ first revision timestamps are recent; window counting therefore only produces
 meaningful output for seasons that are still running.  ``--basis listed``
 (the default) instead resolves the creator of every entry listed in a season's
 tables from its local first revision, which works for every season.
+
+How a creator is resolved (``colour``, ``counts`` and ``stats`` all share it,
+see ``page_creator``): the author of the page's *oldest* revision.  An imported
+revision is the exception - voca.wiki copied most pre-2024 entries from
+Moegirlpedia, and such a revision carries the **source article's last editor**
+(``zhmoe>某用户``), not its creator.  For those entries the creator comes from
+the source article's own oldest revision instead, and when that cannot be
+resolved the entry is credited to nobody rather than to whoever imported it.
 """
 
 from __future__ import annotations
@@ -101,6 +109,9 @@ CHART_SERIES_PREFIX = "ボカコレ"
 # ``action-notallowed / Unauthorized API call``，prop=revisions、action=parse、
 # list=search 全都不给，拿不到最旧一版的作者。moegirl.icu 是整站镜像（pageid 与
 # 官方一致，历史也全），user-config.py 里本来就有它的 family。
+#
+# 这里查的是「条目的创建者」：跨站导入的页面（``zhmoe>某人``）首版挂的是源站
+# 最后一版的作者，只有源站自己的最旧一版才是创建者（见 ``page_creator``）。
 MOEGIRL_API = "https://moegirl.icu/api.php"
 # 请求头必须是 ASCII：中文会让 urllib 直接抛 UnicodeEncodeError
 MOEGIRL_UA = ("Vocawiki-bots/1.0 (maintains voca.wiki contribution list; "
@@ -175,6 +186,16 @@ TEMPLATE_SECTIONS = {"TOP100": "TOP100", "TOP30": "TOP30", "ROOKIE": "ROOKIE",
 TEMPLATE_ITEM_RE = re.compile(r"\|\s*([A-Za-z0-9_]+)\s*=\s*")
 GROUP_RANGE_RE = re.compile(r"(\d+)\s*[-–~〜ー]\s*(\d+)\s*位")
 LIST_LINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]")
+# Navbox 尾巴上的 [[Category:...]]（常在 <noinclude> 里）会落在最后一个 list 参数
+# 的值里，被当成一首歌收下来，最后给创建那个分类页的人记一份贡献。
+NON_ARTICLE_RE = re.compile(
+    r"^(?:Category|File|Image|Template|User|User talk|Help|Module|Widget|"
+    r"MediaWiki|Talk|Special|Portal|Draft)\s*:", re.I)
+
+
+def is_article_title(title: str) -> bool:
+    """链接目标是不是条目：模板里夹着的 [[Category:...]] 这类不算。"""
+    return not NON_ARTICLE_RE.match(title.strip())
 # 贡献列表里的名次单元格：{{colorlink|#色|标题|名次}} 或 [[标题|名次]]
 CELL_RANK_RE = re.compile(r"\{\{colorlink\|([^|]*)\|([^|}]+)\|(\d+)\}\}|\[\[([^\]|]+)\|(\d+)\]\]")
 
@@ -329,7 +350,8 @@ def parse_season_template(text: str) -> Dict[str, Dict[int, str]]:
             continue
         listing = re.fullmatch(r"list(\d+)", key)
         if listing and listing.group(1) in starts:
-            links = [title.strip() for title in LIST_LINK_RE.findall(value) if title.strip()]
+            links = [title.strip() for title in LIST_LINK_RE.findall(value)
+                     if title.strip() and is_article_title(title)]
             if starts[listing.group(1)] is None:
                 label = labels.get(listing.group(1), "")
                 key_name = f"{section}:{label}" if label else section
@@ -545,11 +567,37 @@ def recompute_counts(text: str, created: Dict[Tuple[str, str], int]) -> Tuple[st
 # --------------------------------------------------------------------------- #
 # stats
 # --------------------------------------------------------------------------- #
+# voca 把跨站导入的版本挂在「源站前缀>用户名」名下（``zhmoe>某人``）。那一版连作者和
+# 时间都是从源站抄来的，而且抄的通常是源站条目的**最后一版**——拿它当创建者就错了
+# （2026-10-10 反馈）。真正的作者要去源站查，见 ``page_creator``。
+IMPORT_USER_RE = re.compile(r"^([A-Za-z0-9_-]+)>(.+)$")
+IMPORT_SOURCES = {"zhmoe": "萌娘百科"}
+
+
 def strip_prefix(user: str) -> str:
-    return user.split(">", 1)[1] if ">" in user else user
+    """去掉跨站导入前缀，取用户名本身。"""
+    match = IMPORT_USER_RE.match(user)
+    return match.group(2) if match else user
 
 
-def load_cache(path: Path) -> Dict[str, Optional[str]]:
+def import_source(user: str) -> str:
+    """``zhmoe>某人`` 的来源是 ``zhmoe``；本站账号返回空串。"""
+    match = IMPORT_USER_RE.match(user)
+    return match.group(1) if match else ""
+
+
+def cached_creator(cache: Dict, title: str) -> Optional[Tuple[str, str]]:
+    """``(最旧一版的原始用户名, 跨站来源)``；没有缓存返回 ``None``。
+
+    旧缓存里存的是剥掉前缀的用户名，分辨不出来源，只能当作没缓存、重查一次。
+    """
+    entry = cache.get(title)
+    if isinstance(entry, tuple) and len(entry) == 2:
+        return entry
+    return None
+
+
+def load_cache(path: Path) -> Dict:
     if path.exists():
         try:
             with open(path, "rb") as f:
@@ -559,13 +607,13 @@ def load_cache(path: Path) -> Dict[str, Optional[str]]:
     return {}
 
 
-def save_cache(path: Path, cache: Dict[str, Optional[str]]) -> None:
+def save_cache(path: Path, cache: Dict) -> None:
     path.parent.mkdir(exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def batch_creators(site, titles: Iterable[str], cache: Dict[str, Optional[str]],
+def batch_creators(site, titles: Iterable[str], cache: Dict,
                    resolved: Optional[Dict[str, str]] = None) -> None:
     """Fill ``cache`` for many titles using oldest-revision queries.
 
@@ -578,18 +626,24 @@ def batch_creators(site, titles: Iterable[str], cache: Dict[str, Optional[str]],
     pending: List[str] = []
     for title in titles:
         target = resolved.get(title, title)
-        if target and target not in cache and target not in pending:
+        if target and cached_creator(cache, target) is None and target not in pending:
             pending.append(target)
     for title in pending:
         creator_of(site, title, cache)
 
 
-def creator_of(site, title: str, cache: Dict[str, Optional[str]]):
-    if title in cache:
-        return cache[title]
+def creator_of(site, title: str, cache: Dict) -> Optional[str]:
+    """页面最旧一版的用户名，**原始写法**（跨站导入会带上 ``zhmoe>`` 前缀）。
+
+    带前缀的那一版是导入时连源站作者一起抄过来的，不能直接当创建者用，
+    调用方请走 ``page_creator``。
+    """
+    cached = cached_creator(cache, title)
+    if cached is not None:
+        return cached[0]
     try:
         revisions = list(Page(site, title).revisions(total=1, reverse=True, content=False))
-        user = strip_prefix(revisions[0]["user"]) if revisions else None
+        user = revisions[0]["user"] if revisions else None
     except NoPageError:
         # 不缓存：条目可能马上就要被创建（否则会把"还没建"记成永久结论）
         return None
@@ -597,7 +651,7 @@ def creator_of(site, title: str, cache: Dict[str, Optional[str]]):
         pywikibot.error(f"{title}: {exc}")
         return None  # do not cache transient failures
     if user:
-        cache[title] = user
+        cache[title] = (user, import_source(user))
     return user
 
 
@@ -712,11 +766,12 @@ def season_window(season: str, end_shift_days: int = 0) -> Tuple[datetime, datet
 
 
 def count_by_listed(site, sections: List[Section], legend: Legend,
-                    cache: Dict[str, Optional[str]],
+                    cache: Dict,
                     participants_of: Optional[Callable[[str], Optional[set]]] = None,
                     songs_of: Optional[Callable[[str], Optional[set]]] = None,
                     excluded_of: Optional[Callable[[str], Optional[set]]] = None,
-                    excluded: Optional[Dict[str, Counter]] = None
+                    excluded: Optional[Dict[str, Counter]] = None,
+                    moe_cache: Optional[Dict] = None
                     ) -> Dict[str, Counter]:
     """Count the ranked cells plus the rest of the season's songs.
 
@@ -792,7 +847,7 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     section.season, target, participants_of):
                 # 同名不同曲，页面是别的赛季的歌：算进来就会给这一季添一个假数字
                 continue
-            user = creator_of(site, target, cache)
+            user = page_creator(site, target, cache, moe_cache)
             if user and user not in KNOWN_BOTS:
                 result[section.season][legend.identity(user)] += 1
 
@@ -808,7 +863,7 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     if colour in legend.colour_to_name:
                         result[season][colour] += 1
                 continue
-            user = creator_of(site, target, cache)
+            user = page_creator(site, target, cache, moe_cache)
             if user and user not in KNOWN_BOTS:
                 result[season][legend.identity(user)] += 1
 
@@ -827,7 +882,7 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                         if colour in legend.colour_to_name:
                             counter[colour] += 1
                     continue
-                user = creator_of(site, target, cache)
+                user = page_creator(site, target, cache, moe_cache)
                 if user and user not in KNOWN_BOTS:
                     counter[legend.identity(user)] += 1
     return result
@@ -1089,9 +1144,10 @@ def text_colour(background: str) -> str:
 
 
 def plan_colours(site, sections: List[Section], legend: Legend,
-                 cache: Dict[str, Optional[str]],
+                 cache: Dict,
                  exists: Dict[str, bool],
-                 participants_of: Optional[Callable[[str], Optional[set]]] = None
+                 participants_of: Optional[Callable[[str], Optional[set]]] = None,
+                 moe_cache: Optional[Dict] = None
                  ) -> Dict[str, Tuple[str, str]]:
     """entry title -> (background colour, page title to link to).
 
@@ -1129,7 +1185,7 @@ def plan_colours(site, sections: List[Section], legend: Legend,
             pywikibot.warning(f"{season}/{entry.title}: {target} 不是本赛季的参赛曲目，"
                               f"同名不同曲，跳过上色")
             continue
-        user = creator_of(site, target, cache)
+        user = page_creator(site, target, cache, moe_cache)
         if not user or user in KNOWN_BOTS:
             continue
         identity = legend.identity(user)
@@ -1341,17 +1397,57 @@ def moegirl_lookup(titles: Iterable[str], cache: Dict) -> Dict[str, MoePage]:
     return result
 
 
+def moegirl_creator_of(title: str, moe_cache: Optional[Dict] = None) -> Optional[str]:
+    """萌娘百科同名条目的创建者（最旧一版作者）；没有同名条目或查不到返回 ``None``。"""
+    if moe_cache is None:
+        moe_cache = {}
+    page = moegirl_lookup([title], moe_cache).get(title)
+    if page is None or not page.title:
+        return None
+    return page.creator
+
+
+def page_creator(site, title: str, cache: Dict,
+                 moe_cache: Optional[Dict] = None) -> Optional[str]:
+    """这个条目的创建者该记谁。
+
+    voca 的首版若是跨站导入的，那一版挂的是**源站条目的最后一版**作者（见
+    ``IMPORT_USER_RE``），不是创建者，照它算就会把源站最后一位编辑者当成创建者。
+    这种条目改去源站找真正的作者，目前只认萌娘百科（``zhmoe``）；源站也查不到时
+    宁可不归属，也不拿导入者顶替。
+    """
+    raw = creator_of(site, title, cache)
+    if raw is None:
+        return None
+    source = import_source(raw)
+    if not source:
+        return raw
+    if source not in IMPORT_SOURCES:
+        pywikibot.warning(f"{title}: 首版来自 {source}>，认不出源站，不归属")
+        return None
+    creator = moegirl_creator_of(title, moe_cache)
+    if creator is None:
+        pywikibot.warning(
+            f"{title}: 首版是{IMPORT_SOURCES[source]}导入的"
+            f"（{strip_prefix(raw)} 只是源站最后一版的作者），源站也查不到作者，不归属")
+        return None
+    return strip_prefix(creator)
+
+
 def moegirl_candidates(sections: List[Section], legend: Legend,
                        songs_of: Optional[Callable[[str], Optional[set]]],
                        exists: Dict[str, bool], resolved: Dict[str, str],
-                       creators: Dict[str, Optional[str]]) -> List[Dict]:
+                       creators: Dict[str, Optional[str]],
+                       imports: Optional[Dict[str, str]] = None) -> List[Dict]:
     """这一轮值得拿去和萌娘百科比对的条目。
 
-    ``creators`` 是 ``{voca 页面标题: 首版作者}``。三类值得比对：本机还没有页面
-    （``red``）、页面上标的创建者与首版作者不是同一个人（``mismatch``）、首版作者
-    是机器人/导入账号所以统计里被整个丢掉（``bot``）。格子的颜色是全页面共用的
-    标注（榜外歌曲也一样），所以榜外歌曲也要拿它来比。
+    ``creators`` 是 ``{voca 页面标题: 首版作者}``；``imports`` 记下哪些条目的首版
+    是跨站导入的（那份「作者」其实是源站最后一版的编辑者）。三类值得比对：本机还
+    没有页面（``red``）、页面上标的创建者与首版作者不是同一个人（``mismatch``）、
+    首版作者是机器人/导入账号所以统计里被整个丢掉（``bot``）。格子的颜色是全页面
+    共用的标注（榜外歌曲也一样），所以榜外歌曲也要拿它来比。
     """
+    imports = imports or {}
     counted = [s for s in sections if is_counted_section(s.name)]
     seasons = list(dict.fromkeys(s.season for s in counted))
     colours_by_target: Dict[str, List[str]] = {}
@@ -1380,7 +1476,7 @@ def moegirl_candidates(sections: List[Section], legend: Legend,
             return
         rows.append({"season": season, "section": name, "title": title,
                      "target": target, "colours": colours, "local": local,
-                     "reason": reason})
+                     "source": imports.get(target, ""), "reason": reason})
 
     for section in counted:
         for entry in section.entries:
@@ -1412,9 +1508,17 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
     resolved: Dict[str, str] = {}
     batch_exists(site, titles, exists, resolved)
     batch_creators(site, (t for t in titles if exists.get(t)), cache, resolved)
-    creators = {target: cache[target] for target in
-                (resolved.get(t, t) for t in titles) if target in cache}
-    rows = moegirl_candidates(sections, legend, songs_of, exists, resolved, creators)
+    creators: Dict[str, Optional[str]] = {}
+    imports: Dict[str, str] = {}
+    for target in (resolved.get(t, t) for t in titles):
+        cached = cached_creator(cache, target)
+        if cached is None:
+            continue
+        creators[target] = strip_prefix(cached[0])
+        if cached[1]:
+            imports[target] = cached[1]
+    rows = moegirl_candidates(sections, legend, songs_of, exists, resolved,
+                              creators, imports)
     if not rows:
         return "  （没有需要比对的条目）"
     pages = moegirl_lookup((row["title"] for row in rows), moe_cache)
@@ -1429,6 +1533,9 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
              + "、".join(f"{label} {sum(1 for r in rows if r['reason'] == key)}"
                          for key, label in reasons)
              + f"）；萌娘有同名条目 {found}/{asked} 条（问到的）"]
+    if any(row["source"] for row in rows):
+        lines.append("（「voca 首版」标了「萌百导入」的，那一版是导入时从源站抄来的"
+                     "**最后一版**，作者不是创建者；机器人现在改记源站最旧一版的作者）")
 
     gains: Counter = Counter()
     outside = Counter()
@@ -1452,7 +1559,8 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
                 parts.append("标注 " + "、".join(
                     legend.colour_to_name.get(c, c) for c in row["colours"]))
             if row["local"]:
-                parts.append(f"voca 首版 {row['local']}")
+                mark = "（萌百导入）" if row["source"] else ""
+                parts.append(f"voca 首版 {row['local']}{mark}")
             if not page.known:
                 parts.append("萌娘查询失败")
             elif page.title is None:
@@ -1592,6 +1700,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
 
     DATA_DIR.mkdir(exist_ok=True)
     cache = load_cache(CREATOR_CACHE)
+    moe_cache = load_cache(MOEGIRL_CACHE)
     text = original
     created = None
     plan: Dict[str, Tuple[str, str]] = {}
@@ -1698,7 +1807,8 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         if synced:
             sections = parse_sections(text)
     if "colour" in actions:
-        plan = plan_colours(site, sections, legend, cache, exists, participants_of)
+        plan = plan_colours(site, sections, legend, cache, exists, participants_of,
+                            moe_cache)
         text, coloured = apply_colours(text, plan)
         if coloured:
             sections = parse_sections(text)
@@ -1711,7 +1821,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     if "stats" in actions:
         excluded: Dict[str, Counter] = {}
         counts = (count_by_listed(site, sections, legend, cache, participants_of,
-                                  songs_of, excluded_of, excluded)
+                                  songs_of, excluded_of, excluded, moe_cache)
                   if basis == "listed" else count_by_window(site, sections))
         text, _ = render_chart(text, sections, legend, counts, excluded)
         dropped = sum(sum(entry.values()) for entry in excluded.values())
@@ -1720,12 +1830,11 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         report = build_report(site, sections, legend, cache, exists, plan)
         pywikibot.output("异常报告:\n" + (report or "  （无）"))
     if "moe" in actions:
-        moe_cache = load_cache(MOEGIRL_CACHE)
         report = moegirl_report(site, sections, legend, cache, exists,
                                 songs_of, moe_cache)
-        save_cache(MOEGIRL_CACHE, moe_cache)
         pywikibot.output("萌娘百科交叉比对:\n" + (report or "  （无）"))
 
+    save_cache(MOEGIRL_CACHE, moe_cache)
     save_cache(CREATOR_CACHE, cache)
 
     if actions <= {"report", "moe"}:

@@ -545,13 +545,18 @@ def creator_of(site, title: str, cache: Dict[str, Optional[str]]):
 
 
 def batch_exists(site, titles: Iterable[str], exists: Dict[str, bool],
-                 resolved: Optional[Dict[str, str]] = None) -> None:
+                 resolved: Optional[Dict[str, str]] = None,
+                 canonical: Optional[Dict[str, str]] = None) -> None:
     """Fill ``exists`` for many titles using batched ``prop=info`` queries.
 
     When ``resolved`` is given it also records which titles are redirects and
     what they point at, so the caller can both credit the real page's creator
     and point the link straight at it (the page has dozens of romanised
     redirect titles).
+
+    When ``canonical`` is given it records **every** title's on-site form, so a
+    caller can compare two hand-written title lists that spell the same page
+    differently (``ダウナ`` / ``Downa``, ``vivid(郁P)`` / ``Vivid(郁P)``).
     """
     pending = [t for t in dict.fromkeys(titles) if t not in exists]
     for i in range(0, len(pending), 50):
@@ -573,6 +578,8 @@ def batch_exists(site, titles: Iterable[str], exists: Dict[str, bool],
             key = normalized.get(title, title)
             final = redirected.get(key, key)
             exists[title] = present.get(final, False)
+            if canonical is not None:
+                canonical[title] = final
             if resolved is not None and final != key:
                 resolved[title] = final
 
@@ -1235,10 +1242,25 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
             pywikibot.output(f"  同名不同曲，不改写: {note}")
         if len(foreign) > 20:
             pywikibot.output(f"  ……另有 {len(foreign) - 20} 处同名不同曲未逐条列出")
-        missing = [f"{season}/{title}" for season, secs in wanted.items()
-                   for title in sorted((participants_of(season) or set())
-                                       - {t for ranks in secs.values() for t in ranks.values()}
-                                       - NON_SONG_PAGES)]
+        # 模板里的标题和页面上的标题写法常常不同（模板写日文/繁体，页面是中文真
+        # 标题，或者只差首字母大小写），两边都按站上真标题归一后再比，否则这条
+        # 报告会全是「ダウナ vs Downa」这种噪声。
+        template_titles = [title for secs in wanted.values()
+                           for ranks in secs.values() for title in ranks.values()]
+        members_by_season = {season: participants_of(season) or set() for season in wanted}
+        canonical: Dict[str, str] = {}
+        batch_exists(site, dict.fromkeys(
+            template_titles
+            + [title for members in members_by_season.values() for title in members]),
+            {}, None, canonical)
+
+        def listed_key(title: str) -> str:
+            return title_key(canonical.get(title, title))
+
+        in_template = {listed_key(title) for title in template_titles}
+        missing = [f"{season}/{title}" for season, members in members_by_season.items()
+                   for title in sorted(members)
+                   if listed_key(title) not in in_template]
         if missing:
             pywikibot.output(f"有赛季模板但不在该赛季榜单里: {len(missing)} 条，例如："
                              + "；".join(missing[:8]))

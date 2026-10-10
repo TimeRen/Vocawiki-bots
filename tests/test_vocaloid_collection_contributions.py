@@ -128,6 +128,17 @@ class TestCountByListed(TestCase):
 
         self.assertEqual(set(parsed["neta"].values()), {"榜外歌曲甲", "榜外歌曲乙"})
 
+    def test_batch_exists_records_canonical_titles(self):
+        # 模板写 ダウナ、页面叫 Downa：报告要靠这份归一后的标题来比对，
+        # 否则全是写法差异造成的噪声。
+        site = FakeSite(redirects={"ダウナ": "Downa"})
+        exists, canonical = {}, {}
+
+        contributions.batch_exists(site, ["ダウナ", "Downa"], exists, None, canonical)
+
+        self.assertEqual(exists, {"ダウナ": True, "Downa": True})
+        self.assertEqual(canonical, {"ダウナ": "Downa", "Downa": "Downa"})
+
     def test_template_participants_follows_api_continuation(self):
         site = PagedSite([
             {"query": {"embeddedin": [{"title": "榜内歌曲"}]},

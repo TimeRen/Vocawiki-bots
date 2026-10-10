@@ -828,6 +828,10 @@ class TestMoegirlOfficial(TestCase):
                 patch.object(contributions.pywikibot, "warning") as warning:
             self.assertFalse(session.ready())
             self.assertIsNone(session.api({"action": "query", "meta": "tokens"}))
+            # 凭据被拒就别再敲了：第二次 ready() 不该再发请求（机房 IP 会被回
+            # 「密码不对」，反复重试只会把自己送进对方的限流）
+            self.assertFalse(session.ready())
+            self.assertEqual(len(opener.requests), 3)
 
         # 机房 IP 会被回一句「密码不对」，得把对面的原话带出来，才知道不是写错了
         self.assertIn("Incorrect username or password",

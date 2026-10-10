@@ -1577,9 +1577,13 @@ class MoegirlSession:
             return self._opener
         # 把对面的原话带上：机房 IP（Toolforge 这类）会被回
         # 「Incorrect username or password」，看到这句就知道不是密码写错了。
-        reason = ((response or {}).get("login") or {}).get("reason")
+        reason = ((response or {}).get("login") or {}).get("reason", "")
         pywikibot.warning(f"萌百官方站：登录 {name} 失败"
                           + (f"（{reason}）" if reason else "") + "，只用镜像")
+        if reason:
+            # 凭据被拒、或被回「登录太频繁」：这一轮里再试也是白试，别接着敲对方
+            # （机房 IP 就是一直回「密码不对」，重试只会把自己送进限流）。
+            self._tries = MOEGIRL_OFFICIAL_LOGIN_TRIES
         self._opener = None
         return None
 

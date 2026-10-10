@@ -32,7 +32,8 @@ The bot can:
 * ``stats``   - recompute the Echart from creation records (``--basis``).
   The season's authoritative song list is the ranking template - 榜外
   「其他歌曲」 included - so songs outside TOP/ROOKIE count while a page that
-  merely carries the season's navbox (the overview article) does not.
+  merely carries the season's navbox (the overview article) does not.  Rows are
+  ordered by their total, so the chart reads 多→少 from top to bottom.
   A cell's colour is the hand-made creator annotation and wins outright; other
   entries use the creator of the local page. Some chart numbers come from
   bookkeeping outside the wiki and cannot be derived at all, so a cell is only
@@ -904,8 +905,19 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
                 kept.setdefault(obj.get("name", ""), {})[name] = value
 
     users = [u for u in yaxis if totals[u] >= 5 or any(u in kept.get(l, {}) for l in labels)]
-    users += sorted((u for u in totals if totals[u] >= 5 and u not in users),
-                    key=lambda u: (-totals[u], u))
+    users += [u for u in totals if totals[u] >= 5 and u not in users]
+
+    def chart_total(user: str) -> int:
+        """这一行在整张图上的合计（推不出来、只能沿用的人工数字也算）。"""
+        total = 0
+        for index, label in enumerate(labels):
+            computed = per_season[seasons[index]].get(user, 0)
+            total += max(computed, kept.get(label, {}).get(user, 0))
+        return total
+
+    # ECharts 的 yAxis 自下而上画：数组里靠前的画在图的下方。所以按创建数
+    # **升序**排，图上看起来才是从多到少。
+    users.sort(key=lambda u: (chart_total(u), u))
 
     separators = [raw[spans[i][1]:spans[i + 1][0]] for i in range(len(spans) - 1)]
     separator = separators[-1] if separators else ",\n\n"

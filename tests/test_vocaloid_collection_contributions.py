@@ -1,3 +1,4 @@
+import json
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -173,6 +174,31 @@ class TestCountByListed(TestCase):
         counts = count_by_listed(site, sections, legend, {})
 
         self.assertEqual(counts["2021秋"]["#000000"], 17)
+
+
+class TestRenderChart(TestCase):
+    def test_rows_are_sorted_by_creation_count(self):
+        # ECharts 的 yAxis 自下而上画：数组升序排，图上看起来才是从多到少。
+        colour = "#000000"
+        chart = {
+            "legend": {"data": ["ボカコレ2021秋"]},
+            "yAxis": {"data": ["大戶", "小戶", "中戶"]},
+            "series": [
+                {"name": "ボカコレ2021秋", "type": "bar",
+                 "itemStyle": {"color": "#111111"}, "data": [10, 1, 5]},
+            ],
+        }
+        text = ("{{Echart|data=<nowiki>"
+                + json.dumps(chart, ensure_ascii=False) + "</nowiki>}}")
+        sections = [Section("2021秋", "TOP100", [Entry("甲", [colour])])]
+        legend = Legend(colour_to_name={colour: "大戶"})
+
+        updated, _ = contributions.render_chart(
+            text, sections, legend, {"2021秋": {"#000000": 20}})
+
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        self.assertEqual(parsed["yAxis"]["data"], ["小戶", "中戶", "大戶"])
+        self.assertEqual(parsed["series"][0]["data"], [1, 5, 20])
 
 
 class TestScheduledMaintenance(TestCase):

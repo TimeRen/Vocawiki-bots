@@ -195,13 +195,34 @@ cat ~/moereport.out
 不会再把萌娘 API 敲一遍。萌娘是别人的 wiki，别把它加进 `hourly` 或
 `run-once.sh` 的默认 `all`。
 
-查的是**镜像站** `moegirl.icu`：官方 `zh.moegirl.org.cn` 对匿名调用直接回
-`action-notallowed / Unauthorized API call`，`prop=revisions`、`action=parse`、
-`list=search` 一概不给（只有 `prop=info`、`titles=` 这类给用），拿不到最旧一版的
-作者。镜像的 pageid 与官方一致、历史也完整（`moegirl.uk` 就不行，它的历史是后来
-导入的，最旧一版是镜像自己的搬运账号）。要换成官方站的话，`user-config.py` 里
-已经有 `family_files['zh']`（`pywikibot.Site('zh', 'zh')`），但得先有能登录的
-账号（`usernames['zh']['*']` + `user-password.py`），换 `MOEGIRL_API` 即可。
+查的是**镜像站** `moegirl.icu`：官方 `zh.moegirl.org.cn` 要登录才给用
+`prop=revisions`/`list=search`（匿名直接回 `action-notallowed / Unauthorized API
+call`，连 pywikibot 探测模块参数的 `action=paraminfo` 都挡），而且官方站慢得多，
+这份报告要问上千条，所以只问镜像。镜像的 pageid 与官方一致、历史也完整
+（`moegirl.uk` 就不行，它的历史是后来导入的，最旧一版是镜像自己的搬运账号）。
+
+**镜像有个盲点**：它抓的是匿名可见的版本，萌百「待审核」的条目在它那儿根本不存在，
+于是被当成「没有同名条目」。所以每小时任务解析导入条目的真创建者时，镜像找不到
+会再去**官方站**确认一次：先按 voca 的标题（含标点变体）找，对不上时用导入版记的
+「源站那一版作者 + 时间戳」反查源条目名（voca 常把条目改成自己的消歧写法——
+`Flare(PedestrianP)` 在萌百叫 `Flare(初音未来)`；时间戳要完全一致才认）。
+
+官方站要机器人密码。密码文件在工具账号的 `~/Vocawiki-bots/user-password.py`
+（仓库里没有，`.gitignore` 挡着），加一条：
+
+```python
+('zh', 'zh', '你的账号', BotPassword('后缀', '机器人密码'))
+```
+
+`user-config.py`（会提交到仓库）**不填** `usernames['zh']`——账号不进公开仓库，
+`bots/vocaloid_collection_contributions.py` 直接从上面这个文件读。GitHub Actions
+那边要把这一条也加进 secret `USER_PASSWORD_PY`，CI 才有官方站可用；否则两边都退回
+镜像（行为跟以前一样，这些条目继续不归属）。
+
+官方站的结论缓存在同一个 `data/vocaloid_collection_moegirl.pickle` 里，多存一位
+来源（`icu` / `zh`）：官方站说「没有」才算定论，7 天内不再问。它握手超时很常见
+（实测重试一两次就能过），所以每条最多试 `MOEGIRL_OFFICIAL_ATTEMPTS` 次，登录失败
+也只影响这一轮——问不到就保持「未知」，不会把「没问到」写成「没有」。
 
 每小时任务也会查镜像：跨站导入的条目要靠它找真正的创建者（见上一节），查到的
 结果同样缓存在 `data/vocaloid_collection_moegirl.pickle`。镜像不是自己的 wiki，

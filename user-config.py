@@ -5,13 +5,14 @@ family_files['library'] = 'https://library.moegirl.org.cn/api.php'
 family_files['voca'] = 'https://voca.wiki/api.php'
 family_files['commons'] = 'https://commons.moegirl.org.cn/api.php'
 family_files['en'] = 'https://en.moegirl.org.cn/api.php'
-# 萌娘百科主站（官方站）：pywikibot.Site('zh', 'zh')。
-# 官方站对匿名调用只放行 prop=info / titles= 这类模块：prop=revisions 会回
-# action-notallowed，连 pywikibot 自己用来探测模块参数的 action=paraminfo 也被挡
-# （实测 2026-10-10）。想用 pywikibot 读版本得先登录：加一行 usernames['zh']['*']，
-# 并在 user-password.py 里写 ('zh', '<账号>', '<密码>')（或 BotPassword）。
-# 机器人查创建者目前走镜像 icu，见 vocaloid_collection_contributions.py 的
-# MOEGIRL_API 与 deploy/toolforge/README.md。
+# 萌娘百科主站（官方站）：family 'zh'，即 pywikibot.Site('zh', 'zh')。
+# 官方站对匿名调用只放行 prop=info / titles= 这类模块：prop=revisions 回
+# action-notallowed，连 pywikibot 探测模块参数的 action=paraminfo 也被挡
+# （实测 2026-10-10），pywikibot 自己的登录流程因此走不通。机器人的萌百查询走
+# HTTP，账号与机器人密码都从 user-password.py 读：
+#     ('zh', 'zh', '账号', BotPassword('后缀', '机器人密码'))
+# 本文件（会提交到仓库）不填 usernames['zh']。见 vocaloid_collection_contributions.py
+# 的 MOEGIRL_OFFICIAL 与 deploy/toolforge/README.md。
 family_files['zh'] = 'https://zh.moegirl.org.cn/api.php'
 family_files['mirror'] = 'https://moegirl.uk/api.php'
 family_files['icu'] = 'https://moegirl.icu/api.php'

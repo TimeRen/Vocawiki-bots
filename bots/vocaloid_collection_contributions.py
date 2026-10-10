@@ -50,10 +50,10 @@ The bot can:
   「萌娘百科及 Vocawiki 上」的创建：页面上标着的创建者（格子颜色/图例）与本机
   页面的首版作者可能不是同一个人。三类条目会去萌娘百科查同名条目的最旧一版作者
   辅助判断：本机还没有页面（红链）的参赛曲、标注与本机首版作者不符的条目、
-  以及本机首版作者是机器人/导入账号的条目。走的是镜像站 ``moegirl.icu``（官方
-  ``zh.moegirl.org.cn`` 对匿名调用回 ``action-notallowed``，拿不到版本），
-  镜像的最旧一版同样可能是导入/搬运留下的作者，所以这份报告只供人工判断，
-  机器人不据此上色或计数。
+  以及本机首版作者是机器人/导入账号的条目。报告本身只问镜像站 ``moegirl.icu``
+  （官方站 ``zh.moegirl.org.cn`` 要登录、而且慢，报告要问上千条），镜像的最旧
+  一版同样可能是导入/搬运留下的作者，所以这份报告只供人工判断，机器人不据此
+  上色或计数。
 * ``recredit`` - 一次性迁移（必须给 ``--from-rev <版本号>``）：把早期按「导入版
   作者」记进图表的那些数字减掉，并加到源站真正的创建者那一格。图表本身只把数字
   往上抬，所以这件事不能每轮都做——必须以某个基准版为参照跑一次，否则每跑一轮
@@ -80,13 +80,20 @@ see ``page_creator``): the author of the page's *oldest* revision.  An imported
 revision is the exception - voca.wiki copied most pre-2024 entries from
 Moegirlpedia, and such a revision carries the **source article's last editor**
 (``zhmoe>某用户``), not its creator.  For those entries the creator comes from
-the source article's own oldest revision instead, and when that cannot be
-resolved the entry is credited to nobody rather than to whoever imported it.
+the source article's own oldest revision instead: first the mirror
+(``moegirl.icu``), and when the mirror has no such article, the official site
+(``zh.moegirl.org.cn``, which needs the bot password - the mirror cannot see
+Moegirlpedia's *pending* articles) - by the voca title with punctuation
+variants, or by looking up the article through the author and timestamp the
+imported revision recorded.  When that cannot be resolved either, the entry is
+credited to nobody rather than to whoever imported it.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import http.cookiejar
 import json
 import pickle
 import re
@@ -112,20 +119,35 @@ CHART_SERIES_PREFIX = "ボカコレ"
 # 萌娘百科（voca.wiki 的条目大多从那边来，创建者对不上时拿它当参照）。它不在
 # pywikibot 的 family 里，直接走 HTTP API（stdlib，不引新依赖）。
 #
-# 用镜像站而不是 zh.moegirl.org.cn：官方站对匿名调用回
-# ``action-notallowed / Unauthorized API call``，prop=revisions、action=parse、
-# list=search 全都不给，拿不到最旧一版的作者。moegirl.icu 是整站镜像（pageid 与
-# 官方一致，历史也全），user-config.py 里本来就有它的 family。
+# 两个来源并用：
+#   * 镜像站 ``moegirl.icu``（``MOEGIRL_API``）：匿名就能读、版本历史完整、能批量
+#     查，但它抓到的是匿名可见的版本——萌百「待审核」的条目在它那儿根本不存在，
+#     会把它当成「没有同名条目」（2026-10-10 查出来的那批歌曲条目就是这样）。
+#   * 官方站 ``zh.moegirl.org.cn``（``MOEGIRL_OFFICIAL``）：内容全，但要登录才给用
+#     ``prop=revisions`` / ``list=search``（匿名回 ``action-notallowed``，连
+#     pywikibot 用来探测模块参数的 ``action=paraminfo`` 都挡）。账号与机器人密码
+#     从 ``user-password.py`` 读，仓库里的 ``user-config.py`` 不填 ``usernames['zh']``。
+# 规则：镜像说「有」就信镜像；镜像说「没有」再问官方站；官方站按标题也找不到时，
+# 拿导入版记下的「源站那一版的作者 + 时间」反查源条目名——voca 的条目名常和源站
+# 不一样（``Flare(PedestrianP)`` 在萌百叫 ``Flare(初音未来)``）。
 #
 # 这里查的是「条目的创建者」：跨站导入的页面（``zhmoe>某人``）首版挂的是源站
 # 最后一版的作者，只有源站自己的最旧一版才是创建者（见 ``page_creator``）。
 MOEGIRL_API = "https://moegirl.icu/api.php"
+MOEGIRL_OFFICIAL = "https://zh.moegirl.org.cn/api.php"
+MOEGIRL_FAMILY = "zh"  # 官方站在 user-password.py 里的 family 与 code
 # 请求头必须是 ASCII：中文会让 urllib 直接抛 UnicodeEncodeError
 MOEGIRL_UA = ("Vocawiki-bots/1.0 (maintains voca.wiki contribution list; "
               "https://github.com/TimeRen/Vocawiki-bots)")
 MOEGIRL_TIMEOUT = 30
 MOEGIRL_DELAY = 0.2  # 两次请求之间的间隔：别把对方 API 打疼
+MOEGIRL_OFFICIAL_TIMEOUT = 25  # 官方站时不时要十几秒才回，但也别等太久
+MOEGIRL_OFFICIAL_ATTEMPTS = 4  # 它常常握手超时，重试几次基本就能过
+MOEGIRL_OFFICIAL_LOGIN_TRIES = 3  # 登录失败不锁死整轮：后面用到时再试几次
+MOEGIRL_OFFICIAL_DELAY = 0.5
 MOEGIRL_CACHE_TTL = 7 * 24 * 3600  # 「萌娘没有这条」过一阵要重新确认
+MOEGIRL_SOURCE_MIRROR = "icu"  # 缓存里的答案是谁给的：镜像站
+MOEGIRL_SOURCE_OFFICIAL = "zh"  # 官方站（这时「没有」才算定论）
 
 # Bots / import accounts must not appear in the statistics.
 KNOWN_BOTS = {
@@ -578,7 +600,8 @@ def recompute_counts(text: str, created: Dict[Tuple[str, str], int]) -> Tuple[st
 # 时间都是从源站抄来的，而且抄的通常是源站条目的**最后一版**——拿它当创建者就错了
 # （2026-10-10 反馈）。真正的作者要去源站查，见 ``page_creator``。
 IMPORT_USER_RE = re.compile(r"^([A-Za-z0-9_-]+)>(.+)$")
-IMPORT_SOURCES = {"zhmoe": "萌娘百科"}
+IMPORT_SOURCE_MOEGIRL = "zhmoe"
+IMPORT_SOURCES = {IMPORT_SOURCE_MOEGIRL: "萌娘百科"}
 
 
 def strip_prefix(user: str) -> str:
@@ -597,10 +620,11 @@ def cached_creator(cache: Dict, title: str) -> Optional[Tuple[str, str]]:
     """``(最旧一版的原始用户名, 跨站来源)``；没有缓存返回 ``None``。
 
     旧缓存里存的是剥掉前缀的用户名，分辨不出来源，只能当作没缓存、重查一次。
+    新格式多存一个首版时间戳（``import_stamp`` 要用），这里只看前两位。
     """
     entry = cache.get(title)
-    if isinstance(entry, tuple) and len(entry) == 2:
-        return entry
+    if isinstance(entry, tuple) and len(entry) in (2, 3):
+        return entry[0], entry[1]
     return None
 
 
@@ -658,8 +682,33 @@ def creator_of(site, title: str, cache: Dict) -> Optional[str]:
         pywikibot.error(f"{title}: {exc}")
         return None  # do not cache transient failures
     if user:
-        cache[title] = (user, import_source(user))
+        # 顺手把首版时间戳也存下：导入版记的时间就是源站那一版的时间，
+        # 反查源条目名要靠它（见 import_stamp / moegirl_source_title）。
+        cache[title] = (user, import_source(user), revisions[0].get("timestamp"))
     return user
+
+
+def import_stamp(site, title: str, cache: Dict):
+    """首版的时间戳（导入版记的就是源站那一版的时间）；缓存里没有就查一次补上。
+
+    这个时间戳是 ``moegirl_source_title`` 反查源条目名的唯一依据，所以顺手写进
+    缓存——旧格式的缓存只有用户名和来源，那就查一次。
+    """
+    entry = cache.get(title)
+    if isinstance(entry, tuple) and len(entry) == 3:
+        return entry[2]
+    try:
+        revisions = list(Page(site, title).revisions(total=1, reverse=True,
+                                                     content=False))
+    except Exception as exc:  # noqa: BLE001
+        pywikibot.error(f"{title}: {exc}")
+        return None
+    if not revisions:
+        return None
+    revision = revisions[0]
+    cache[title] = (revision["user"], import_source(revision["user"]),
+                    revision["timestamp"])
+    return revision["timestamp"]
 
 
 def batch_exists(site, titles: Iterable[str], exists: Dict[str, bool],
@@ -1344,6 +1393,321 @@ def moegirl_api(params: Dict[str, str]) -> Optional[dict]:
     return None
 
 
+def _password_field(node: ast.AST) -> Optional[Tuple[str, str]]:
+    """``user-password.py`` 里的密码字段：字符串，或 ``BotPassword('后缀', '密码')``。"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return "", node.value
+    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "BotPassword":
+        try:
+            suffix, password = (ast.literal_eval(argument) for argument in node.args)
+        except ValueError:
+            return None
+        if isinstance(suffix, str) and isinstance(password, str):
+            return suffix, password
+    return None
+
+
+def moegirl_credentials() -> Optional[Tuple[str, str]]:
+    """萌百官方站的登录名与密码，从 ``user-password.py`` 里读。
+
+    仓库里的 ``user-config.py`` 不填 ``usernames['zh']``（账号不进公开仓库），所以
+    这里直接翻密码文件里 family 为 ``zh`` 的那一条：``('zh', 'zh', '账号', ...)``。
+    密码写成 ``BotPassword('后缀', '机器人密码')`` 时登录名是「账号@后缀」。
+    """
+    name = pywikibot.config.password_file
+    if not name:
+        return None
+    path = Path(name)
+    if not path.is_absolute():
+        path = Path(pywikibot.config.base_dir, name)
+    try:
+        lines = path.read_text("utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            node = ast.parse(line, mode="eval").body
+        except SyntaxError:
+            continue
+        if not isinstance(node, ast.Tuple) or len(node.elts) not in (3, 4):
+            continue
+        values = node.elts
+        try:
+            if ast.literal_eval(values[len(values) - 3]) != MOEGIRL_FAMILY:
+                continue
+            user = ast.literal_eval(values[len(values) - 2])
+        except ValueError:
+            continue
+        if not isinstance(user, str) or not user:
+            continue
+        field = _password_field(values[-1])
+        if field is None:
+            continue
+        suffix, password = field
+        return (user + "@" + suffix if suffix else user), password
+    return None
+
+
+class MoegirlSession:
+    """萌百官方站的登录会话。
+
+    官方站对匿名调用回 ``action-notallowed``，要用 ``prop=revisions`` /
+    ``list=search`` 就得带机器人密码登录。拿不到凭据、或者登录失败，这个会话整个
+    停用（``ready()`` 从此为假），调用方退回镜像站——不要每查一条就重试一次登录。
+    """
+
+    def __init__(self, credentials: Optional[Tuple[str, str]] = None) -> None:
+        self._credentials = credentials
+        self._opener: Optional[urllib.request.OpenerDirector] = None
+        self._tries = 0
+
+    def ready(self) -> bool:
+        """能不能用（第一次调用时才登录）。
+
+        官方站常常握手超时，可能只是这一会儿运气不好，所以登录失败不当成永久结论：
+        后面再用到时还会试，但整个进程最多试 ``MOEGIRL_OFFICIAL_LOGIN_TRIES`` 次，
+        免得每查一条都去折腾一次登录。
+        """
+        if self._opener is not None:
+            return True
+        if self._tries >= MOEGIRL_OFFICIAL_LOGIN_TRIES:
+            return False
+        self._tries += 1
+        self._opener = self._login()
+        return self._opener is not None
+
+    def api(self, params: Dict[str, str], post: bool = False) -> Optional[dict]:
+        """一次请求；没问到（网络出错、被对面拒绝）返回 ``None``。"""
+        if not self.ready() or self._opener is None:
+            return None
+        query = dict(params)
+        query["format"] = "json"
+        query["formatversion"] = "2"
+        return self._submit(query, post=post, attempts=MOEGIRL_OFFICIAL_ATTEMPTS)
+
+    def _submit(self, query: Dict[str, str], post: bool = False, attempts: int = 1,
+                ) -> Optional[dict]:
+        body = urlencode(query).encode() if post else None
+        url = MOEGIRL_OFFICIAL if post else MOEGIRL_OFFICIAL + "?" + urlencode(query)
+        request = urllib.request.Request(
+            url, data=body, headers={"User-Agent": MOEGIRL_UA})
+        for attempt in range(attempts):
+            try:
+                with self._opener.open(  # type: ignore[union-attr]
+                        request, timeout=MOEGIRL_OFFICIAL_TIMEOUT) as response:
+                    data = json.load(response)
+            except Exception as exc:  # noqa: BLE001
+                if attempt == attempts - 1:
+                    pywikibot.warning(f"萌百官方站查询失败: {exc}")
+                    return None
+                time.sleep(1 + attempt)
+                continue
+            if "error" in data:
+                error = data["error"]
+                pywikibot.warning(f"萌百官方站拒绝请求: {error.get('code')} "
+                                  f"{error.get('info')}")
+                return None
+            return data
+        return None
+
+    def _login(self) -> Optional[urllib.request.OpenerDirector]:
+        credentials = (self._credentials if self._credentials is not None
+                       else moegirl_credentials())
+        if credentials is None:
+            pywikibot.output("萌百官方站：user-password.py 里没有 zh 账号，只用镜像")
+            return None
+        name, password = credentials
+        jar = http.cookiejar.CookieJar()
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(jar))
+        token_data = self._submit({"action": "query", "meta": "tokens",
+                                   "type": "login"},
+                                  attempts=MOEGIRL_OFFICIAL_ATTEMPTS)
+        tokens = (token_data or {}).get("query", {}).get("tokens") or {}
+        if not tokens.get("logintoken"):
+            pywikibot.warning("萌百官方站：拿不到登录 token，只用镜像")
+            self._opener = None
+            return None
+        # 登录只发一次：第一次其实可能已经成功（响应读断了而已），再发一次会被回
+        # 「BotPassword 会话不能重复登录」。所以随后用 userinfo 判断到底登进去没有。
+        self._submit({"action": "login", "lgname": name, "lgpassword": password,
+                      "lgtoken": tokens["logintoken"]}, post=True, attempts=1)
+        info = (self._submit({"action": "query", "meta": "userinfo"},
+                             attempts=MOEGIRL_OFFICIAL_ATTEMPTS) or {}
+                ).get("query", {}).get("userinfo") or {}
+        if info.get("name") and not info.get("anon"):
+            pywikibot.output(f"萌百官方站：已登录 {info['name']}")
+            return self._opener
+        pywikibot.warning(f"萌百官方站：登录 {name} 失败，只用镜像")
+        self._opener = None
+        return None
+
+
+_OFFICIAL_SESSION: Optional[MoegirlSession] = None
+
+
+def moegirl_official() -> Optional[MoegirlSession]:
+    """官方站会话（进程内共用，第一次用到时才登录）；不可用返回 ``None``。"""
+    global _OFFICIAL_SESSION
+    if _OFFICIAL_SESSION is None:
+        _OFFICIAL_SESSION = MoegirlSession()
+    return _OFFICIAL_SESSION if _OFFICIAL_SESSION.ready() else None
+
+
+# 标题里可以换的标点：萌百的条目名常和 voca 只差这些符号
+MOEGIRL_PUNCTUATION: Dict[str, str] = {
+    "，": "、,", "、": "，,", "（": "(", "(": "（",
+    "）": ")", ")": "）", "。": "", ".": "",
+}
+
+
+def moegirl_variants(title: str, limit: int = 6) -> List[str]:
+    """标题的标点变体，原名排最前。
+
+    萌百的条目名和 voca 只差标点的情况不少：``奔向暗影，由阳光刺穿，闪耀着。``
+    在萌百是 ``奔向暗影、由阳光刺穿、闪耀着。``，半角括号与全角括号也常互换。
+    只换标点、不动字，认错条目的风险才小。
+    """
+    variants = [title]
+    trimmed = title.rstrip("。.")
+    if trimmed and trimmed != title:
+        variants.append(trimmed)
+    for char, alternatives in MOEGIRL_PUNCTUATION.items():
+        for base in list(variants):
+            if char not in base:
+                continue
+            for alternative in alternatives:
+                candidate = base.replace(char, alternative)
+                if candidate not in variants:
+                    variants.append(candidate)
+            if len(variants) >= limit:
+                return variants[:limit]
+    return variants[:limit]
+
+
+def moegirl_official_creator(title: str, session: Optional[MoegirlSession] = None
+                             ) -> Optional[str]:
+    """官方站上 ``title`` 最旧一版的作者；页面不在或没问到返回 ``None``。"""
+    session = session if session is not None else moegirl_official()
+    if session is None:
+        return None
+    data = session.api({"action": "query", "prop": "revisions", "titles": title,
+                        "rvprop": "user", "rvlimit": "1", "rvdir": "newer",
+                        "redirects": "1"})
+    if data is None:
+        return None
+    pages = data.get("query", {}).get("pages") or []
+    if isinstance(pages, dict):
+        pages = list(pages.values())
+    if not pages or pages[0].get("missing"):
+        return None
+    revisions = pages[0].get("revisions") or []
+    return revisions[0].get("user") if revisions else None
+
+
+def moegirl_official_page(title: str, session: Optional[MoegirlSession] = None
+                          ) -> Optional[MoePage]:
+    """官方站上的同名条目（标点变体也算）与它的创建者。
+
+    ``known`` 一律为 ``True``：官方站是权威，说没有就是没有——不过只有登录成功、
+    请求真的回来了才会走到那一步，问不到一律返回 ``None``。
+    """
+    session = session if session is not None else moegirl_official()
+    if session is None:
+        return None
+    candidates = moegirl_variants(title)
+    data = session.api({"action": "query", "prop": "info",
+                        "titles": "|".join(candidates),
+                        "redirects": "1", "converttitles": "1"})
+    if data is None:
+        return None
+    query = data.get("query", {})
+    pages = query.get("pages") or []
+    if isinstance(pages, dict):
+        pages = list(pages.values())
+    present = {page["title"] for page in pages if not page.get("missing")}
+    if not present:
+        return MoePage(None, None, True)
+    links: Dict[str, str] = {}
+    for mapping in ((query.get("normalized") or []) + (query.get("converted") or [])
+                    + (query.get("redirects") or [])):
+        links[mapping["from"]] = mapping["to"]
+    target = next((final for final in (_follow_links(c, links)
+                                       for c in candidates) if final in present), None)
+    if target is None:
+        return MoePage(None, None, True)
+    time.sleep(MOEGIRL_OFFICIAL_DELAY)
+    user = moegirl_official_creator(target, session)
+    if user is None:
+        return None  # 页面在却拿不到作者：多半是这次请求失败，别当结论
+    return MoePage(target, user, True)
+
+
+def moegirl_source_title(editor: str, stamp, session: Optional[MoegirlSession] = None
+                         ) -> Tuple[bool, Optional[str]]:
+    """``(问到了没有, 源条目名)``——用导入版记的「源站那一版的作者 + 时间」反查。
+
+    导入时抄过来的是源站条目**最后一版**的作者与时间戳，所以那位编辑在
+    ``usercontribs`` 里、时间戳**完全一致**的那一条编辑，就是源条目本身。voca 的
+    条目名常和源站对不上（``Flare(PedestrianP)`` ↔ ``Flare(初音未来)``），只有这
+    一步能认出来；时间戳差一秒都不算，宁可查不到。
+    """
+    session = session if session is not None else moegirl_official()
+    if session is None or not editor or stamp is None:
+        return False, None
+    epoch = stamp.timestamp()
+    data = session.api({
+        "action": "query", "list": "usercontribs", "ucuser": editor,
+        "ucprop": "title|timestamp", "uclimit": "500",
+        "ucstart": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch + 2 * 86400)),
+        "ucend": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch - 2 * 86400)),
+    })
+    if data is None:
+        return False, None
+    exact = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+    for contribution in data.get("query", {}).get("usercontribs", []):
+        if contribution.get("timestamp") == exact:
+            return True, contribution.get("title")
+    return True, None
+
+
+def moegirl_imported_creator(title: str, editor: Optional[str], stamp,
+                             moe_cache: Optional[Dict] = None) -> Optional[str]:
+    """镜像站没有的导入条目，改去官方站找它真正的创建者。
+
+    先按标题（含标点变体）找；对不上时，拿导入版记的「源站那一版作者 + 时间」
+    反查源条目名再找一遍——voca 的条目名常被改成自己的消歧写法。问不到就返回
+    ``None``（不缓存），查明白了才把结论写进 ``moe_cache``。
+    """
+    cache = moe_cache if moe_cache is not None else {}
+    cached = moegirl_cached(cache, title)
+    if cached is not None and cached[2] == MOEGIRL_SOURCE_OFFICIAL:
+        return cached[1]
+    page = moegirl_official_page(title)
+    if page is None:
+        return None
+    if page.title:
+        cache[title] = (page.title, page.creator, time.time(),
+                        MOEGIRL_SOURCE_OFFICIAL)
+        return page.creator
+    asked, source = moegirl_source_title(editor, stamp) if editor else (True, None)
+    if not asked:
+        return None
+    if source and source != title:
+        found = moegirl_official_page(source)
+        if found is not None and found.title and found.creator:
+            pywikibot.output(f"{title}: 萌百源条目是《{found.title}》"
+                             f"（导入版记的是 {editor} 的 {stamp}）")
+            cache[title] = (found.title, found.creator, time.time(),
+                            MOEGIRL_SOURCE_OFFICIAL)
+            return found.creator
+    cache[title] = (None, None, time.time(), MOEGIRL_SOURCE_OFFICIAL)
+    return None
+
+
 def _follow_links(title: str, links: Dict[str, str]) -> str:
     """顺着 normalize / 变体转换 / 重定向的表走到最终标题。"""
     seen: Set[str] = set()
@@ -1406,19 +1770,30 @@ def moegirl_creator(title: str) -> Optional[str]:
 
 
 def moegirl_cached(cache: Dict, title: str,
-                   ) -> Optional[Tuple[Optional[str], Optional[str]]]:
-    """``(萌娘标题, 创建者)``；没有缓存或缓存过期返回 ``None``。"""
+                   ) -> Optional[Tuple[Optional[str], Optional[str], str]]:
+    """``(萌娘标题, 创建者, 来源)``；没有缓存或缓存过期返回 ``None``。
+
+    来源记的是这个答案是镜像站（``icu``）还是官方站（``zh``）给的：镜像说「没有」
+    未必真是没有（萌百待审核的条目在镜像上不存在），官方站的结论才算数。
+    老格式的 3 元组没有来源，按镜像算。
+    """
     entry = cache.get(title)
-    if not isinstance(entry, tuple) or len(entry) != 3:
+    if not isinstance(entry, tuple) or len(entry) not in (3, 4):
         return None
-    moe_title, user, stamped = entry
+    moe_title, user, stamped = entry[0], entry[1], entry[2]
+    source = entry[3] if len(entry) == 4 else MOEGIRL_SOURCE_MIRROR
     if time.time() - stamped > MOEGIRL_CACHE_TTL:
         return None
-    return moe_title, user
+    return moe_title, user, source
 
 
 def moegirl_lookup(titles: Iterable[str], cache: Dict) -> Dict[str, MoePage]:
-    """批量查萌娘百科有没有同名条目、以及它们的创建者，顺带填 ``cache``。"""
+    """批量查萌娘百科有没有同名条目、以及它们的创建者，顺带填 ``cache``。
+
+    只知道镜像站的答案：镜像说「有」就照它算（它那儿的版本历史是全的），镜像说
+    「没有」只当参考——官方站那边由 ``moegirl_imported_creator`` 再去确认，
+    见文件顶部关于两个来源的说明。
+    """
     wanted = list(dict.fromkeys(t for t in titles if t))
     result = {title: MoePage() for title in wanted}
     pending: List[str] = []
@@ -1437,19 +1812,23 @@ def moegirl_lookup(titles: Iterable[str], cache: Dict) -> Dict[str, MoePage]:
         moe_title = resolved[title]
         if moe_title is None:
             result[title] = MoePage(None, None, True)
-            cache[title] = (None, None, time.time())
+            cache[title] = (None, None, time.time(), MOEGIRL_SOURCE_MIRROR)
             continue
         user = moegirl_creator(moe_title)
         time.sleep(MOEGIRL_DELAY)
         if user is None:
             continue  # 页面在却拿不到作者：多半是这次请求失败，不写缓存
         result[title] = MoePage(moe_title, user, True)
-        cache[title] = (moe_title, user, time.time())
+        cache[title] = (moe_title, user, time.time(), MOEGIRL_SOURCE_MIRROR)
     return result
 
 
 def moegirl_creator_of(title: str, moe_cache: Optional[Dict] = None) -> Optional[str]:
-    """萌娘百科同名条目的创建者（最旧一版作者）；没有同名条目或查不到返回 ``None``。"""
+    """萌娘百科同名条目的创建者（最旧一版作者）；没有同名条目或查不到返回 ``None``。
+
+    只看镜像站的答案；镜像说「没有」而条目其实是萌百「待审核」的页面时，由
+    ``moegirl_imported_creator`` 去官方站确认（它还需要导入版的时间戳）。
+    """
     if moe_cache is None:
         moe_cache = {}
     page = moegirl_lookup([title], moe_cache).get(title)
@@ -1464,8 +1843,10 @@ def page_credits(site, title: str, cache: Dict, moe_cache: Optional[Dict] = None
 
     voca 的首版若是跨站导入的，那一版挂的是**源站条目的最后一版**作者（见
     ``IMPORT_USER_RE``），不是创建者，照它算就把源站最后一位编辑者当成了创建者。
-    这种条目改去源站找真正的作者，目前只认萌娘百科（``zhmoe``）；源站也查不到时
-    宁可不归属，也不拿导入者顶替。两个用户名都已剥掉跨站前缀。
+    这种条目改去源站找真正的作者，目前只认萌娘百科（``zhmoe``）：先看镜像站的
+    同名条目，镜像没有再去官方站找（含标点变体、以及用导入版的时间戳反查源条目
+    名——voca 的条目名常被改成自己的消歧写法）。源站也查不到时宁可不归属，也不拿
+    导入者顶替。两个用户名都已剥掉跨站前缀。
     """
     raw = creator_of(site, title, cache)
     if raw is None:
@@ -1478,6 +1859,10 @@ def page_credits(site, title: str, cache: Dict, moe_cache: Optional[Dict] = None
         pywikibot.warning(f"{title}: 首版来自 {source}>，认不出源站，不归属")
         return None, previous
     creator = moegirl_creator_of(title, moe_cache)
+    if creator is None and source == IMPORT_SOURCE_MOEGIRL:
+        creator = moegirl_imported_creator(title, previous,
+                                           import_stamp(site, title, cache),
+                                           moe_cache)
     if creator is None:
         pywikibot.warning(
             f"{title}: 首版是{IMPORT_SOURCES[source]}导入的"
@@ -1598,7 +1983,8 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
                ("red", "voca 还没有页面（红链）"))
     found = sum(1 for row in rows if pages[row["title"]].title)
     asked = sum(1 for row in rows if pages[row["title"]].known)
-    lines = [f"萌娘百科镜像: {MOEGIRL_API}（官方站对匿名调用封锁 prop=revisions）",
+    lines = [f"萌娘百科镜像: {MOEGIRL_API}"
+             "（官方站要登录才给读版本，这份报告只问镜像）",
              f"待比对 {len(rows)} 条（"
              + "、".join(f"{label} {sum(1 for r in rows if r['reason'] == key)}"
                          for key, label in reasons)

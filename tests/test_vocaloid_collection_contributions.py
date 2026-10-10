@@ -1,4 +1,8 @@
 import json
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
@@ -51,20 +55,33 @@ class PagedSite:
         return next(self.responses)
 
 
+class FakeSession:
+    """假装的萌百官方站会话：按顺序吐出预先准备好的 JSON，并记下问过什么。"""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def api(self, params, post=False):
+        self.requests.append(params)
+        return self.responses.pop(0) if self.responses else None
+
+
 class TestCountByListed(TestCase):
     @patch.object(contributions, "Page")
     def test_batch_creators_uses_single_page_oldest_revision_queries(
             self, page_factory):
         site = object()
         page = page_factory.return_value
-        page.revisions.return_value = iter([{"user": "User"}])
-        cache = {"Cached": ("Existing", "")}
+        page.revisions.return_value = iter([{"user": "User", "timestamp": "2024-01-01T00:00:00Z"}])
+        cache = {"Cached": ("Existing", "", None)}
 
         contributions.batch_creators(
             site, ["Alias", "Target", "Cached"], cache, {"Alias": "Target"})
 
-        self.assertEqual(cache["Target"], ("User", ""))
-        self.assertEqual(cache["Cached"], ("Existing", ""))
+        self.assertEqual(cache["Target"],
+                         ("User", "", "2024-01-01T00:00:00Z"))
+        self.assertEqual(cache["Cached"], ("Existing", "", None))
         page_factory.assert_called_once_with(site, "Target")
         page.revisions.assert_called_once_with(
             total=1, reverse=True, content=False)
@@ -72,26 +89,28 @@ class TestCountByListed(TestCase):
     @patch.object(contributions, "Page")
     def test_creator_of_keeps_the_cross_wiki_prefix(self, page_factory):
         # zhmoe>某人：voca 抄的是源站最后一版的作者，来源得留着，page_creator
-        # 才知道不能拿这个人当创建者
+        # 才知道不能拿这个人当创建者；时间戳也留着，反查源条目名要用
         page_factory.return_value.revisions.return_value = iter(
-            [{"user": "zhmoe>源站编辑者"}])
+            [{"user": "zhmoe>源站编辑者", "timestamp": "2024-05-06T07:08:09Z"}])
         cache = {}
 
         self.assertEqual(contributions.creator_of(object(), "曲", cache),
                          "zhmoe>源站编辑者")
-        self.assertEqual(cache["曲"], ("zhmoe>源站编辑者", "zhmoe"))
+        self.assertEqual(cache["曲"],
+                         ("zhmoe>源站编辑者", "zhmoe", "2024-05-06T07:08:09Z"))
 
     @patch.object(contributions, "Page")
     def test_creator_of_requeries_legacy_cache_entries(self, page_factory):
         # 旧缓存只存了剥掉前缀的用户名，分辨不出来源，只能重查一次
         page_factory.return_value.revisions.return_value = iter(
-            [{"user": "本站用户"}])
+            [{"user": "本站用户", "timestamp": "2024-05-06T07:08:09Z"}])
         cache = {"曲": "本站用户"}
 
         contributions.creator_of(object(), "曲", cache)
 
         page_factory.assert_called_once()
-        self.assertEqual(cache["曲"], ("本站用户", ""))
+        self.assertEqual(cache["曲"],
+                         ("本站用户", "", "2024-05-06T07:08:09Z"))
 
     def test_season_template_ignores_links_that_are_not_articles(self):
         # Navbox 尾巴上的 [[Category:...]] 会落进最后一个 list 参数，被当成一首歌
@@ -473,10 +492,13 @@ class TestPageCreator(TestCase):
 
     @patch.object(contributions, "creator_of", return_value="zhmoe>源站最后编辑者")
     @patch.object(contributions, "moegirl_creator_of", return_value=None)
+    @patch.object(contributions, "import_stamp", return_value=None)
+    @patch.object(contributions, "moegirl_imported_creator", return_value=None)
     def test_imports_are_not_credited_when_the_source_is_unknown(
-            self, _moegirl, _creator_of):
+            self, _imported, _stamp, _moegirl, _creator_of):
         # 宁可不归属，也不拿源站的最后一位编辑者顶替
         self.assertIsNone(contributions.page_creator(None, "曲", {}, {}))
+        _imported.assert_called_once()
 
     @patch.object(contributions, "creator_of", return_value="wikipedia>某人")
     @patch.object(contributions, "moegirl_creator_of")
@@ -733,6 +755,150 @@ class TestMoegirlCrossCheck(TestCase):
                 object(), sections, legend, {}, {}, moe_cache={})
 
         self.assertIn(f"某人（{colour}）：+1", report)
+
+
+class TestMoegirlOfficial(TestCase):
+    """镜像站看不见萌百「待审核」的条目——那些要去官方站（得先登录）才查得到。"""
+
+    def test_credentials_read_the_zh_entry_and_the_bot_password_suffix(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "user-password.py"
+            path.write_text(
+                "# 注释\n"
+                "('voca', 'voca', 'Renjian-bot', 'secret')\n"
+                "('zh', 'zh', '人间百态', BotPassword('vclc', 'token'))\n",
+                encoding="utf-8")
+            with patch.object(contributions.pywikibot.config, "password_file",
+                              str(path)):
+                self.assertEqual(contributions.moegirl_credentials(),
+                                 ("人间百态@vclc", "token"))
+
+    def test_credentials_are_absent_without_a_zh_entry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "user-password.py"
+            path.write_text("('voca', 'voca', 'Renjian-bot', 'secret')\n",
+                            encoding="utf-8")
+            with patch.object(contributions.pywikibot.config, "password_file",
+                              str(path)):
+                self.assertIsNone(contributions.moegirl_credentials())
+
+    def test_variants_only_swap_punctuation(self):
+        title = "奔向暗影，由阳光刺穿，闪耀着。"
+        variants = contributions.moegirl_variants(title)
+
+        self.assertEqual(variants[0], title)
+        self.assertIn("奔向暗影、由阳光刺穿、闪耀着。", variants)
+        self.assertIn("奔向暗影，由阳光刺穿，闪耀着", variants)
+        for variant in variants:
+            self.assertEqual(
+                variant.translate({ord(char): None for char in "，、,。（）()"}),
+                title.translate({ord(char): None for char in "，、,。（）()"}))
+
+    def test_official_page_answers_through_a_title_variant(self):
+        session = FakeSession([
+            {"query": {"pages": [{"title": "奔向暗影、由阳光刺穿、闪耀着。"}]}},
+            {"query": {"pages": [{"title": "奔向暗影、由阳光刺穿、闪耀着。",
+                                  "revisions": [{"user": "源站创建者"}]}]}},
+        ])
+        with patch.object(contributions.time, "sleep"):
+            page = contributions.moegirl_official_page(
+                "奔向暗影，由阳光刺穿，闪耀着。", session)
+
+        self.assertEqual((page.title, page.creator, page.known),
+                         ("奔向暗影、由阳光刺穿、闪耀着。", "源站创建者", True))
+
+    def test_official_page_reports_a_title_it_does_not_have(self):
+        session = FakeSession([{"query": {"pages": [
+            {"title": "没有这条", "missing": True}]}}])
+        page = contributions.moegirl_official_page("没有这条", session)
+
+        self.assertEqual((page.title, page.creator, page.known),
+                         (None, None, True))
+
+    def test_official_page_stays_unknown_when_it_cannot_ask(self):
+        self.assertIsNone(contributions.moegirl_official_page("曲", FakeSession([])))
+
+    def test_source_title_needs_an_exact_timestamp(self):
+        # 导入版抄的是源站**最后一版**的作者与时间：那位编辑在同一时刻的编辑
+        # 才是源条目本身，差一秒都不认。
+        stamp = datetime(2024, 7, 13, 1, 2, 4, tzinfo=timezone.utc)
+        session = FakeSession([{"query": {"usercontribs": [
+            {"title": "差一分钟的编辑", "timestamp": "2024-07-13T01:03:04Z"},
+            {"title": "源条目", "timestamp": "2024-07-13T01:02:04Z"},
+        ]}}])
+
+        self.assertEqual(
+            contributions.moegirl_source_title("源站编辑者", stamp, session),
+            (True, "源条目"))
+
+    def test_source_title_admits_when_it_could_not_ask(self):
+        stamp = datetime(2024, 7, 13, 1, 2, 4, tzinfo=timezone.utc)
+        self.assertEqual(
+            contributions.moegirl_source_title("源站编辑者", stamp, FakeSession([])),
+            (False, None))
+
+    @patch.object(contributions, "moegirl_source_title")
+    @patch.object(contributions, "moegirl_official_page")
+    def test_imported_creator_falls_back_to_the_source_title(self, official_page,
+                                                             source_title):
+        # voca 的条目名是自己的消歧写法（Flare(PedestrianP)），源条目叫别的名字
+        source_title.return_value = (True, "Flare(初音未来)")
+        official_page.side_effect = [
+            contributions.MoePage(None, None, True),
+            contributions.MoePage("Flare(初音未来)", "源站创建者", True),
+        ]
+        cache = {}
+
+        creator = contributions.moegirl_imported_creator(
+            "Flare(PedestrianP)", "源站编辑者", "2024-01-01T00:00:00Z", cache)
+
+        self.assertEqual(creator, "源站创建者")
+        self.assertEqual(cache["Flare(PedestrianP)"][:2],
+                         ("Flare(初音未来)", "源站创建者"))
+        self.assertEqual(cache["Flare(PedestrianP)"][3],
+                         contributions.MOEGIRL_SOURCE_OFFICIAL)
+
+    @patch.object(contributions, "moegirl_official_page", return_value=None)
+    def test_imported_creator_does_not_cache_a_query_it_could_not_make(self, _page):
+        cache = {}
+
+        self.assertIsNone(contributions.moegirl_imported_creator(
+            "曲", "源站编辑者", "2024-01-01T00:00:00Z", cache))
+
+        self.assertEqual(cache, {})
+
+    @patch.object(contributions, "moegirl_official_page")
+    def test_imported_creator_trusts_the_official_cache(self, official_page):
+        cache = {"曲": (None, None, time.time(),
+                        contributions.MOEGIRL_SOURCE_OFFICIAL)}
+
+        self.assertIsNone(contributions.moegirl_imported_creator(
+            "曲", "源站编辑者", "2024-01-01T00:00:00Z", cache))
+
+        official_page.assert_not_called()
+
+    def test_cache_remembers_which_source_answered(self):
+        cache = {"官方": ("《官方》", "甲", time.time(),
+                          contributions.MOEGIRL_SOURCE_OFFICIAL),
+                 "镜像": ("《镜像》", "乙", time.time()),
+                 "过期": ("《过期》", "丙",
+                          time.time() - contributions.MOEGIRL_CACHE_TTL - 1)}
+
+        self.assertEqual(contributions.moegirl_cached(cache, "官方")[2],
+                         contributions.MOEGIRL_SOURCE_OFFICIAL)
+        self.assertEqual(contributions.moegirl_cached(cache, "镜像")[2],
+                         contributions.MOEGIRL_SOURCE_MIRROR)
+        self.assertIsNone(contributions.moegirl_cached(cache, "过期"))
+
+    @patch.object(contributions, "creator_of", return_value="zhmoe>源站最后编辑者")
+    @patch.object(contributions, "moegirl_creator_of", return_value=None)
+    @patch.object(contributions, "import_stamp", return_value=None)
+    @patch.object(contributions, "moegirl_imported_creator", return_value="真正的作者")
+    def test_page_credits_use_the_official_site_as_a_second_chance(
+            self, imported, _stamp, _moegirl, _creator_of):
+        self.assertEqual(contributions.page_credits(None, "曲", {}, {})[0],
+                         "真正的作者")
+        imported.assert_called_once()
 
 
 class TestMoegirlAction(TestCase):

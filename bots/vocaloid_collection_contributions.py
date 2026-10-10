@@ -141,9 +141,9 @@ MOEGIRL_UA = ("Vocawiki-bots/1.0 (maintains voca.wiki contribution list; "
               "https://github.com/TimeRen/Vocawiki-bots)")
 MOEGIRL_TIMEOUT = 30
 MOEGIRL_DELAY = 0.2  # 两次请求之间的间隔：别把对方 API 打疼
-MOEGIRL_OFFICIAL_TIMEOUT = 25  # 官方站时不时要十几秒才回，但也别等太久
+MOEGIRL_OFFICIAL_TIMEOUT = 20  # 官方站时不时要十几秒才回，但也别等太久
 MOEGIRL_OFFICIAL_ATTEMPTS = 4  # 它常常握手超时，重试几次基本就能过
-MOEGIRL_OFFICIAL_LOGIN_TRIES = 3  # 登录失败不锁死整轮：后面用到时再试几次
+MOEGIRL_OFFICIAL_LOGIN_TRIES = 5  # 登录失败不锁死整轮：后面用到时再试几次
 MOEGIRL_OFFICIAL_DELAY = 0.5
 MOEGIRL_CACHE_TTL = 7 * 24 * 3600  # 「萌娘没有这条」过一阵要重新确认
 MOEGIRL_SOURCE_MIRROR = "icu"  # 缓存里的答案是谁给的：镜像站

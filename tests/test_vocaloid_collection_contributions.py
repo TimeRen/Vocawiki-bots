@@ -450,6 +450,48 @@ class TestMoegirlCrossCheck(TestCase):
         self.assertIn("标注 某人", report)
         self.assertNotIn("萌娘用户：+1", report)
 
+    def test_api_treats_an_error_response_as_unknown(self):
+        # 萌娘回 error（限流、参数被禁）时必须当成「没问到」；当成「没有这条」
+        # 会把整批条目写成「无同名条目」，报告就成了误导。
+        payload = json.dumps({"error": {"code": "action-notallowed",
+                                        "info": "Unauthorized API call"}}).encode()
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return payload
+
+        with patch.object(contributions.urllib.request, "urlopen",
+                          return_value=FakeResponse()), \
+                patch.object(contributions.pywikibot, "error") as log:
+            data = contributions.moegirl_api({"action": "query", "titles": "甲"})
+
+        self.assertIsNone(data)
+        log.assert_called_once()
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "batch_exists")
+    def test_report_summarises_red_links_moegirl_does_not_have(
+            self, batch_exists, batch_creators):
+        # 红链且萌娘也没有同名条目：对判断没帮助，只报数量，别灌满整份报告。
+        sections = [Section("2021秋", "TOP100",
+                            [Entry("红链甲", []), Entry("红链乙", [])])]
+        pages = {"红链甲": contributions.MoePage(None, None, True),
+                 "红链乙": contributions.MoePage("同曲乙", "萌娘用户", True)}
+
+        with patch.object(contributions, "moegirl_lookup", return_value=pages):
+            report = contributions.moegirl_report(
+                object(), sections, Legend(), {}, {}, moe_cache={})
+
+        self.assertNotIn("红链甲", report)
+        self.assertIn("红链乙", report)
+        self.assertIn("另有 1 条在萌娘也没有同名条目", report)
+
     @patch.object(contributions, "batch_creators")
     @patch.object(contributions, "batch_exists")
     def test_report_counts_a_legend_user_as_a_colour_gain(

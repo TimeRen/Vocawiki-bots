@@ -47,9 +47,10 @@ The bot can:
   「萌娘百科及 Vocawiki 上」的创建：页面上标着的创建者（格子颜色/图例）与本机
   页面的首版作者可能不是同一个人。三类条目会去萌娘百科查同名条目的最旧一版作者
   辅助判断：本机还没有页面（红链）的参赛曲、标注与本机首版作者不符的条目、
-  以及本机首版作者是机器人/导入账号的条目。萌娘百科的「创建者」其实是站上最旧
-  一版的作者，导入/搬运页面同样可能不准，所以这份报告只供人工判断，机器人不据此
-  上色或计数。
+  以及本机首版作者是机器人/导入账号的条目。走的是镜像站 ``moegirl.icu``（官方
+  ``zh.moegirl.org.cn`` 对匿名调用回 ``action-notallowed``，拿不到版本），
+  镜像的最旧一版同样可能是导入/搬运留下的作者，所以这份报告只供人工判断，
+  机器人不据此上色或计数。
 * ``all``      - run all maintenance actions once. Toolforge and GitHub Actions
   schedule this full pass hourly; it does not poll ``list=recentchanges``, whose
   results can omit entries that have not yet appeared in the maintained list.
@@ -95,7 +96,12 @@ CHART_SERIES_PREFIX = "ボカコレ"
 
 # 萌娘百科（voca.wiki 的条目大多从那边来，创建者对不上时拿它当参照）。它不在
 # pywikibot 的 family 里，直接走 HTTP API（stdlib，不引新依赖）。
-MOEGIRL_API = "https://zh.moegirl.org.cn/api.php"
+#
+# 用镜像站而不是 zh.moegirl.org.cn：官方站对匿名调用回
+# ``action-notallowed / Unauthorized API call``，prop=revisions、action=parse、
+# list=search 全都不给，拿不到最旧一版的作者。moegirl.icu 是整站镜像（pageid 与
+# 官方一致，历史也全），user-config.py 里本来就有它的 family。
+MOEGIRL_API = "https://moegirl.icu/api.php"
 # 请求头必须是 ASCII：中文会让 urllib 直接抛 UnicodeEncodeError
 MOEGIRL_UA = ("Vocawiki-bots/1.0 (maintains voca.wiki contribution list; "
               "https://github.com/TimeRen/Vocawiki-bots)")
@@ -1201,7 +1207,11 @@ class MoePage:
 
 
 def moegirl_api(params: Dict[str, str]) -> Optional[dict]:
-    """一次萌娘百科 API 查询；失败返回 ``None``。"""
+    """一次萌娘百科 API 查询；网络出错或被对面拒绝都返回 ``None``。
+
+    对面回 ``error``（限流、参数被禁）也算「没问到」，绝不能当成「没有这条」——
+    否则整批条目会被写成「无同名条目」，报告就成了误导。
+    """
     query = dict(params)
     query["format"] = "json"
     query["formatversion"] = "2"
@@ -1211,12 +1221,19 @@ def moegirl_api(params: Dict[str, str]) -> Optional[dict]:
     for attempt in range(3):
         try:
             with urllib.request.urlopen(request, timeout=MOEGIRL_TIMEOUT) as response:
-                return json.load(response)
+                data = json.load(response)
         except Exception as exc:  # noqa: BLE001
-            if attempt == 2:
-                pywikibot.error(f"萌娘百科查询失败: {exc}")
-            else:
+            if attempt < 2:
                 time.sleep(1 + attempt)
+                continue
+            pywikibot.error(f"萌娘百科查询失败: {exc}")
+            return None
+        if "error" in data:
+            error = data["error"]
+            pywikibot.error(f"萌娘百科拒绝请求: {error.get('code')} "
+                            f"{error.get('info')}")
+            return None
+        return data
     return None
 
 
@@ -1407,7 +1424,7 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
                ("red", "voca 还没有页面（红链）"))
     found = sum(1 for row in rows if pages[row["title"]].title)
     asked = sum(1 for row in rows if pages[row["title"]].known)
-    lines = [f"萌娘百科: {MOEGIRL_API}",
+    lines = [f"萌娘百科镜像: {MOEGIRL_API}（官方站对匿名调用封锁 prop=revisions）",
              f"待比对 {len(rows)} 条（"
              + "、".join(f"{label} {sum(1 for r in rows if r['reason'] == key)}"
                          for key, label in reasons)
@@ -1419,10 +1436,17 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
         group = [row for row in rows if row["reason"] == key]
         if not group:
             continue
-        lines.append("")
-        lines.append(f"=== {label}（{len(group)} 条）===")
+        block: List[str] = []
+        blank = unknown = 0
         for row in group:
             page = pages[row["title"]]
+            # 红链在萌娘也没有同名条目：对判断没有帮助，只报数量
+            if key == "red" and not page.title:
+                if page.known:
+                    blank += 1
+                else:
+                    unknown += 1
+                continue
             parts = [f"{row['season']}/{row['section']} {row['title']}"]
             if row["colours"]:
                 parts.append("标注 " + "、".join(
@@ -1435,7 +1459,7 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
                 parts.append("萌娘无同名条目")
             else:
                 parts.append(f"萌娘《{page.title}》创建者 {page.creator or '（未知）'}")
-            lines.append("  " + " | ".join(parts))
+            block.append("  " + " | ".join(parts))
             # 带颜色的格子已经算给标注的创建者了，别重复算；只有现在谁都没算到的
             # （红链且未上色、首版作者是机器人）才谈「照萌娘结果归属」。
             if (key != "mismatch" and not row["colours"] and page.creator
@@ -1445,6 +1469,12 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
                     gains[identity] += 1
                 else:
                     outside[page.creator] += 1
+        lines.append("")
+        lines.append(f"=== {label}（{len(group)} 条）===")
+        lines.extend(block)
+        if blank or unknown:
+            lines.append(f"  （另有 {blank} 条在萌娘也没有同名条目、"
+                         f"{unknown} 条这次没问到，未逐条列出）")
     if gains or outside:
         lines.append("")
         lines.append("若照萌娘结果给「红链/机器人」条目归属，创建者会变成：")

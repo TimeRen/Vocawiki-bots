@@ -167,9 +167,17 @@ cat ~/moereport.out
 
 报告分三类：`标注与 voca 首版作者不符`、`voca 首版作者是机器人/导入账号`、
 `voca 还没有页面（红链）`，末尾列出「若照萌娘结果归属，各创建者会得到多少」。
+红链里在萌娘也没有同名条目的只报数量，不逐条列出。
 结果缓存在 `data/vocaloid_collection_moegirl.pickle`（7 天有效期），同一条重复跑
-不会再把萌娘 API 敲一遍。萌娘百科是别人的 wiki，别把它加进 `hourly` 或
+不会再把萌娘 API 敲一遍。萌娘是别人的 wiki，别把它加进 `hourly` 或
 `run-once.sh` 的默认 `all`。
+
+查的是**镜像站** `moegirl.icu`：官方 `zh.moegirl.org.cn` 对匿名调用直接回
+`action-notallowed / Unauthorized API call`，`prop=revisions`、`action=parse`、
+`list=search` 一概不给（只有 `prop=info`、`titles=` 这类给用），拿不到最旧一版的
+作者。镜像的 pageid 与官方一致、历史也完整（`moegirl.uk` 就不行，它的历史是后来
+导入的，最旧一版是镜像自己的搬运账号）。要换成官方站的话，改 `MOEGIRL_API`
+即可，但得先有能登录的账号。
 
 ## 更新代码
 

@@ -1458,7 +1458,10 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
             elif page.title is None:
                 parts.append("萌娘无同名条目")
             else:
-                parts.append(f"萌娘《{page.title}》创建者 {page.creator or '（未知）'}")
+                # 标题对不上说明是走重定向/变体归一找到的，这种匹配更要人工过一眼
+                via = "（经重定向）" if page.title != row["title"] else ""
+                parts.append(f"萌娘《{page.title}》{via}"
+                             f"创建者 {page.creator or '（未知）'}")
             block.append("  " + " | ".join(parts))
             # 带颜色的格子已经算给标注的创建者了，别重复算；只有现在谁都没算到的
             # （红链且未上色、首版作者是机器人）才谈「照萌娘结果归属」。
@@ -1483,7 +1486,8 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
         for user, count in outside.most_common():
             lines.append(f"  {user}：+{count}（萌娘账号，本站图例里没有颜色）")
     lines.append("")
-    lines.append("[只出报告] 机器人不会据此上色或改数字，要不要采用由人工判断。")
+    lines.append("[只出报告] 同名条目未必是同一首曲（尤其是短标题），机器人不会据此"
+                 "上色或改数字，要不要采用由人工判断。")
     return "\n".join(lines)
 
 

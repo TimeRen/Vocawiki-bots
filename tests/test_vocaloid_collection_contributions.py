@@ -428,7 +428,7 @@ class TestMoegirlCrossCheck(TestCase):
                 object(), sections, Legend(), {}, {}, moe_cache={})
 
         self.assertIn("2021秋/TOP100 红链曲", report)
-        self.assertIn("萌娘《同曲》创建者 萌娘用户", report)
+        self.assertIn("萌娘《同曲》（经重定向）创建者 萌娘用户", report)
         self.assertIn("萌娘用户：+1", report)
         self.assertIn("只出报告", report)
 
@@ -491,6 +491,20 @@ class TestMoegirlCrossCheck(TestCase):
         self.assertNotIn("红链甲", report)
         self.assertIn("红链乙", report)
         self.assertIn("另有 1 条在萌娘也没有同名条目", report)
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "batch_exists")
+    def test_report_only_marks_matches_found_through_a_redirect(
+            self, batch_exists, batch_creators):
+        sections = [Section("2021秋", "TOP100", [Entry("同名曲", [])])]
+        pages = {"同名曲": contributions.MoePage("同名曲", "萌娘用户", True)}
+
+        with patch.object(contributions, "moegirl_lookup", return_value=pages):
+            report = contributions.moegirl_report(
+                object(), sections, Legend(), {}, {}, moe_cache={})
+
+        self.assertIn("萌娘《同名曲》创建者 萌娘用户", report)
+        self.assertNotIn("经重定向", report)
 
     @patch.object(contributions, "batch_creators")
     @patch.object(contributions, "batch_exists")

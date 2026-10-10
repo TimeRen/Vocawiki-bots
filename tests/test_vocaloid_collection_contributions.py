@@ -122,7 +122,8 @@ class TestCountByListed(TestCase):
 
     def test_season_template_collects_sections_without_rank_ranges(self):
         # 「其他歌曲」下的分组（其他部门 / 未上榜歌曲）没有名次区间，但里面的链接
-        # 仍然是本赛季的歌，必须收下来，否则榜外歌曲会被统计当成外人。
+        # 仍然是本赛季的歌，必须收下来，否则榜外歌曲会被统计当成外人；
+        # 键上带分组名，统计才能把原创与二创分开（见 is_counted_track）。
         text = (
             "| title = 其他歌曲\n"
             "| group1 = 其他部门\n"
@@ -133,7 +134,9 @@ class TestCountByListed(TestCase):
 
         parsed = contributions.parse_season_template(text)
 
-        self.assertEqual(set(parsed["neta"].values()), {"榜外歌曲甲", "榜外歌曲乙"})
+        self.assertEqual(set(parsed["neta:未上榜歌曲"].values()),
+                         {"榜外歌曲甲", "榜外歌曲乙"})
+        self.assertNotIn("neta", parsed)
 
     def test_batch_exists_records_canonical_titles(self):
         # 模板写 ダウナ、页面叫 Downa：报告要靠这份归一后的标题来比对，
@@ -214,6 +217,18 @@ class TestCountByListed(TestCase):
         self.assertEqual(counts["2021秋"]["#000000"], 17)
 
 
+class TestCountedTracks(TestCase):
+    def test_remix_and_derivative_tracks_do_not_count(self):
+        # 「除了 Remix 和 neta 非原创曲都算」：REMIX 赛道整条不算，
+        # neta 里「其他部门」与「原曲/作者」写法的二创也不算。
+        self.assertFalse(contributions.is_counted_track("REMIX", "Rolling Girl/郁P"))
+        self.assertFalse(contributions.is_counted_track("neta:其他部门", "某演奏"))
+        self.assertFalse(contributions.is_counted_track("neta:未上榜歌曲", "某曲/某P"))
+        self.assertTrue(contributions.is_counted_track("neta:未上榜歌曲", "榜外原创曲"))
+        self.assertTrue(contributions.is_counted_track("TOP100", "榜内曲"))
+        self.assertTrue(contributions.is_counted_track("neta", "没带分组名的榜外曲"))
+
+
 class TestRenderChart(TestCase):
     def test_rows_are_sorted_by_creation_count(self):
         # ECharts 的 yAxis 自下而上画：数组升序排，图上看起来才是从多到少。
@@ -237,6 +252,32 @@ class TestRenderChart(TestCase):
         parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
         self.assertEqual(parsed["yAxis"]["data"], ["小戶", "中戶", "大戶"])
         self.assertEqual(parsed["series"][0]["data"], [1, 5, 20])
+
+    def test_excluded_tracks_lower_numbers_and_keep_manual_ones(self):
+        # REMIX/二创以前被算进图表，现在不算了：要把那部分减回去，
+        # 而站外人工记账的数字（机器人本来就推不出来）仍然保留。
+        colour = "#000000"
+        chart = {
+            "legend": {"data": ["ボカコレ2021秋"]},
+            "yAxis": {"data": ["人工记帐", "二创作者"]},
+            "series": [
+                {"name": "ボカコレ2021秋", "type": "bar",
+                 "itemStyle": {"color": "#111111"}, "data": [7, 4]},
+            ],
+        }
+        text = ("{{Echart|data=<nowiki>"
+                + json.dumps(chart, ensure_ascii=False) + "</nowiki>}}")
+        sections = [Section("2021秋", "TOP100", [Entry("甲", [colour])])]
+        legend = Legend(colour_to_name={colour: "二创作者"})
+
+        updated, _ = contributions.render_chart(
+            text, sections, legend, {"2021秋": {"#000000": 1}},
+            {"2021秋": {"#000000": 3}})
+
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        data = dict(zip(parsed["yAxis"]["data"], parsed["series"][0]["data"]))
+        self.assertEqual(data["二创作者"], 1)   # 4 - 3 = 1：多算的 REMIX/二创被抹掉
+        self.assertEqual(data["人工记帐"], 7)   # 没有排除来源，人工数字不动
 
 
 class TestScheduledMaintenance(TestCase):

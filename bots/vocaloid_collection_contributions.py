@@ -30,14 +30,17 @@ The bot can:
   the same name is a different song, and colouring it would credit its
   creator (and its season) here.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
-  The season's authoritative song list is the ranking template - 榜外
-  「其他歌曲」 included - so songs outside TOP/ROOKIE count while a page that
-  merely carries the season's navbox (the overview article) does not.  Rows are
-  ordered by their total, so the chart reads 多→少 from top to bottom.
-  A cell's colour is the hand-made creator annotation and wins outright; other
-  entries use the creator of the local page. Some chart numbers come from
-  bookkeeping outside the wiki and cannot be derived at all, so a cell is only
-  ever raised, never lowered.
+  The season's authoritative song list is the ranking template, but only
+  *original* songs count: the REMIX track and neta's non-original entries
+  (「其他部门」 and 二创 written as ``原曲/创作者``) are left out, see
+  ``is_counted_track``.  A page that merely carries the season's navbox (the
+  overview article) does not count either.  Rows are ordered by their total, so
+  the chart reads 多→少 from top to bottom.  A cell's colour is the hand-made
+  creator annotation and wins outright; other entries use the creator of the
+  local page. Some chart numbers come from bookkeeping outside the wiki and
+  cannot be derived at all, so a cell is normally only raised, never lowered -
+  with one exception: whatever the REMIX/二创 songs had added to a cell is
+  subtracted again, so those numbers do get corrected downwards.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``all``      - run all maintenance actions once. Toolforge and GitHub Actions
@@ -100,6 +103,28 @@ NON_SONG_PAGES = {"The VOCALOID Collection"}
 def is_counted_section(name: str) -> bool:
     upper = name.upper()
     return upper.startswith("TOP") or upper.startswith("ROOKIE")
+
+
+# 「其他歌曲」下的分组名：只有「未上榜歌曲」是本季的原创曲，其他分组（其他部门
+# 之类，歌ってみた/演奏等）属于二创，不算创建条目的贡献。
+ORIGINAL_GROUPS = {"未上榜歌曲"}
+
+
+def is_counted_track(section_key: str, title: str) -> bool:
+    """这条曲目算不算创建贡献：REMIX 赛道与二创（neta 非原创曲）都不算。
+
+    ``section_key`` 是 ``parse_season_template`` 的键，形如 ``REMIX`` /
+    ``neta`` / ``neta:未上榜歌曲``（无区间分组会带上分组名）。
+    """
+    name, _, label = section_key.partition(":")
+    if name == "REMIX":
+        return False
+    if name == "neta":
+        if label and label not in ORIGINAL_GROUPS:
+            return False
+        if "/" in title:
+            return False  # 二创写法「原曲/创作者」
+    return True
 
 
 HEX = r"#[0-9A-Fa-f]{3,8}"
@@ -251,18 +276,22 @@ def parse_season_template(text: str) -> Dict[str, Dict[int, str]]:
     模板按名次顺序列出每个小节（TOP100 / ROOKIE / REMIX / 其他歌曲），
     并用 ``1-10位`` 之类的分组标出区间，所以链接在分组里的位置就是名次。
     「其他歌曲」下的分组（``其他部门``、``未上榜歌曲``）没有名次区间，
-    只为「哪些歌属于这一季」而收下来，名次用负数占位，不会和真名次撞车。
+    只为「哪些歌属于这一季」而收下来，名次用负数占位，不会和真名次撞车；
+    这类分会带上分组名（``neta:未上榜歌曲``），统计时才能把原创和二创分开
+    （见 ``is_counted_track``）。
     """
     marks = [(m.start(), m.end(), m.group(1)) for m in TEMPLATE_ITEM_RE.finditer(text)]
     result: Dict[str, Dict[int, str]] = defaultdict(dict)
     section: Optional[str] = None
     starts: Dict[str, Optional[Tuple[int, int]]] = {}
+    labels: Dict[str, str] = {}
     for i, (_, end, key) in enumerate(marks):
         stop = marks[i + 1][0] if i + 1 < len(marks) else len(text)
         value = text[end:stop]
         if key == "title":
             section = TEMPLATE_SECTIONS.get(value.strip())
             starts = {}
+            labels = {}
             continue
         if not section:
             continue
@@ -271,13 +300,16 @@ def parse_season_template(text: str) -> Dict[str, Dict[int, str]]:
             rng = GROUP_RANGE_RE.search(value)
             starts[group.group(1)] = ((int(rng.group(1)), int(rng.group(2)))
                                       if rng else None)
+            labels[group.group(1)] = value.strip()
             continue
         listing = re.fullmatch(r"list(\d+)", key)
         if listing and listing.group(1) in starts:
             links = [title.strip() for title in LIST_LINK_RE.findall(value) if title.strip()]
             if starts[listing.group(1)] is None:
+                label = labels.get(listing.group(1), "")
+                key_name = f"{section}:{label}" if label else section
                 for title in links:
-                    result[section][-(len(result[section]) + 1)] = title
+                    result[key_name][-(len(result[key_name]) + 1)] = title
                 continue
             start, end = starts[listing.group(1)]
             span = end - start + 1
@@ -657,15 +689,21 @@ def season_window(season: str, end_shift_days: int = 0) -> Tuple[datetime, datet
 def count_by_listed(site, sections: List[Section], legend: Legend,
                     cache: Dict[str, Optional[str]],
                     participants_of: Optional[Callable[[str], Optional[set]]] = None,
-                    songs_of: Optional[Callable[[str], Optional[set]]] = None
+                    songs_of: Optional[Callable[[str], Optional[set]]] = None,
+                    excluded_of: Optional[Callable[[str], Optional[set]]] = None,
+                    excluded: Optional[Dict[str, Counter]] = None
                     ) -> Dict[str, Counter]:
     """Count the ranked cells plus the rest of the season's songs.
 
     ``songs_of(season)`` is the season's authoritative song list - the ranking
-    template, 榜外「其他歌曲」 included.  Songs it lists that no ranked cell
-    covers are credited to whoever created their page.  ``participants_of`` only
-    guards the ranked cells: a same-name song from another season must not be
-    credited here either.
+    template's original songs, 榜外「其他歌曲」 included.  Songs it lists that no
+    ranked cell covers are credited to whoever created their page.
+    ``participants_of`` only guards the ranked cells: a same-name song from
+    another season must not be credited here either.
+
+    ``excluded_of(season)`` lists the season's songs that do *not* count
+    (REMIX 赛道、neta 的二创): they are tallied separately into ``excluded`` so
+    that ``render_chart`` can undo the numbers earlier runs had added for them.
 
     A ranked cell's colour is its creator annotation. Redirects and pages listed
     more than once count only once.
@@ -680,6 +718,12 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
             songs = songs_of(season)
             if songs:
                 listed[season] = songs
+    dropped: Dict[str, set] = {}
+    if excluded_of is not None:
+        for season in seasons:
+            songs = excluded_of(season)
+            if songs:
+                dropped[season] = songs
 
     exists: Dict[str, bool] = {}
     resolved: Dict[str, str] = {}
@@ -687,10 +731,14 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
     batch_exists(site, (e.title for s in all_entries for e in s.entries), exists, resolved)
     batch_exists(site, (title for songs in listed.values() for title in songs),
                  exists, resolved)
+    batch_exists(site, (title for songs in dropped.values() for title in songs),
+                 exists, resolved)
     # 先把要按"谁建的页面"归属的条目一次性查出来，避免每条一次请求
     batch_creators(site, (e.title for s in all_entries for e in s.entries
                           if not e.colours and exists.get(e.title)), cache, resolved)
     batch_creators(site, (title for songs in listed.values() for title in songs
+                          if exists.get(title)), cache, resolved)
+    batch_creators(site, (title for songs in dropped.values() for title in songs
                           if exists.get(title)), cache, resolved)
     colours_by_target: Dict[str, List[str]] = {}
     for section in all_entries:
@@ -738,6 +786,25 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
             user = creator_of(site, target, cache)
             if user and user not in KNOWN_BOTS:
                 result[season][legend.identity(user)] += 1
+
+    # 同一套归属规则再跑一遍排除曲目：口径一致，减去它们才不会误伤人工数字。
+    if excluded is not None:
+        for season, songs in dropped.items():
+            counter = excluded.setdefault(season, Counter())
+            for title in songs:
+                target = resolved.get(title, title)
+                if target in seen[season] or not exists.get(title):
+                    continue
+                seen[season].add(target)
+                colours = colours_by_target.get(target, [])
+                if colours:
+                    for colour in dict.fromkeys(colours):
+                        if colour in legend.colour_to_name:
+                            counter[colour] += 1
+                    continue
+                user = creator_of(site, target, cache)
+                if user and user not in KNOWN_BOTS:
+                    counter[legend.identity(user)] += 1
     return result
 
 
@@ -873,7 +940,8 @@ def _relabel_series(model: Optional[str], name: str, colour: str,
 
 
 def render_chart(text: str, sections: List[Section], legend: Legend,
-                 counts: Dict[str, Counter]) -> Tuple[str, dict]:
+                 counts: Dict[str, Counter],
+                 excluded: Optional[Dict[str, Counter]] = None) -> Tuple[str, dict]:
     match = CHART_RE.search(text)
     if not match:
         raise RuntimeError("未找到 {{Echart}} - 页面结构可能已改变")
@@ -899,6 +967,14 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
             per_season[season][user] += count
             totals[user] += count
 
+    # 排除曲目（REMIX/二创）以前也算进过图表，现在不算了：先按同一套归属规则
+    # 算出一个减数，才能把以前多给的数字改回来，而不是被「只升不降」护住。
+    removed: Dict[str, Dict[str, int]] = {s: {} for s in seasons}
+    for season in seasons:
+        for key, count in (excluded or {}).get(season, {}).items():
+            user = colours.get(key, legend.display(key))
+            removed[season][user] = removed[season].get(user, 0) + count
+
     series_span = _container(raw, r'"series"\s*:\s*\[')
     spans = _elements(raw, *series_span)
     blocks: List[Tuple[str, dict]] = []
@@ -921,12 +997,17 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     users = [u for u in yaxis if totals[u] >= 5 or any(u in kept.get(l, {}) for l in labels)]
     users += [u for u in totals if totals[u] >= 5 and u not in users]
 
+    def previous_of(label: str, season: str, user: str) -> int:
+        """上一版图表里的数字，扣掉机器人现在不再计入的那部分。"""
+        previous = kept.get(label, {}).get(user, 0)
+        return max(0, previous - removed.get(season, {}).get(user, 0))
+
     def chart_total(user: str) -> int:
         """这一行在整张图上的合计（推不出来、只能沿用的人工数字也算）。"""
         total = 0
         for index, label in enumerate(labels):
             computed = per_season[seasons[index]].get(user, 0)
-            total += max(computed, kept.get(label, {}).get(user, 0))
+            total += max(computed, previous_of(label, seasons[index], user))
         return total
 
     # ECharts 的 yAxis 自下而上画：数组里靠前的画在图的下方。所以按创建数
@@ -944,7 +1025,7 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
         data: List[str] = []
         for user in users:
             computed = per_season[season].get(user, 0)
-            previous = kept.get(label, {}).get(user, 0)
+            previous = previous_of(label, season, user)
             if previous > computed:
                 manual += 1
             data.append(str(max(computed, previous)))
@@ -1201,11 +1282,20 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     wanted = season_templates(site, seasons) if actions & {"entries", "stats"} else {}
 
     def songs_of(season: str) -> Optional[set]:
-        """赛季模板列出的曲目标题（含榜外「其他歌曲」）；``None`` 表示模板没取到。"""
+        """赛季模板里**计入统计**的曲目（榜单曲 + 榜外原创曲）；``None`` 表示模板没取到。"""
         template_sections = wanted.get(season)
         if not template_sections:
             return None
-        return {title for ranks in template_sections.values() for title in ranks.values()}
+        return {title for key, ranks in template_sections.items()
+                for title in ranks.values() if is_counted_track(key, title)}
+
+    def excluded_of(season: str) -> Optional[set]:
+        """不计入统计的曲目（REMIX 赛道、neta 二创），用来把图表里多算的抹掉。"""
+        template_sections = wanted.get(season)
+        if not template_sections:
+            return None
+        return {title for key, ranks in template_sections.items()
+                for title in ranks.values() if not is_counted_track(key, title)}
 
     if "entries" in actions:
         # 只要模板里的标题有对应页面，就把名次格子统一改写成规范标题（重定向写法
@@ -1290,11 +1380,13 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         text, changed = recompute_counts(text, created)
         pywikibot.output(f"计数: 更新 {changed} 个小节")
     if "stats" in actions:
-        counts = (count_by_listed(site, sections, legend, cache,
-                                  participants_of, songs_of)
+        excluded: Dict[str, Counter] = {}
+        counts = (count_by_listed(site, sections, legend, cache, participants_of,
+                                  songs_of, excluded_of, excluded)
                   if basis == "listed" else count_by_window(site, sections))
-        text, _ = render_chart(text, sections, legend, counts)
-        pywikibot.output(f"统计: 依据 {basis} 重算图表")
+        text, _ = render_chart(text, sections, legend, counts, excluded)
+        dropped = sum(sum(entry.values()) for entry in excluded.values())
+        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处）")
     if "report" in actions:
         report = build_report(site, sections, legend, cache, exists, plan)
         pywikibot.output("异常报告:\n" + (report or "  （无）"))

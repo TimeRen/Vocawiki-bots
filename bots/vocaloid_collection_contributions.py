@@ -40,9 +40,10 @@ The bot can:
   local page. Some chart numbers come from bookkeeping outside the wiki and
   cannot be derived at all, so a cell is normally only raised, never lowered -
   with two exceptions: whatever the REMIX/二创 songs had added to a cell is
-  subtracted again, and so is whatever earlier runs had given to the author of
-  an *imported* revision (that author is the source article's last editor, not
-  its creator, see ``page_creator``).  Those numbers do get corrected downwards.
+  subtracted again, and whatever earlier runs had given to the author of an
+  *imported* revision (that author is the source article's last editor, not its
+  creator, see ``page_creator``) is subtracted there and added to the real
+  creator's cell, so the entry does move over.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``moe``     - 与萌娘百科交叉比对创建者，**只出报告、不改页面**。贡献列表记的是
@@ -774,7 +775,8 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     excluded_of: Optional[Callable[[str], Optional[set]]] = None,
                     excluded: Optional[Dict[str, Counter]] = None,
                     moe_cache: Optional[Dict] = None,
-                    corrections: Optional[Dict[str, Counter]] = None
+                    corrections: Optional[Dict[str, Counter]] = None,
+                    gains: Optional[Dict[str, Counter]] = None
                     ) -> Dict[str, Counter]:
     """Count the ranked cells plus the rest of the season's songs.
 
@@ -789,9 +791,11 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
     that ``render_chart`` can undo the numbers earlier runs had added for them.
 
     ``corrections`` receives, per season, the credits earlier runs gave under the
-    old rule but that are wrong now (a cross-wiki import's author is the source
-    article's last editor, not its creator); ``render_chart`` subtracts them so
-    the page actually shows the corrected numbers.
+    old rule that are wrong now (a cross-wiki import's author is the source
+    article's last editor, not its creator); ``gains`` receives the same credits
+    under the name that should have got them.  ``render_chart`` subtracts the
+    first and adds the second, so the page shows the corrected numbers instead
+    of keeping the wrong ones (it never lowers an existing number by itself).
 
     A ranked cell's colour is its creator annotation. Redirects and pages listed
     more than once count only once.
@@ -856,9 +860,12 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                 # 同名不同曲，页面是别的赛季的歌：算进来就会给这一季添一个假数字
                 continue
             current, previous = page_credits(site, target, cache, moe_cache)
-            new, drop = credit_pair(legend, current, previous)
-            if drop and corrections is not None:
-                corrections.setdefault(section.season, Counter())[drop] += 1
+            new, old = credit_pair(legend, current, previous)
+            if new != old:
+                if old and corrections is not None:
+                    corrections.setdefault(section.season, Counter())[old] += 1
+                if new and gains is not None:
+                    gains.setdefault(section.season, Counter())[new] += 1
             if new:
                 result[section.season][new] += 1
 
@@ -875,9 +882,12 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                         result[season][colour] += 1
                 continue
             current, previous = page_credits(site, target, cache, moe_cache)
-            new, drop = credit_pair(legend, current, previous)
-            if drop and corrections is not None:
-                corrections.setdefault(season, Counter())[drop] += 1
+            new, old = credit_pair(legend, current, previous)
+            if new != old:
+                if old and corrections is not None:
+                    corrections.setdefault(season, Counter())[old] += 1
+                if new and gains is not None:
+                    gains.setdefault(season, Counter())[new] += 1
             if new:
                 result[season][new] += 1
 
@@ -897,11 +907,9 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                         if colour in legend.colour_to_name:
                             counter[colour] += 1
                     continue
-                current, previous = page_credits(site, target, cache, moe_cache)
-                new, drop = credit_pair(legend, current, previous)
-                identity = drop or new
-                if identity:
-                    counter[identity] += 1
+                _, old = credit_pair(legend, *page_credits(site, target, cache, moe_cache))
+                if old:
+                    counter[old] += 1
     return result
 
 
@@ -1038,7 +1046,8 @@ def _relabel_series(model: Optional[str], name: str, colour: str,
 
 def render_chart(text: str, sections: List[Section], legend: Legend,
                  counts: Dict[str, Counter],
-                 excluded: Optional[Dict[str, Counter]] = None) -> Tuple[str, dict]:
+                 excluded: Optional[Dict[str, Counter]] = None,
+                 gained: Optional[Dict[str, Counter]] = None) -> Tuple[str, dict]:
     match = CHART_RE.search(text)
     if not match:
         raise RuntimeError("未找到 {{Echart}} - 页面结构可能已改变")
@@ -1072,6 +1081,14 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
             user = colours.get(key, legend.display(key))
             removed[season][user] = removed[season].get(user, 0) + count
 
+    # 归属改到真创建者头上的那份要**加到**他头上：那些条目在他这一格原本没记过
+    # （旧图表记的是导入版作者），只减不加的话会被「只升不降」吃掉。
+    added: Dict[str, Dict[str, int]] = {s: {} for s in seasons}
+    for season in seasons:
+        for key, count in (gained or {}).get(season, {}).items():
+            user = colours.get(key, legend.display(key))
+            added[season][user] = added[season].get(user, 0) + count
+
     series_span = _container(raw, r'"series"\s*:\s*\[')
     spans = _elements(raw, *series_span)
     blocks: List[Tuple[str, dict]] = []
@@ -1095,9 +1112,10 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     users += [u for u in totals if totals[u] >= 5 and u not in users]
 
     def previous_of(label: str, season: str, user: str) -> int:
-        """上一版图表里的数字，扣掉机器人现在不再计入的那部分。"""
+        """上一版图表里的数字，扣掉机器人不再计入的、加上改归到这一格的。"""
         previous = kept.get(label, {}).get(user, 0)
-        return max(0, previous - removed.get(season, {}).get(user, 0))
+        return max(0, previous - removed.get(season, {}).get(user, 0)
+                   + added.get(season, {}).get(user, 0))
 
     def chart_total(user: str) -> int:
         """这一行在整张图上的合计（推不出来、只能沿用的人工数字也算）。"""
@@ -1460,14 +1478,14 @@ def page_creator(site, title: str, cache: Dict,
 
 def credit_pair(legend: Legend, current: Optional[str],
                 previous: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """``(这次要记的归属, 旧口径多记、要从旧图表里减回去的归属)``。
+    """``(现在该记的归属, 旧口径算出来的归属)``；机器人账号两边都不记。
 
-    机器人账号两边都不记；两边算出同一个人时不用减（旧数字现在依然成立，
-    减了反而会连人工加的那部分一起削掉）。
+    两边不同时，旧图表要减掉旧口径那份（``previous``）、再加上新口径那份——
+    条目本来记在导入版作者头上，不减旧的就降不下来、不加新的就落不到真作者头上。
     """
     new = legend.identity(current) if current and current not in KNOWN_BOTS else None
     old = legend.identity(previous) if previous and previous not in KNOWN_BOTS else None
-    return new, (old if old != new else None)
+    return new, old
 
 
 def moegirl_candidates(sections: List[Section], legend: Legend,
@@ -1857,19 +1875,21 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     if "stats" in actions:
         excluded: Dict[str, Counter] = {}
         corrections: Dict[str, Counter] = {}
+        gains: Dict[str, Counter] = {}
         counts = (count_by_listed(site, sections, legend, cache, participants_of,
                                   songs_of, excluded_of, excluded, moe_cache,
-                                  corrections)
+                                  corrections, gains)
                   if basis == "listed" else count_by_window(site, sections))
         dropped = sum(sum(entry.values()) for entry in excluded.values())
         fixed = sum(sum(entry.values()) for entry in corrections.values())
-        # 旧图表里按老口径多记给导入者的那份也要减回去，否则「只升不降」会把
-        # 错数字一直护着，页面上永远看不到修正。
+        moved = sum(sum(entry.values()) for entry in gains.values())
+        # 归错的那份要从旧图表里减回去、并且记到真创建者头上：只减不加会被
+        # 「只升不降」挡住，页面上的数字就永远搬不过去。
         for season, counter in corrections.items():
             excluded.setdefault(season, Counter()).update(counter)
-        text, _ = render_chart(text, sections, legend, counts, excluded)
+        text, _ = render_chart(text, sections, legend, counts, excluded, gains)
         pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处，"
-                         f"把误记给导入者的 {fixed} 处减回去）")
+                         f"导入误记改归真创建者 {moved}/{fixed} 处）")
     if "report" in actions:
         report = build_report(site, sections, legend, cache, exists, plan)
         pywikibot.output("异常报告:\n" + (report or "  （无）"))

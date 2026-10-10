@@ -317,6 +317,33 @@ class TestRenderChart(TestCase):
         self.assertEqual(data["二创作者"], 1)   # 4 - 3 = 1：多算的 REMIX/二创被抹掉
         self.assertEqual(data["人工记帐"], 7)   # 没有排除来源，人工数字不动
 
+    def test_moved_credits_are_added_to_the_real_creator(self):
+        # 真创建者那一格原本比机器人算出来的高（人工记账），只减不加的话条目
+        # 会被「只升不降」挡住，永远搬不到他头上。
+        colour = "#000000"
+        chart = {
+            "legend": {"data": ["ボカコレ2021秋"]},
+            "yAxis": {"data": ["真创建者", "导入版作者"]},
+            "series": [
+                {"name": "ボカコレ2021秋", "type": "bar",
+                 "itemStyle": {"color": "#111111"}, "data": [9, 3]},
+            ],
+        }
+        text = ("{{Echart|data=<nowiki>"
+                + json.dumps(chart, ensure_ascii=False) + "</nowiki>}}")
+        sections = [Section("2021秋", "TOP100", [Entry("甲", [colour])])]
+        legend = Legend(colour_to_name={colour: "真创建者"})
+
+        updated, _ = contributions.render_chart(
+            text, sections, legend, {"2021秋": {"#000000": 2}},
+            {"2021秋": {"导入版作者": 1}},      # 从旧口径那里减掉
+            {"2021秋": {"#000000": 1}})         # 记到真创建者头上
+
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        data = dict(zip(parsed["yAxis"]["data"], parsed["series"][0]["data"]))
+        self.assertEqual(data["真创建者"], 10)      # 9 + 1：条目搬过来了
+        self.assertEqual(data["导入版作者"], 2)      # 3 - 1：不再记在他头上
+
 
 class TestScheduledMaintenance(TestCase):
     @patch("sys.argv", ["vocaloid_collection_contributions.py", "all", "--write"])
@@ -394,21 +421,19 @@ class TestPageCreator(TestCase):
         self.assertIsNone(contributions.page_creator(None, "曲", {}, {}))
         moegirl.assert_not_called()
 
-    def test_credit_pair_only_asks_to_subtract_a_changed_credit(self):
+    def test_credit_pair_maps_names_to_colours_and_drops_bots(self):
         colour = "#FF0000"
         legend = Legend(colour_to_name={colour: "图例用户"},
                         name_to_colour={"图例用户": colour})
 
-        # 归属变了：旧口径那份要从旧图表里减回去
-        self.assertEqual(contributions.credit_pair(legend, "新作者", "旧作者"),
-                         ("新作者", "旧作者"))
-        # 归属没变：不用减，减了会连人工加的数字一起削掉
-        self.assertEqual(contributions.credit_pair(legend, "旧作者", "旧作者"),
-                         ("旧作者", None))
+        self.assertEqual(contributions.credit_pair(legend, "某人", "旧作者"),
+                         ("某人", "旧作者"))
+        self.assertEqual(contributions.credit_pair(legend, "图例用户", "图例用户"),
+                         (colour, colour))
         # 机器人账号两边都不记
-        self.assertEqual(
-            contributions.credit_pair(legend, "星海-interfacebot", "新作者"),
-            (None, "新作者"))
+        self.assertEqual(contributions.credit_pair(legend, "星海-interfacebot", "某人"),
+                         (None, "某人"))
+        self.assertEqual(contributions.credit_pair(legend, None, None), (None, None))
 
     @patch.object(contributions, "page_credits",
                   return_value=("真正的作者", "源站最后编辑者"))
@@ -416,21 +441,22 @@ class TestPageCreator(TestCase):
     def test_import_credits_move_and_the_old_ones_are_subtracted(
             self, _batch_creators, _page_credits):
         # 榜外曲原来是按导入时抄来的源站最后一版作者记的：现在记真正的作者，
-        # 同时把旧图表里多给源站最后编辑者的那一份减回去。
+        # 旧图表里多给源站最后编辑者的那一份要减回去、真作者那一格要加上。
         colour = "#000000"
         sections = [Section("2021秋", "TOP100", [Entry("榜内曲", [colour])])]
         legend = Legend(colour_to_name={colour: "榜内创建者"})
-        corrections = {}
+        corrections, gains = {}, {}
 
         counts = count_by_listed(
             FakeSite(), sections, legend, {},
             lambda _season: {"榜外曲"},
             lambda _season: {"榜内曲", "榜外曲"},
-            corrections=corrections)
+            corrections=corrections, gains=gains)
 
         self.assertEqual(counts["2021秋"]["#000000"], 1)
         self.assertEqual(counts["2021秋"]["真正的作者"], 1)
         self.assertEqual(corrections["2021秋"]["源站最后编辑者"], 1)
+        self.assertEqual(gains["2021秋"]["真正的作者"], 1)
 
 
 class TestMoegirlCrossCheck(TestCase):

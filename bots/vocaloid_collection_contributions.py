@@ -30,20 +30,24 @@ The bot can:
   the same name is a different song, and colouring it would credit its
   creator (and its season) here.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
-  The season's authoritative song list is the ranking template, but only
-  *original* songs count: the REMIX track and neta's non-original entries
-  (「其他部门」 and 二创 written as ``原曲/创作者``) are left out, see
-  ``is_counted_track``.  A page that merely carries the season's navbox (the
+  The season's authoritative song list is the ranking template, and the REMIX
+  track and the derivative songs do not count, see ``is_counted_track``: a
+  derivative is recognised by its title (``原曲/创作者``, ``…＃二次创作``) or,
+  when the title says nothing, by its page calling itself a cover/二创
+  (``is_derivative``).  「其他部门」 groups hold original songs (the Exhibition
+  module) *and* covers, so they are judged song by song rather than dropped as a
+  group.  A page that merely carries the season's navbox (the
   overview article) does not count either.  Rows are ordered by their total, so
   the chart reads 多→少 from top to bottom.  A cell's colour is the hand-made
   creator annotation and wins outright; other entries use the creator of the
   local page. Some chart numbers come from bookkeeping outside the wiki and
   cannot be derived at all, so a cell is normally only raised, never lowered.
   Two exceptions subtract from a cell: the REMIX/二创 songs, and the credits
-  earlier runs gave to the author of an *imported* revision (that author is the
-  source article's last editor, see ``page_creator``).  Moving those credits to
-  the real creator's cell is a one-off migration - ``recredit`` - because
-  re-applying the delta every hour would keep growing the number.
+  earlier runs gave to the author of an *imported* revision (that author is
+  either the source article's last editor, see ``page_creator``, or the mover
+  recorded in the first revision's summary).  Moving those credits to the real
+  creator's cell is a one-off migration - ``recredit`` - because re-applying the
+  delta every hour would keep growing the number.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``moe``     - 与萌娘百科交叉比对创建者，**只出报告、不改页面**。贡献列表记的是
@@ -79,8 +83,11 @@ How a creator is resolved (``colour``, ``counts`` and ``stats`` all share it,
 see ``page_creator``): the author of the page's *oldest* revision.  An imported
 revision is the exception - voca.wiki copied most pre-2024 entries from
 Moegirlpedia, and such a revision carries the **source article's last editor**
-(``zhmoe>某用户``), not its creator.  For those entries the creator comes from
-the source article's own oldest revision instead: first the mirror
+(``zhmoe>某用户``), not its creator.  Some imports do not prefix the username at
+all: the mover is recorded as the first revision's author and the source is only
+named in the edit summary (``搬运自萌娘百科…(by. [[zhmoe:User:某人]])``, as with
+2026夏's 秘书室), which ``is_import_note`` detects.  In both cases the creator
+comes from the source article's own oldest revision instead: first the mirror
 (``moegirl.icu``), and when the mirror has no such article, the official site
 (``zh.moegirl.org.cn``, which needs the bot password - the mirror cannot see
 Moegirlpedia's *pending* articles) - by the voca title with punctuation
@@ -114,6 +121,7 @@ PAGE_TITLE = "Vocawiki:贡献列表/The VOCALOID Collection"
 DATA_DIR = Path("data")
 CREATOR_CACHE = DATA_DIR / "vocaloid_collection_creators.pickle"
 MOEGIRL_CACHE = DATA_DIR / "vocaloid_collection_moegirl.pickle"
+DERIVATIVE_CACHE = DATA_DIR / "vocaloid_collection_derivatives.pickle"
 CHART_SERIES_PREFIX = "ボカコレ"
 
 # 萌娘百科（voca.wiki 的条目大多从那边来，创建者对不上时拿它当参照）。它不在
@@ -195,25 +203,38 @@ def is_counted_section(name: str) -> bool:
     return upper.startswith("TOP") or upper.startswith("ROOKIE")
 
 
-# 「其他歌曲」下的分组名：只有「未上榜歌曲」是本季的原创曲，其他分组（其他部门
-# 之类，歌ってみた/演奏等）属于二创，不算创建条目的贡献。
+# 「其他歌曲」下的分组名：这些分组里既有本季的原创曲（Exhibition 这类不排名模块
+# 也收在同一组），也有二创（歌ってみた/翻唱），所以不能按分组名一刀切——判断改看
+# 曲目本身：标题里写「原曲/创作者」、标题写着「二次创作」，或页面正文自认是翻唱/
+# 二创的，才不算（见 ``is_derivative``）。``ORIGINAL_GROUPS`` 现在是「明确只收
+# 原创曲的分组」，留着给不会混二创的分组用。
 ORIGINAL_GROUPS = {"未上榜歌曲"}
 
+# 二创的痕迹：标题上的（「原曲/创作者」「…＃二次创作」）和页面正文里的
+DERIVATIVE_TITLE_RE = re.compile(r"/|#\s*二次[創创]作")
+DERIVATIVE_TEXT_MARKERS = ("翻唱", "歌ってみた", "二次创作", "二次創作",
+                           "二创", "アレンジ")
 
-def is_counted_track(section_key: str, title: str) -> bool:
-    """这条曲目算不算创建贡献：REMIX 赛道与二创（neta 非原创曲）都不算。
+
+def is_counted_track(section_key: str, title: str,
+                     derivative_of: Optional[Callable[[str], bool]] = None) -> bool:
+    """这条曲目算不算创建贡献：REMIX 赛道与二创都不算。
 
     ``section_key`` 是 ``parse_season_template`` 的键，形如 ``REMIX`` /
-    ``neta`` / ``neta:未上榜歌曲``（无区间分组会带上分组名）。
+    ``neta`` / ``neta:未上榜歌曲``（无区间分组会带上分组名）。``derivative_of``
+    给出「页面正文自认是二创」的判断（需要读页面，见 ``is_derivative``）；不给就
+    只看标题上的痕迹。
     """
     name, _, label = section_key.partition(":")
     if name == "REMIX":
         return False
     if name == "neta":
-        if label and label not in ORIGINAL_GROUPS:
+        if label and label in ORIGINAL_GROUPS:
+            return "/" not in title  # 这一组只收原创曲，带斜杠的仍是「原曲/创作者」
+        if DERIVATIVE_TITLE_RE.search(title):
             return False
-        if "/" in title:
-            return False  # 二创写法「原曲/创作者」
+        if derivative_of is not None and derivative_of(title):
+            return False
     return True
 
 
@@ -628,6 +649,28 @@ IMPORT_USER_RE = re.compile(r"^([A-Za-z0-9_-]+)>(.+)$")
 IMPORT_SOURCE_MOEGIRL = "zhmoe"
 IMPORT_SOURCES = {IMPORT_SOURCE_MOEGIRL: "萌娘百科"}
 
+# 不是每一次搬運都会把源站作者写成 ``zhmoe>某人``：也有把搬运者自己记成首版作者、
+# 只在编辑摘要里留一句「搬运自萌娘百科…(by. [[zhmoe:User:某人]])」的（2026夏 的
+# 秘书室 就是 Zhoumou 这样建的，于是那一份贡献记到了搬运者头上）。摘要里点了名就
+# 直接用它，没点名再去源站查——两种导入都走后面同一套归属。
+IMPORT_NOTE_RE = re.compile(r"(?:搬运|來源|来源|导入|導入|摘自)")
+IMPORT_NOTE_WIKI_RE = re.compile(r"萌娘百科|萌百")
+IMPORT_NOTE_USER_RE = re.compile(r"zhmoe:(?:User|user|用户|用户页)\s*:\s*([^|\]}）)\s]+)")
+
+
+def is_import_note(comment: str) -> bool:
+    """首版摘要看起来像「从萌娘百科搬过来的」吗。"""
+    if not comment:
+        return False
+    return bool(IMPORT_NOTE_RE.search(comment)
+                and IMPORT_NOTE_WIKI_RE.search(comment))
+
+
+def import_note_user(comment: str) -> Optional[str]:
+    """摘要里点名的源站用户（``[[zhmoe:User:某人]]``）；没有返回 ``None``。"""
+    match = IMPORT_NOTE_USER_RE.search(comment or "")
+    return match.group(1) if match else None
+
 
 def strip_prefix(user: str) -> str:
     """去掉跨站导入前缀，取用户名本身。"""
@@ -644,13 +687,26 @@ def import_source(user: str) -> str:
 def cached_creator(cache: Dict, title: str) -> Optional[Tuple[str, str]]:
     """``(最旧一版的原始用户名, 跨站来源)``；没有缓存返回 ``None``。
 
-    旧缓存里存的是剥掉前缀的用户名，分辨不出来源，只能当作没缓存、重查一次。
-    新格式多存一个首版时间戳（``import_stamp`` 要用），这里只看前两位。
+    **只认最新的四元组**（用户名、来源、首版时间戳、首版摘要）：早先的格式少了时间
+    戳或摘要，而摘要正是判断「首版作者其实是搬运者」的唯一线索（见 ``is_import_note``），
+    所以旧格式一律当作没缓存、重查一次。
     """
     entry = cache.get(title)
-    if isinstance(entry, tuple) and len(entry) in (2, 3):
+    if isinstance(entry, tuple) and len(entry) == 4:
         return entry[0], entry[1]
     return None
+
+
+def creator_note(cache: Dict, title: str) -> str:
+    """首版的编辑摘要（没有缓存或旧格式则返回空串）。
+
+    摘要里常留着「搬运自萌娘百科…」这类说明，是判断「首版作者其实是搬运者」的唯一
+    线索（见 ``is_import_note``）。
+    """
+    entry = cache.get(title)
+    if isinstance(entry, tuple) and len(entry) == 4 and isinstance(entry[3], str):
+        return entry[3]
+    return ""
 
 
 def load_cache(path: Path) -> Dict:
@@ -707,9 +763,12 @@ def creator_of(site, title: str, cache: Dict) -> Optional[str]:
         pywikibot.error(f"{title}: {exc}")
         return None  # do not cache transient failures
     if user:
-        # 顺手把首版时间戳也存下：导入版记的时间就是源站那一版的时间，
-        # 反查源条目名要靠它（见 import_stamp / moegirl_source_title）。
-        cache[title] = (user, import_source(user), revisions[0].get("timestamp"))
+        # 顺手把首版时间戳与摘要也存下：导入版记的时间就是源站那一版的时间（反查
+        # 源条目名要用，见 import_stamp / moegirl_source_title），摘要里则写着这次
+        # 导入的来源（见 is_import_note）。
+        cache[title] = (user, import_source(user),
+                        revisions[0].get("timestamp"),
+                        revisions[0].get("comment") or "")
     return user
 
 
@@ -717,10 +776,10 @@ def import_stamp(site, title: str, cache: Dict):
     """首版的时间戳（导入版记的就是源站那一版的时间）；缓存里没有就查一次补上。
 
     这个时间戳是 ``moegirl_source_title`` 反查源条目名的唯一依据，所以顺手写进
-    缓存——旧格式的缓存只有用户名和来源，那就查一次。
+    缓存——旧格式的缓存没有它，那就查一次；首版摘要（判断「搬运」）也一样补上。
     """
     entry = cache.get(title)
-    if isinstance(entry, tuple) and len(entry) == 3:
+    if isinstance(entry, tuple) and len(entry) == 4:
         return entry[2]
     try:
         revisions = list(Page(site, title).revisions(total=1, reverse=True,
@@ -732,8 +791,32 @@ def import_stamp(site, title: str, cache: Dict):
         return None
     revision = revisions[0]
     cache[title] = (revision["user"], import_source(revision["user"]),
-                    revision["timestamp"])
+                    revision["timestamp"], revision.get("comment") or "")
     return revision["timestamp"]
+
+
+def is_derivative(site, title: str, cache: Dict) -> bool:
+    """这一页自认是二创吗（翻唱/歌ってみた/二次创作）——标题看不出来时读页面正文。
+
+    「其他部门」这类分组里原创曲与二创混在一起（2025夏 的 魔法 是原创曲、
+    少女A/Iyowa 是翻唱），光看分组名会把原创曲也排掉。判断结果写进 ``cache``
+    （30 天有效），免得每轮都把同一批页面读一遍。
+    """
+    if DERIVATIVE_TITLE_RE.search(title):
+        return True
+    cached = cache.get(title)
+    if isinstance(cached, tuple) and len(cached) == 2:
+        verdict, stamped = cached
+        if time.time() - stamped <= MOEGIRL_CACHE_TTL:
+            return bool(verdict)
+    try:
+        text = Page(site, title).text
+    except Exception as exc:  # noqa: BLE001
+        pywikibot.error(f"{title}: {exc}")
+        return False  # 读不到就当原创，别把整条曲目从统计里抹掉
+    verdict = any(marker in text for marker in DERIVATIVE_TEXT_MARKERS)
+    cache[title] = (verdict, time.time())
+    return verdict
 
 
 def batch_exists(site, titles: Iterable[str], exists: Dict[str, bool],
@@ -854,7 +937,8 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     excluded: Optional[Dict[str, Counter]] = None,
                     moe_cache: Optional[Dict] = None,
                     corrections: Optional[Dict[str, Counter]] = None,
-                    gains: Optional[Dict[str, Counter]] = None
+                    gains: Optional[Dict[str, Counter]] = None,
+                    kinds: Optional[set] = None
                     ) -> Dict[str, Counter]:
     """Count the ranked cells plus the rest of the season's songs.
 
@@ -873,7 +957,10 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
     imported revision (``corrections``) and the same credits under the name that
     should have got them (``gains``).  The hourly pass must not apply them - the
     chart only ever raises a number, so re-applying the delta every run would
-    grow it forever.
+    grow it forever.  ``kinds`` narrows which import flavours may be corrected
+    (``prefix`` = the ``zhmoe>users`` first revision, ``note`` = the mover
+    recorded in the first revision's summary): a second migration must not
+    subtract the corrections the first one already applied.
 
     A ranked cell's colour is its creator annotation. Redirects and pages listed
     more than once count only once.
@@ -937,13 +1024,14 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     section.season, target, participants_of):
                 # 同名不同曲，页面是别的赛季的歌：算进来就会给这一季添一个假数字
                 continue
-            current, previous = page_credits(site, target, cache, moe_cache)
+            current, previous, kind = page_credits_detail(site, target, cache,
+                                                          moe_cache)
             new, old = credit_pair(legend, current, previous)
-            if new != old:
+            if new != old and (kinds is None or kind in kinds):
                 if old and corrections is not None:
-                    corrections.setdefault(section.season, Counter())[old] += 1
+                    corrections.setdefault(season, Counter())[old] += 1
                 if new and gains is not None:
-                    gains.setdefault(section.season, Counter())[new] += 1
+                    gains.setdefault(season, Counter())[new] += 1
             if new:
                 result[section.season][new] += 1
 
@@ -959,9 +1047,10 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     if colour in legend.colour_to_name:
                         result[season][colour] += 1
                 continue
-            current, previous = page_credits(site, target, cache, moe_cache)
+            current, previous, kind = page_credits_detail(site, target, cache,
+                                                          moe_cache)
             new, old = credit_pair(legend, current, previous)
-            if new != old:
+            if new != old and (kinds is None or kind in kinds):
                 if old and corrections is not None:
                     corrections.setdefault(season, Counter())[old] += 1
                 if new and gains is not None:
@@ -1926,28 +2015,64 @@ def page_credits(site, title: str, cache: Dict, moe_cache: Optional[Dict] = None
     同名条目，镜像没有再去官方站找（含标点变体、以及用导入版的时间戳反查源条目
     名——voca 的条目名常被改成自己的消歧写法）。源站也查不到时宁可不归属，也不拿
     导入者顶替。两个用户名都已剥掉跨站前缀。
+
+    还有一类导入没把源站作者写在用户名上，而是把**搬运者自己**记成首版作者，只在
+    摘要里留一句「搬运自萌娘百科…(by. [[zhmoe:User:某人]])」（2026夏 的 秘书室
+    就是 Zhoumou 这样建的）：摘要点了名就用那个名字，没点名就照上面去源站查。
     """
     raw = creator_of(site, title, cache)
     if raw is None:
         return None, None
+    return page_credits_of(site, title, raw, cache, moe_cache)
+
+
+def page_credits_of(site, title: str, raw: str, cache: Dict,
+                    moe_cache: Optional[Dict] = None) -> Tuple[Optional[str], str]:
+    """``page_credits`` 的主体（``raw`` 已经查好）。"""
     previous = strip_prefix(raw)
     source = import_source(raw)
+    note = creator_note(cache, title) if not source else ""
+    if not source and is_import_note(note):
+        source = IMPORT_SOURCE_MOEGIRL
     if not source:
         return previous, previous
     if source not in IMPORT_SOURCES:
         pywikibot.warning(f"{title}: 首版来自 {source}>，认不出源站，不归属")
         return None, previous
-    creator = moegirl_creator_of(title, moe_cache)
-    if creator is None and source == IMPORT_SOURCE_MOEGIRL:
-        creator = moegirl_imported_creator(title, previous,
-                                           import_stamp(site, title, cache),
-                                           moe_cache)
+    creator = import_note_user(note)
+    if creator:
+        pywikibot.output(f"{title}: 首版摘要写明是从{IMPORT_SOURCES[source]}"
+                         f"搬来的（{previous} 只是搬运者），记给 {creator}")
+    else:
+        creator = moegirl_creator_of(title, moe_cache)
+        if creator is None and source == IMPORT_SOURCE_MOEGIRL:
+            creator = moegirl_imported_creator(title, previous,
+                                               import_stamp(site, title, cache),
+                                               moe_cache)
     if creator is None:
         pywikibot.warning(
             f"{title}: 首版是{IMPORT_SOURCES[source]}导入的"
             f"（{previous} 只是源站最后一版的作者），源站也查不到作者，不归属")
         return None, previous
     return strip_prefix(creator), previous
+
+
+def page_credits_detail(site, title: str, cache: Dict,
+                        moe_cache: Optional[Dict] = None
+                        ) -> Tuple[Optional[str], Optional[str], str]:
+    """``page_credits`` 再加上「这次归属是怎么来的」。
+
+    第三种返回值是 ``local`` / ``prefix`` / ``note``：首版是本地创作、首版用户名
+    带 ``zhmoe>`` 前缀、还是首版摘要写着是从萌娘百科搬来的。一次性的迁移要靠它
+    区分——两种导入的错账各自要减一次，混在一起减就会减重。
+    """
+    raw = creator_of(site, title, cache)
+    if raw is None:
+        return None, None, "local"
+    kind = ("prefix" if import_source(raw)
+            else "note" if is_import_note(creator_note(cache, title)) else "local")
+    creator, previous = page_credits_of(site, title, raw, cache, moe_cache)
+    return creator, previous, kind
 
 
 def page_creator(site, title: str, cache: Dict,
@@ -2231,13 +2356,17 @@ def revision_text(site, revid: int) -> str:
 def recredit(site, text: str, sections: List[Section], legend: Legend,
              cache: Dict, moe_cache: Dict,
              participants_of, songs_of, excluded_of,
-             from_rev: Optional[int]) -> str:
+             from_rev: Optional[int], kinds: Optional[set] = None) -> str:
     """一次性把记在「导入版作者」名下的数字搬到真创建者头上。
 
     为什么不能每轮都做：图表只会把数字往上抬（站外的人工记账推不出来，不能丢），
     所以「减掉旧口径那份、给真创建者加上」必须相对**某个基准版**做一次；否则每跑
     一轮都会再加一遍，数字越滚越大。基准版由 ``from_rev`` 指定，同一版重跑得到的
     结果一致，所以重复执行、或者 CI 与 Toolforge 各跑一次，结果都一样。
+
+    ``kinds`` 用来只处理某一种导入（见 ``page_credits_detail``）：基准版定在新近
+    的一版时，先前那次迁移减过的账不能再减一遍（旧账在基准版里已经改好了），
+    所以补做新发现的那一类时只挑 ``note``。
     """
     if not from_rev:
         raise ValueError("recredit 需要 --from-rev <版本号>：拿哪一版的图表当基准")
@@ -2247,7 +2376,7 @@ def recredit(site, text: str, sections: List[Section], legend: Legend,
     gains: Dict[str, Counter] = {}
     counts = count_by_listed(site, sections, legend, cache, participants_of,
                              songs_of, excluded_of, excluded, moe_cache,
-                             corrections, gains)
+                             corrections, gains, kinds)
     for season, counter in corrections.items():
         excluded.setdefault(season, Counter()).update(counter)
     moved = sum(sum(counter.values()) for counter in gains.values())
@@ -2260,7 +2389,8 @@ def recredit(site, text: str, sections: List[Section], legend: Legend,
 
 
 def run_once(site, actions, basis: str = "listed", write: bool = False,
-             summary: Optional[str] = None, from_rev: Optional[int] = None) -> bool:
+             summary: Optional[str] = None, from_rev: Optional[int] = None,
+             kinds: Optional[set] = None) -> bool:
     """Run one maintenance pass.  Returns True when the page changed.
 
     Returns False when there was nothing to do, and also when the save was
@@ -2281,6 +2411,12 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     DATA_DIR.mkdir(exist_ok=True)
     cache = load_cache(CREATOR_CACHE)
     moe_cache = load_cache(MOEGIRL_CACHE)
+    derivative_cache = load_cache(DERIVATIVE_CACHE)
+
+    def derivative_of(title: str) -> bool:
+        """这一页是不是二创（标题看不出来时读页面正文，结果进缓存）。"""
+        return is_derivative(site, title, derivative_cache)
+
     text = original
     created = None
     plan: Dict[str, Tuple[str, str]] = {}
@@ -2305,15 +2441,17 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         if not template_sections:
             return None
         return {title for key, ranks in template_sections.items()
-                for title in ranks.values() if is_counted_track(key, title)}
+                for title in ranks.values()
+                if is_counted_track(key, title, derivative_of)}
 
     def excluded_of(season: str) -> Optional[set]:
-        """不计入统计的曲目（REMIX 赛道、neta 二创），用来把图表里多算的抹掉。"""
+        """不计入统计的曲目（REMIX 赛道、二创），用来把图表里多算的抹掉。"""
         template_sections = wanted.get(season)
         if not template_sections:
             return None
         return {title for key, ranks in template_sections.items()
-                for title in ranks.values() if not is_counted_track(key, title)}
+                for title in ranks.values()
+                if not is_counted_track(key, title, derivative_of)}
 
     if "entries" in actions:
         # 只要模板里的标题有对应页面，就把名次格子统一改写成规范标题（重定向写法
@@ -2408,7 +2546,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处）")
     if "recredit" in actions:
         text = recredit(site, text, sections, legend, cache, moe_cache,
-                        participants_of, songs_of, excluded_of, from_rev)
+                        participants_of, songs_of, excluded_of, from_rev, kinds)
     if "report" in actions:
         report = build_report(site, sections, legend, cache, exists, plan)
         pywikibot.output("异常报告:\n" + (report or "  （无）"))
@@ -2419,6 +2557,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
 
     save_cache(MOEGIRL_CACHE, moe_cache)
     save_cache(CREATOR_CACHE, cache)
+    save_cache(DERIVATIVE_CACHE, derivative_cache)
 
     if actions <= {"report", "moe"}:
         return False
@@ -2446,6 +2585,9 @@ def main() -> None:
     parser.add_argument("--summary", default=None)
     parser.add_argument("--from-rev", type=int, default=None, dest="from_rev",
                         help="recredit: 用哪一版的图表当迁移基准（版本号）")
+    parser.add_argument("--kinds", default=None,
+                        help="recredit: 只迁移某一类导入账（prefix=zhmoe&gt; 前缀，"
+                             "note=摘要里的搬运者；不给就两类都算）")
     args = parser.parse_args()
 
     site = pywikibot.Site()
@@ -2456,7 +2598,9 @@ def main() -> None:
         unknown = actions - set(ALL_ACTIONS) - set(EXTRA_ACTIONS)
         if not actions or unknown:
             parser.error(f"未知的动作：{', '.join(sorted(unknown)) or args.action}")
-    run_once(site, actions, args.basis, args.write, args.summary, args.from_rev)
+    kinds = {k.strip() for k in (args.kinds or "").split(",") if k.strip()} or None
+    run_once(site, actions, args.basis, args.write, args.summary, args.from_rev,
+             kinds)
 
 
 if __name__ == "__main__":

@@ -99,15 +99,18 @@ class TestCountByListed(TestCase):
             self, page_factory):
         site = object()
         page = page_factory.return_value
-        page.revisions.return_value = iter([{"user": "User", "timestamp": "2024-01-01T00:00:00Z"}])
-        cache = {"Cached": ("Existing", "", None)}
+        page.revisions.return_value = iter([{"user": "User",
+                                             "timestamp": "2024-01-01T00:00:00Z"}])
+        cache = {"Cached": ("Existing", "", "2024-01-01T00:00:00Z",
+                            "（旧摘要）")}
 
         contributions.batch_creators(
             site, ["Alias", "Target", "Cached"], cache, {"Alias": "Target"})
 
         self.assertEqual(cache["Target"],
-                         ("User", "", "2024-01-01T00:00:00Z"))
-        self.assertEqual(cache["Cached"], ("Existing", "", None))
+                         ("User", "", "2024-01-01T00:00:00Z", ""))
+        self.assertEqual(cache["Cached"],
+                         ("Existing", "", "2024-01-01T00:00:00Z", "（旧摘要）"))
         page_factory.assert_called_once_with(site, "Target")
         page.revisions.assert_called_once_with(
             total=1, reverse=True, content=False)
@@ -115,28 +118,58 @@ class TestCountByListed(TestCase):
     @patch.object(contributions, "Page")
     def test_creator_of_keeps_the_cross_wiki_prefix(self, page_factory):
         # zhmoe>某人：voca 抄的是源站最后一版的作者，来源得留着，page_creator
-        # 才知道不能拿这个人当创建者；时间戳也留着，反查源条目名要用
+        # 才知道不能拿这个人当创建者；时间戳与摘要也留着，反查源条目名、判断「搬运」
+        # 都要用
         page_factory.return_value.revisions.return_value = iter(
-            [{"user": "zhmoe>源站编辑者", "timestamp": "2024-05-06T07:08:09Z"}])
+            [{"user": "zhmoe>源站编辑者", "timestamp": "2024-05-06T07:08:09Z",
+              "comment": "导入"}])
         cache = {}
 
         self.assertEqual(contributions.creator_of(object(), "曲", cache),
                          "zhmoe>源站编辑者")
         self.assertEqual(cache["曲"],
-                         ("zhmoe>源站编辑者", "zhmoe", "2024-05-06T07:08:09Z"))
+                         ("zhmoe>源站编辑者", "zhmoe", "2024-05-06T07:08:09Z",
+                          "导入"))
 
     @patch.object(contributions, "Page")
     def test_creator_of_requeries_legacy_cache_entries(self, page_factory):
-        # 旧缓存只存了剥掉前缀的用户名，分辨不出来源，只能重查一次
+        # 旧格式（少时间戳/摘要）分辨不出来源、也看不出是不是搬运，只能重查一次
         page_factory.return_value.revisions.return_value = iter(
-            [{"user": "本站用户", "timestamp": "2024-05-06T07:08:09Z"}])
+            [{"user": "本站用户", "timestamp": "2024-05-06T07:08:09Z",
+              "comment": "创建页面"}])
         cache = {"曲": "本站用户"}
 
         contributions.creator_of(object(), "曲", cache)
 
         page_factory.assert_called_once()
         self.assertEqual(cache["曲"],
-                         ("本站用户", "", "2024-05-06T07:08:09Z"))
+                         ("本站用户", "", "2024-05-06T07:08:09Z", "创建页面"))
+
+    def test_import_notes_are_recognised_and_named(self):
+        # 有一类导入把搬运者记成首版作者，只在摘要里留一句来源（秘书室 那种）
+        note = ("搬运自萌娘百科，依CC BY-NC-SA 3.0 CN导入"
+                "(by. [[zhmoe:User:弗星天文馆]])")
+        self.assertTrue(contributions.is_import_note(note))
+        self.assertEqual(contributions.import_note_user(note), "弗星天文馆")
+        self.assertTrue(contributions.is_import_note(
+            "来源于萌娘百科，依CC BY-NC-SA 4.0导入，原贡献者请参见来源页面历史"))
+        self.assertIsNone(contributions.import_note_user(
+            "来源于萌娘百科，依CC BY-NC-SA 4.0导入"))
+        self.assertFalse(contributions.is_import_note("创建页面，内容为“{{”"))
+        self.assertFalse(contributions.is_import_note(
+            "創某人喜欢的，等会某人会调色"))
+        self.assertFalse(contributions.is_import_note(""))
+
+    @patch.object(contributions, "creator_of", return_value="搬运者")
+    @patch.object(contributions, "import_note_user", return_value="源站作者")
+    def test_a_first_revision_that_names_the_source_user_is_credited_to_them(
+            self, _note_user, _creator_of):
+        # 首版作者是搬运者本身，摘要里点了源站用户的名：这一份不能记给搬运者
+        cache = {"曲": ("搬运者", "", "2026-08-23T20:06:33Z",
+                        "搬运自萌娘百科，依CC BY-NC-SA 3.0 CN导入"
+                        "(by. [[zhmoe:User:源站作者]])")}
+        self.assertEqual(contributions.page_credits(None, "曲", cache, {}),
+                         ("源站作者", "搬运者"))
 
     def test_season_template_ignores_links_that_are_not_articles(self):
         # Navbox 尾巴上的 [[Category:...]] 会落进最后一个 list 参数，被当成一首歌
@@ -302,14 +335,45 @@ class TestCountByListed(TestCase):
 
 class TestCountedTracks(TestCase):
     def test_remix_and_derivative_tracks_do_not_count(self):
-        # 「除了 Remix 和 neta 非原创曲都算」：REMIX 赛道整条不算，
-        # neta 里「其他部门」与「原曲/作者」写法的二创也不算。
+        # REMIX 赛道整条不算；neta 里「原曲/作者」写法、以及标题写着「二次创作」的
+        # 二创不算；「其他部门」这类分组里原创曲与二创混在一起，要看曲目本身。
         self.assertFalse(contributions.is_counted_track("REMIX", "Rolling Girl/郁P"))
-        self.assertFalse(contributions.is_counted_track("neta:其他部门", "某演奏"))
+        self.assertFalse(contributions.is_counted_track("neta:其他部门", "某演奏/某人"))
+        self.assertFalse(contributions.is_counted_track(
+            "neta:其他部门", "发表自己爱吃的菜的龙#二次创作"))
         self.assertFalse(contributions.is_counted_track("neta:未上榜歌曲", "某曲/某P"))
         self.assertTrue(contributions.is_counted_track("neta:未上榜歌曲", "榜外原创曲"))
         self.assertTrue(contributions.is_counted_track("TOP100", "榜内曲"))
         self.assertTrue(contributions.is_counted_track("neta", "没带分组名的榜外曲"))
+        # 「其他部门」里的原创曲（Exhibition 这类不排名模块）照样算
+        self.assertTrue(contributions.is_counted_track("neta:其他部门", "魔法(Murata Shiyuu)"))
+        # 标题看不出来时，由页面正文判断（derivative_of）
+        self.assertFalse(contributions.is_counted_track(
+            "neta:其他部门", "发表自己爱吃的菜的龙",
+            lambda title: title == "发表自己爱吃的菜的龙"))
+        self.assertTrue(contributions.is_counted_track(
+            "neta:其他部门", "魔法(Murata Shiyuu)", lambda title: False))
+
+    @patch.object(contributions, "Page")
+    def test_derivative_pages_are_read_once_and_cached(self, page_factory):
+        page_factory.return_value.text = "《'''某曲'''》是……的日语翻唱歌曲。"
+        cache = {}
+
+        self.assertTrue(contributions.is_derivative(None, "某曲", cache))
+        self.assertEqual(cache["某曲"][0], True)
+        self.assertTrue(contributions.is_derivative(None, "某曲", cache))
+        page_factory.assert_called_once()
+
+        # 标题上写着二创的，连页面都不用读
+        page_factory.reset_mock()
+        self.assertTrue(contributions.is_derivative(None, "原曲/某人", cache))
+        page_factory.assert_not_called()
+
+    @patch.object(contributions, "Page")
+    def test_unreadable_pages_are_treated_as_original(self, page_factory):
+        # 读不到页面时不能把曲目从统计里抹掉：宁可按原创算
+        page_factory.side_effect = Exception("boom")
+        self.assertFalse(contributions.is_derivative(None, "某曲", {}))
 
 
 class TestRenderChart(TestCase):
@@ -464,7 +528,7 @@ class TestScheduledMaintenance(TestCase):
         contributions.main()
 
         run_once.assert_called_once_with(
-            site, set(contributions.ALL_ACTIONS), "listed", True, None, None)
+            site, set(contributions.ALL_ACTIONS), "listed", True, None, None, None)
 
     @patch.object(contributions, "load_cache", return_value={})
     @patch.object(contributions, "save_cache")
@@ -546,8 +610,8 @@ class TestPageCreator(TestCase):
                          (None, "某人"))
         self.assertEqual(contributions.credit_pair(legend, None, None), (None, None))
 
-    @patch.object(contributions, "page_credits",
-                  return_value=("真正的作者", "源站最后编辑者"))
+    @patch.object(contributions, "page_credits_detail",
+                  return_value=("真正的作者", "源站最后编辑者", "prefix"))
     @patch.object(contributions, "batch_creators")
     def test_import_credits_move_and_the_old_ones_are_subtracted(
             self, _batch_creators, _page_credits):
@@ -568,6 +632,26 @@ class TestPageCreator(TestCase):
         self.assertEqual(counts["2021秋"]["真正的作者"], 1)
         self.assertEqual(corrections["2021秋"]["源站最后编辑者"], 1)
         self.assertEqual(gains["2021秋"]["真正的作者"], 1)
+
+    @patch.object(contributions, "page_credits_detail",
+                  return_value=("真正的作者", "搬运者", "note"))
+    @patch.object(contributions, "batch_creators")
+    def test_kinds_limits_which_imports_a_migration_corrects(
+            self, _batch_creators, _page_credits):
+        # 第二次迁移的基准版里，先前那一类导入的账已经改好了；只挑新发现的那类，
+        # 才不会把旧账再减一遍（减重了数字就往下掉）。
+        sections = [Section("2021秋", "TOP100", [Entry("榜内曲", [])])]
+        legend = Legend(colour_to_name={"#000000": "某人"})
+
+        for kinds, expected in ((None, 1), ({"note"}, 1), ({"prefix"}, 0)):
+            corrections, gains = {}, {}
+            count_by_listed(
+                FakeSite(), sections, legend, {},
+                lambda _season: None,
+                lambda _season: {"榜内曲"},
+                corrections=corrections, gains=gains, kinds=kinds)
+            moved = sum(sum(c.values()) for c in corrections.values())
+            self.assertEqual(moved, expected, f"kinds={kinds}")
 
 
 class TestMoegirlCrossCheck(TestCase):
@@ -681,7 +765,8 @@ class TestMoegirlCrossCheck(TestCase):
         # 「voca 首版」其实来自源站最后一版时要写清楚，否则看报告的人会把
         # 那当成创建者。
         sections = [Section("2021秋", "TOP100", [Entry("曲", [])])]
-        cache = {"曲": ("zhmoe>源站最后编辑者", "zhmoe")}
+        cache = {"曲": ("zhmoe>源站最后编辑者", "zhmoe",
+                        "2020-01-01T00:00:00Z", "")}
         pages = {"曲": contributions.MoePage("同曲", "真正的作者", True)}
 
         with patch.object(contributions, "moegirl_lookup", return_value=pages):
@@ -1069,4 +1154,4 @@ class TestMoegirlAction(TestCase):
         contributions.main()
 
         run_once.assert_called_once_with(
-            site_factory.return_value, {"moe"}, "listed", False, None, None)
+            site_factory.return_value, {"moe"}, "listed", False, None, None, None)

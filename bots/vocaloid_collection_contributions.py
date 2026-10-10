@@ -39,8 +39,10 @@ The bot can:
   creator annotation and wins outright; other entries use the creator of the
   local page. Some chart numbers come from bookkeeping outside the wiki and
   cannot be derived at all, so a cell is normally only raised, never lowered -
-  with one exception: whatever the REMIX/二创 songs had added to a cell is
-  subtracted again, so those numbers do get corrected downwards.
+  with two exceptions: whatever the REMIX/二创 songs had added to a cell is
+  subtracted again, and so is whatever earlier runs had given to the author of
+  an *imported* revision (that author is the source article's last editor, not
+  its creator, see ``page_creator``).  Those numbers do get corrected downwards.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``moe``     - 与萌娘百科交叉比对创建者，**只出报告、不改页面**。贡献列表记的是
@@ -771,7 +773,8 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     songs_of: Optional[Callable[[str], Optional[set]]] = None,
                     excluded_of: Optional[Callable[[str], Optional[set]]] = None,
                     excluded: Optional[Dict[str, Counter]] = None,
-                    moe_cache: Optional[Dict] = None
+                    moe_cache: Optional[Dict] = None,
+                    corrections: Optional[Dict[str, Counter]] = None
                     ) -> Dict[str, Counter]:
     """Count the ranked cells plus the rest of the season's songs.
 
@@ -784,6 +787,11 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
     ``excluded_of(season)`` lists the season's songs that do *not* count
     (REMIX 赛道、neta 的二创): they are tallied separately into ``excluded`` so
     that ``render_chart`` can undo the numbers earlier runs had added for them.
+
+    ``corrections`` receives, per season, the credits earlier runs gave under the
+    old rule but that are wrong now (a cross-wiki import's author is the source
+    article's last editor, not its creator); ``render_chart`` subtracts them so
+    the page actually shows the corrected numbers.
 
     A ranked cell's colour is its creator annotation. Redirects and pages listed
     more than once count only once.
@@ -847,9 +855,12 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     section.season, target, participants_of):
                 # 同名不同曲，页面是别的赛季的歌：算进来就会给这一季添一个假数字
                 continue
-            user = page_creator(site, target, cache, moe_cache)
-            if user and user not in KNOWN_BOTS:
-                result[section.season][legend.identity(user)] += 1
+            current, previous = page_credits(site, target, cache, moe_cache)
+            new, drop = credit_pair(legend, current, previous)
+            if drop and corrections is not None:
+                corrections.setdefault(section.season, Counter())[drop] += 1
+            if new:
+                result[section.season][new] += 1
 
     for season, songs in listed.items():
         for title in songs:
@@ -863,11 +874,15 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     if colour in legend.colour_to_name:
                         result[season][colour] += 1
                 continue
-            user = page_creator(site, target, cache, moe_cache)
-            if user and user not in KNOWN_BOTS:
-                result[season][legend.identity(user)] += 1
+            current, previous = page_credits(site, target, cache, moe_cache)
+            new, drop = credit_pair(legend, current, previous)
+            if drop and corrections is not None:
+                corrections.setdefault(season, Counter())[drop] += 1
+            if new:
+                result[season][new] += 1
 
-    # 同一套归属规则再跑一遍排除曲目：口径一致，减去它们才不会误伤人工数字。
+    # 排除曲目以前也算进过图表：减掉的是**旧口径**算出来的那份（旧图表就是照它
+    # 加的），跨站导入的条目减的是源站最后一版的作者，不然减不到点上。
     if excluded is not None:
         for season, songs in dropped.items():
             counter = excluded.setdefault(season, Counter())
@@ -882,9 +897,11 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                         if colour in legend.colour_to_name:
                             counter[colour] += 1
                     continue
-                user = page_creator(site, target, cache, moe_cache)
-                if user and user not in KNOWN_BOTS:
-                    counter[legend.identity(user)] += 1
+                current, previous = page_credits(site, target, cache, moe_cache)
+                new, drop = credit_pair(legend, current, previous)
+                identity = drop or new
+                if identity:
+                    counter[identity] += 1
     return result
 
 
@@ -1407,31 +1424,50 @@ def moegirl_creator_of(title: str, moe_cache: Optional[Dict] = None) -> Optional
     return page.creator
 
 
-def page_creator(site, title: str, cache: Dict,
-                 moe_cache: Optional[Dict] = None) -> Optional[str]:
-    """这个条目的创建者该记谁。
+def page_credits(site, title: str, cache: Dict, moe_cache: Optional[Dict] = None
+                 ) -> Tuple[Optional[str], Optional[str]]:
+    """``(这个条目该记谁, 修好之前算的是谁)``——第二个用来把旧图表里多给的减回去。
 
     voca 的首版若是跨站导入的，那一版挂的是**源站条目的最后一版**作者（见
-    ``IMPORT_USER_RE``），不是创建者，照它算就会把源站最后一位编辑者当成创建者。
+    ``IMPORT_USER_RE``），不是创建者，照它算就把源站最后一位编辑者当成了创建者。
     这种条目改去源站找真正的作者，目前只认萌娘百科（``zhmoe``）；源站也查不到时
-    宁可不归属，也不拿导入者顶替。
+    宁可不归属，也不拿导入者顶替。两个用户名都已剥掉跨站前缀。
     """
     raw = creator_of(site, title, cache)
     if raw is None:
-        return None
+        return None, None
+    previous = strip_prefix(raw)
     source = import_source(raw)
     if not source:
-        return raw
+        return previous, previous
     if source not in IMPORT_SOURCES:
         pywikibot.warning(f"{title}: 首版来自 {source}>，认不出源站，不归属")
-        return None
+        return None, previous
     creator = moegirl_creator_of(title, moe_cache)
     if creator is None:
         pywikibot.warning(
             f"{title}: 首版是{IMPORT_SOURCES[source]}导入的"
-            f"（{strip_prefix(raw)} 只是源站最后一版的作者），源站也查不到作者，不归属")
-        return None
-    return strip_prefix(creator)
+            f"（{previous} 只是源站最后一版的作者），源站也查不到作者，不归属")
+        return None, previous
+    return strip_prefix(creator), previous
+
+
+def page_creator(site, title: str, cache: Dict,
+                 moe_cache: Optional[Dict] = None) -> Optional[str]:
+    """这个条目该记谁的创建（细则见 ``page_credits``）。"""
+    return page_credits(site, title, cache, moe_cache)[0]
+
+
+def credit_pair(legend: Legend, current: Optional[str],
+                previous: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """``(这次要记的归属, 旧口径多记、要从旧图表里减回去的归属)``。
+
+    机器人账号两边都不记；两边算出同一个人时不用减（旧数字现在依然成立，
+    减了反而会连人工加的那部分一起削掉）。
+    """
+    new = legend.identity(current) if current and current not in KNOWN_BOTS else None
+    old = legend.identity(previous) if previous and previous not in KNOWN_BOTS else None
+    return new, (old if old != new else None)
 
 
 def moegirl_candidates(sections: List[Section], legend: Legend,
@@ -1820,12 +1856,20 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         pywikibot.output(f"计数: 更新 {changed} 个小节")
     if "stats" in actions:
         excluded: Dict[str, Counter] = {}
+        corrections: Dict[str, Counter] = {}
         counts = (count_by_listed(site, sections, legend, cache, participants_of,
-                                  songs_of, excluded_of, excluded, moe_cache)
+                                  songs_of, excluded_of, excluded, moe_cache,
+                                  corrections)
                   if basis == "listed" else count_by_window(site, sections))
-        text, _ = render_chart(text, sections, legend, counts, excluded)
         dropped = sum(sum(entry.values()) for entry in excluded.values())
-        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处）")
+        fixed = sum(sum(entry.values()) for entry in corrections.values())
+        # 旧图表里按老口径多记给导入者的那份也要减回去，否则「只升不降」会把
+        # 错数字一直护着，页面上永远看不到修正。
+        for season, counter in corrections.items():
+            excluded.setdefault(season, Counter()).update(counter)
+        text, _ = render_chart(text, sections, legend, counts, excluded)
+        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处，"
+                         f"把误记给导入者的 {fixed} 处减回去）")
     if "report" in actions:
         report = build_report(site, sections, legend, cache, exists, plan)
         pywikibot.output("异常报告:\n" + (report or "  （无）"))

@@ -905,6 +905,21 @@ class TestMoegirlOfficial(TestCase):
         self.assertEqual(
             contributions.moegirl_source_title("源站编辑者", stamp, session),
             (True, "源条目"))
+        self.assertEqual(session.requests[0]["ucstart"], "2024-07-15T01:02:04Z")
+        self.assertEqual(session.requests[0]["ucend"], "2024-07-11T01:02:04Z")
+
+    def test_source_title_reads_naive_timestamps_as_utc(self):
+        # pywikibot 的 Timestamp 是 naive 的（按 UTC 算）：要是拿它去 .timestamp()，
+        # 会按本机时区解释，时区一偏就永远匹配不上。
+        stamp = datetime(2024, 7, 13, 1, 2, 4)
+        session = FakeSession([{"query": {"usercontribs": [
+            {"title": "源条目", "timestamp": "2024-07-13T01:02:04Z"},
+        ]}}])
+
+        self.assertEqual(
+            contributions.moegirl_source_title("源站编辑者", stamp, session),
+            (True, "源条目"))
+        self.assertEqual(session.requests[0]["ucstart"], "2024-07-15T01:02:04Z")
 
     def test_source_title_admits_when_it_could_not_ask(self):
         stamp = datetime(2024, 7, 13, 1, 2, 4, tzinfo=timezone.utc)

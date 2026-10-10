@@ -1653,6 +1653,20 @@ def moegirl_official_page(title: str, session: Optional[MoegirlSession] = None
     return MoePage(target, user, True)
 
 
+def _iso_utc(moment) -> str:
+    """把时间统一写成 MediaWiki 的 ``2024-07-13T01:02:04Z``。
+
+    ``moment`` 可能是 pywikibot 的 ``Timestamp``（naive，按 UTC 解释），也可能是带
+    时区的 datetime。绝不走 ``.timestamp()``：naive 的时间戳会按本机时区解释，
+    差个几小时就再也匹配不上了（2026-10-10 踩过）。
+    """
+    if isinstance(moment, datetime):
+        if moment.tzinfo is not None:
+            moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return str(moment)
+
+
 def moegirl_source_title(editor: str, stamp, session: Optional[MoegirlSession] = None
                          ) -> Tuple[bool, Optional[str]]:
     """``(问到了没有, 源条目名)``——用导入版记的「源站那一版的作者 + 时间」反查。
@@ -1665,16 +1679,16 @@ def moegirl_source_title(editor: str, stamp, session: Optional[MoegirlSession] =
     session = session if session is not None else moegirl_official()
     if session is None or not editor or stamp is None:
         return False, None
-    epoch = stamp.timestamp()
+    exact = _iso_utc(stamp)
+    moment = datetime.strptime(exact, "%Y-%m-%dT%H:%M:%SZ")
     data = session.api({
         "action": "query", "list": "usercontribs", "ucuser": editor,
         "ucprop": "title|timestamp", "uclimit": "500",
-        "ucstart": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch + 2 * 86400)),
-        "ucend": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch - 2 * 86400)),
+        "ucstart": _iso_utc(moment + timedelta(days=2)),
+        "ucend": _iso_utc(moment - timedelta(days=2)),
     })
     if data is None:
         return False, None
-    exact = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
     for contribution in data.get("query", {}).get("usercontribs", []):
         if contribution.get("timestamp") == exact:
             return True, contribution.get("title")

@@ -67,6 +67,32 @@ class FakeSession:
         return self.responses.pop(0) if self.responses else None
 
 
+class FakeOpener:
+    """假装的 urllib opener：记下请求，按顺序回放预先准备好的 JSON。"""
+
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.requests = []
+
+    def open(self, request, timeout=None):
+        self.requests.append(request)
+        return FakeResponse(self.payloads.pop(0))
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def read(self):
+        return json.dumps(self.payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
 class TestCountByListed(TestCase):
     @patch.object(contributions, "Page")
     def test_batch_creators_uses_single_page_oldest_revision_queries(
@@ -759,6 +785,55 @@ class TestMoegirlCrossCheck(TestCase):
 
 class TestMoegirlOfficial(TestCase):
     """镜像站看不见萌百「待审核」的条目——那些要去官方站（得先登录）才查得到。"""
+
+    def test_login_asks_for_json_and_confirms_it_through_userinfo(self):
+        # 登录请求漏了 format=json 会拿到 XML，json 解析失败就被当成「登录没成功」，
+        # 所以这里连请求参数一起盯着。
+        opener = FakeOpener([
+            {"query": {"tokens": {"logintoken": "tok"}}},
+            {"login": {"result": "Success"}},
+            {"query": {"userinfo": {"name": "人间百态"}}},
+        ])
+        session = contributions.MoegirlSession(("人间百态@vclc", "secret"))
+
+        with patch.object(contributions.urllib.request, "build_opener",
+                          return_value=opener), \
+                patch.object(contributions.time, "sleep"):
+            self.assertTrue(session.ready())
+
+        token_url, login_url, userinfo_url = (request.full_url
+                                             for request in opener.requests)
+        self.assertIn("format=json", token_url)
+        self.assertIn("meta=tokens", token_url)
+        self.assertEqual(login_url, contributions.MOEGIRL_OFFICIAL)
+        body = opener.requests[1].data
+        self.assertIn(b"lgtoken=tok", body)
+        self.assertIn(b"lgname=%E4%BA%BA%E9%97%B4%E7%99%BE%E6%80%81%40vclc", body)
+        self.assertIn("meta=userinfo", userinfo_url)
+        self.assertTrue(session.ready())  # 第二次问不再登录
+        self.assertEqual(len(opener.requests), 3)
+
+    def test_login_that_never_lands_leaves_the_session_unusable(self):
+        opener = FakeOpener([
+            {"query": {"tokens": {"logintoken": "tok"}}},
+            {"login": {"result": "WrongPass"}},
+            {"query": {"userinfo": {"name": "1.2.3.4", "anon": True}}},
+        ])
+        session = contributions.MoegirlSession(("人间百态@vclc", "secret"))
+
+        with patch.object(contributions.urllib.request, "build_opener",
+                          return_value=opener), \
+                patch.object(contributions.time, "sleep"):
+            self.assertFalse(session.ready())
+            self.assertIsNone(session.api({"action": "query", "meta": "tokens"}))
+
+    def test_missing_token_leaves_the_session_unusable(self):
+        opener = FakeOpener([{"query": {}}])
+        session = contributions.MoegirlSession(("人间百态@vclc", "secret"))
+
+        with patch.object(contributions.urllib.request, "build_opener",
+                          return_value=opener):
+            self.assertFalse(session.ready())
 
     def test_credentials_read_the_zh_entry_and_the_bot_password_suffix(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -1490,8 +1490,15 @@ class MoegirlSession:
 
     def _submit(self, query: Dict[str, str], post: bool = False, attempts: int = 1,
                 ) -> Optional[dict]:
-        body = urlencode(query).encode() if post else None
-        url = MOEGIRL_OFFICIAL if post else MOEGIRL_OFFICIAL + "?" + urlencode(query)
+        # 登录那一步直接走这里（不经过 ``api``），所以格式参数必须在这里补上：
+        # 漏了 format=json 就会拿到 XML，``json.load`` 直接报「Expecting value」，
+        # 明明登录成功了却被当成「没问到」（2026-10-10 踩过这个坑）。
+        params = dict(query)
+        params.setdefault("format", "json")
+        params.setdefault("formatversion", "2")
+        body = urlencode(params).encode() if post else None
+        url = (MOEGIRL_OFFICIAL if post
+               else MOEGIRL_OFFICIAL + "?" + urlencode(params))
         request = urllib.request.Request(
             url, data=body, headers={"User-Agent": MOEGIRL_UA})
         for attempt in range(attempts):

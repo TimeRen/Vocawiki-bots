@@ -1061,6 +1061,22 @@ class TestMoegirlOfficial(TestCase):
                           cache["Flare(PedestrianP)"][2],
                           contributions.MOEGIRL_SOURCE_FALLBACK))
 
+    @patch.object(contributions, "moegirl_official_page", return_value=None)
+    def test_the_checked_table_covers_the_summary_only_imports_too(self, _page):
+        # 2025冬 的 迷路的孩子山中神隐奇谭：镜像里没有（萌百「待审核」），首版用户名
+        # 又只是搬运者 Synzi、摘要没点名源站用户，所以云上只能照这张表记。
+        # 表里漏了它，Sayonzei 那一格就会在云上的 1 与本机的 2 之间反复重算、
+        # 来回覆盖（2026-10-10 那次编辑战）。
+        self.assertIn("迷路的孩子山中神隐奇谭", contributions.MOEGIRL_FALLBACK)
+        cache = {}
+
+        creator = contributions.moegirl_imported_creator(
+            "迷路的孩子山中神隐奇谭", "Synzi", "2025-10-09T05:20:12Z", cache)
+
+        self.assertEqual(creator, "Sayonzei")
+        self.assertEqual(cache["迷路的孩子山中神隐奇谭"][3],
+                         contributions.MOEGIRL_SOURCE_FALLBACK)
+
     @patch.object(contributions, "moegirl_source_title", return_value=(True, None))
     @patch.object(contributions, "moegirl_official_page")
     def test_online_answers_win_over_the_checked_table(self, official_page,

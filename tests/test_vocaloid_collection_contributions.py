@@ -382,21 +382,30 @@ class TestRecredit(TestCase):
 
     def test_requires_a_base_revision(self):
         with self.assertRaises(ValueError):
-            contributions.recredit(None, None, "", [], Legend(), {}, {},
+            contributions.recredit(None, "", [], Legend(), {}, {},
                                    None, None, None, None)
 
     @patch.object(contributions, "render_chart", return_value=("NEW", {}))
     @patch.object(contributions, "count_by_listed", return_value={})
-    def test_uses_the_given_revision_as_the_base(self, _count, render_chart):
-        page = Mock()
-        page.getOldVersion.return_value = "BASETEXT"
-
-        text = contributions.recredit(Mock(), page, "TEXT", [], Legend(), {}, {},
+    @patch.object(contributions, "revision_text", return_value="BASETEXT")
+    def test_takes_the_old_numbers_from_the_given_revision(
+            self, revision_text, _count, render_chart):
+        text = contributions.recredit(Mock(), "TEXT", [], Legend(), {}, {},
                                       None, None, None, 123)
 
-        page.getOldVersion.assert_called_once_with(oldid=123)
+        revision_text.assert_called_once()
+        self.assertEqual(revision_text.call_args.args[1], 123)
         self.assertEqual(text, "NEW")
         self.assertEqual(render_chart.call_args.kwargs["base_text"], "BASETEXT")
+
+    def test_revision_text_rejects_another_page(self):
+        site = Mock()
+        site.simple_request.return_value.submit.return_value = {
+            "query": {"pages": [{"title": "别的页面",
+                                 "revisions": [{"slots": {"main": {"content": "X"}}}]}]}}
+
+        with self.assertRaises(ValueError):
+            contributions.revision_text(site, 123)
 
 
 class TestScheduledMaintenance(TestCase):

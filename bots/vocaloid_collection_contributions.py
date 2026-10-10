@@ -1750,7 +1750,20 @@ def save_page(page: Page, text: str, summary: Optional[str]) -> bool:
         return _abandon_round(page, exc)
 
 
-def recredit(site, page: Page, text: str, sections: List[Section], legend: Legend,
+def revision_text(site, revid: int) -> str:
+    """取某一版的正文，并确认它就是本页面（迁移基准别拿错页面）。"""
+    data = site.simple_request(action="query", prop="revisions", revids=str(revid),
+                              rvprop="content", rvslots="main", formatversion=2).submit()
+    pages = data.get("query", {}).get("pages") or []
+    revisions = (pages[0].get("revisions") if pages else None) or []
+    if not revisions:
+        raise ValueError(f"拿不到版本 {revid} 的内容")
+    if pages[0].get("title") != PAGE_TITLE:
+        raise ValueError(f"版本 {revid} 不是 {PAGE_TITLE}（是 {pages[0].get('title')}）")
+    return revisions[0]["slots"]["main"]["content"]
+
+
+def recredit(site, text: str, sections: List[Section], legend: Legend,
              cache: Dict, moe_cache: Dict,
              participants_of, songs_of, excluded_of,
              from_rev: Optional[int]) -> str:
@@ -1763,9 +1776,7 @@ def recredit(site, page: Page, text: str, sections: List[Section], legend: Legen
     """
     if not from_rev:
         raise ValueError("recredit 需要 --from-rev <版本号>：拿哪一版的图表当基准")
-    base_text = page.getOldVersion(oldid=from_rev)
-    if not base_text:
-        raise ValueError(f"拿不到版本 {from_rev} 的内容")
+    base_text = revision_text(site, from_rev)
     excluded: Dict[str, Counter] = {}
     corrections: Dict[str, Counter] = {}
     gains: Dict[str, Counter] = {}
@@ -1821,7 +1832,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
 
     # 赛季模板是「哪些歌、第几名、条目该叫什么」的权威来源。
     wanted = (season_templates(site, seasons)
-              if actions & {"entries", "stats", "moe"} else {})
+              if actions & {"entries", "stats", "moe", "recredit"} else {})
 
     def songs_of(season: str) -> Optional[set]:
         """赛季模板里**计入统计**的曲目（榜单曲 + 榜外原创曲）；``None`` 表示模板没取到。"""
@@ -1931,7 +1942,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         dropped = sum(sum(entry.values()) for entry in excluded.values())
         pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处）")
     if "recredit" in actions:
-        text = recredit(site, page, text, sections, legend, cache, moe_cache,
+        text = recredit(site, text, sections, legend, cache, moe_cache,
                         participants_of, songs_of, excluded_of, from_rev)
     if "report" in actions:
         report = build_report(site, sections, legend, cache, exists, plan)

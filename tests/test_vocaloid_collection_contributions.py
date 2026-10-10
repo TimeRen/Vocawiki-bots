@@ -82,11 +82,50 @@ class TestCountByListed(TestCase):
 
         counts = count_by_listed(
             FakeSite(), sections, legend, {},
+            lambda _season: {"榜内歌曲", "榜外有颜色歌曲", "混音歌曲", "榜外未列出歌曲"},
             lambda _season: {"榜内歌曲", "榜外有颜色歌曲", "混音歌曲", "榜外未列出歌曲"})
 
         self.assertEqual(counts["2021秋"]["#000000"], 1)
         self.assertEqual(counts["2021秋"]["#123456"], 1)
         self.assertEqual(counts["2021秋"]["榜外页面创建者"], 2)
+
+    @patch.object(contributions, "creator_of")
+    @patch.object(contributions, "batch_creators")
+    def test_stats_ignore_pages_that_only_carry_the_season_navbox(
+            self, batch_creators, creator_of):
+        """挂模板 ≠ 参赛：统计只认赛季模板列出的曲目。
+
+        总条目 The VOCALOID Collection 挂着全部 12 个赛季的模板，如果拿
+        ``list=embeddedin`` 当名单，它的创建者会每季都拿到一份贡献。
+        """
+        colour = "#000000"
+        sections = [Section("2021秋", "TOP100", [Entry("榜内歌曲", [colour])])]
+        legend = Legend(colour_to_name={colour: "榜内创建者"})
+        creator_of.side_effect = lambda _site, title, _cache: (
+            "总条目创建者" if title == "只挂了模板的页面" else None)
+
+        counts = count_by_listed(
+            FakeSite(), sections, legend, {},
+            lambda _season: {"榜内歌曲", "只挂了模板的页面"},
+            lambda _season: {"榜内歌曲"})
+
+        self.assertEqual(counts["2021秋"]["#000000"], 1)
+        self.assertNotIn("总条目创建者", counts["2021秋"])
+
+    def test_season_template_collects_sections_without_rank_ranges(self):
+        # 「其他歌曲」下的分组（其他部门 / 未上榜歌曲）没有名次区间，但里面的链接
+        # 仍然是本赛季的歌，必须收下来，否则榜外歌曲会被统计当成外人。
+        text = (
+            "| title = 其他歌曲\n"
+            "| group1 = 其他部门\n"
+            "| list1 = （待补充）\n"
+            "| group2 = 未上榜歌曲\n"
+            "| list2 = [[榜外歌曲甲]] • {{lj|[[榜外歌曲乙|ボカロ曲]]}}\n"
+        )
+
+        parsed = contributions.parse_season_template(text)
+
+        self.assertEqual(set(parsed["neta"].values()), {"榜外歌曲甲", "榜外歌曲乙"})
 
     def test_template_participants_follows_api_continuation(self):
         site = PagedSite([

@@ -30,9 +30,9 @@ The bot can:
   the same name is a different song, and colouring it would credit its
   creator (and its season) here.
 * ``stats``   - recompute the Echart from creation records (``--basis``).
-  The season's template participants are counted, including songs outside
-  TOP/ROOKIE rankings. A page that merely carries the season's navbox without
-  being a song (the overview article) is not a participant and is skipped.
+  The season's authoritative song list is the ranking template - 榜外
+  「其他歌曲」 included - so songs outside TOP/ROOKIE count while a page that
+  merely carries the season's navbox (the overview article) does not.
   A cell's colour is the hand-made creator annotation and wins outright; other
   entries use the creator of the local page. Some chart numbers come from
   bookkeeping outside the wiki and cannot be derived at all, so a cell is only
@@ -249,11 +249,13 @@ def parse_season_template(text: str) -> Dict[str, Dict[int, str]]:
 
     模板按名次顺序列出每个小节（TOP100 / ROOKIE / REMIX / 其他歌曲），
     并用 ``1-10位`` 之类的分组标出区间，所以链接在分组里的位置就是名次。
+    「其他歌曲」下的分组（``其他部门``、``未上榜歌曲``）没有名次区间，
+    只为「哪些歌属于这一季」而收下来，名次用负数占位，不会和真名次撞车。
     """
     marks = [(m.start(), m.end(), m.group(1)) for m in TEMPLATE_ITEM_RE.finditer(text)]
     result: Dict[str, Dict[int, str]] = defaultdict(dict)
     section: Optional[str] = None
-    starts: Dict[str, int] = {}
+    starts: Dict[str, Optional[Tuple[int, int]]] = {}
     for i, (_, end, key) in enumerate(marks):
         stop = marks[i + 1][0] if i + 1 < len(marks) else len(text)
         value = text[end:stop]
@@ -266,13 +268,17 @@ def parse_season_template(text: str) -> Dict[str, Dict[int, str]]:
         group = re.fullmatch(r"group(\d+)", key)
         if group:
             rng = GROUP_RANGE_RE.search(value)
-            if rng:
-                starts[group.group(1)] = (int(rng.group(1)), int(rng.group(2)))
+            starts[group.group(1)] = ((int(rng.group(1)), int(rng.group(2)))
+                                      if rng else None)
             continue
         listing = re.fullmatch(r"list(\d+)", key)
         if listing and listing.group(1) in starts:
-            start, end = starts[listing.group(1)]
             links = [title.strip() for title in LIST_LINK_RE.findall(value) if title.strip()]
+            if starts[listing.group(1)] is None:
+                for title in links:
+                    result[section][-(len(result[section]) + 1)] = title
+                continue
+            start, end = starts[listing.group(1)]
             span = end - start + 1
             if len(links) > span:
                 # 分组标着 81-90位 却塞了 11 项（2024冬 ROOKIE 就多挂了一个 column），
@@ -635,35 +641,41 @@ def season_window(season: str, end_shift_days: int = 0) -> Tuple[datetime, datet
 
 def count_by_listed(site, sections: List[Section], legend: Legend,
                     cache: Dict[str, Optional[str]],
-                    participants_of: Optional[Callable[[str], Optional[set]]] = None
+                    participants_of: Optional[Callable[[str], Optional[set]]] = None,
+                    songs_of: Optional[Callable[[str], Optional[set]]] = None
                     ) -> Dict[str, Counter]:
-    """Count listed rankings and all other pages participating in each season.
+    """Count the ranked cells plus the rest of the season's songs.
 
-    A ranked cell's colour is its creator annotation. Participants outside the
-    ranked cells, including unlisted songs, are attributed to their first page
-    creator. Redirects and pages listed more than once count only once.
+    ``songs_of(season)`` is the season's authoritative song list - the ranking
+    template, 榜外「其他歌曲」 included.  Songs it lists that no ranked cell
+    covers are credited to whoever created their page.  ``participants_of`` only
+    guards the ranked cells: a same-name song from another season must not be
+    credited here either.
+
+    A ranked cell's colour is its creator annotation. Redirects and pages listed
+    more than once count only once.
     """
     result: Dict[str, Counter] = defaultdict(Counter)
     seen: Dict[str, set] = defaultdict(set)
     counted = [s for s in sections if is_counted_section(s.name)]
     seasons = dict.fromkeys(s.season for s in counted)
-    participants: Dict[str, set] = {}
-    if participants_of is not None:
+    listed: Dict[str, set] = {}
+    if songs_of is not None:
         for season in seasons:
-            members = participants_of(season)
-            if members is not None:
-                participants[season] = members
+            songs = songs_of(season)
+            if songs:
+                listed[season] = songs
 
     exists: Dict[str, bool] = {}
     resolved: Dict[str, str] = {}
     all_entries = [s for s in sections if s.season in seasons]
     batch_exists(site, (e.title for s in all_entries for e in s.entries), exists, resolved)
-    batch_exists(site, (title for members in participants.values() for title in members),
+    batch_exists(site, (title for songs in listed.values() for title in songs),
                  exists, resolved)
     # 先把要按"谁建的页面"归属的条目一次性查出来，避免每条一次请求
     batch_creators(site, (e.title for s in all_entries for e in s.entries
                           if not e.colours and exists.get(e.title)), cache, resolved)
-    batch_creators(site, (title for members in participants.values() for title in members
+    batch_creators(site, (title for songs in listed.values() for title in songs
                           if exists.get(title)), cache, resolved)
     colours_by_target: Dict[str, List[str]] = {}
     for section in all_entries:
@@ -696,8 +708,8 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
             if user and user not in KNOWN_BOTS:
                 result[section.season][legend.identity(user)] += 1
 
-    for season, members in participants.items():
-        for title in members:
+    for season, songs in listed.items():
+        for title in songs:
             target = resolved.get(title, title)
             if target in seen[season] or not exists.get(title):
                 continue
@@ -1153,17 +1165,25 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     participant_lists: Dict[str, Optional[set]] = {}
 
     def participants_of(season: str) -> Optional[set]:
-        """该赛季参赛页面的标题集合；``None`` 表示没查到，不据此下结论。"""
+        """挂着本赛季导航模板的页面标题集合；``None`` 表示没查到，不据此下结论。"""
         if season not in participant_lists:
             found = template_participants(site, season)
             participant_lists[season] = set(found) if found is not None else None
         return participant_lists[season]
 
+    # 赛季模板是「哪些歌、第几名、条目该叫什么」的权威来源。
+    wanted = season_templates(site, seasons) if actions & {"entries", "stats"} else {}
+
+    def songs_of(season: str) -> Optional[set]:
+        """赛季模板列出的曲目标题（含榜外「其他歌曲」）；``None`` 表示模板没取到。"""
+        template_sections = wanted.get(season)
+        if not template_sections:
+            return None
+        return {title for ranks in template_sections.values() for title in ranks.values()}
+
     if "entries" in actions:
-        # 赛季模板是「哪些歌、第几名、条目该叫什么」的权威来源：只要模板里的标题
-        # 有对应页面，就把名次格子统一改写成规范标题（重定向写法一并归一），
-        # 模板里还没有页面的标题只报告、不动。
-        wanted = season_templates(site, seasons)
+        # 只要模板里的标题有对应页面，就把名次格子统一改写成规范标题（重定向写法
+        # 一并归一），模板里还没有页面的标题只报告、不动。
         diffs = entry_diffs(text, wanted)
         fixes: Dict[Tuple[str, str, int], str] = {}
         repaired = 0
@@ -1224,7 +1244,8 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         text, changed = recompute_counts(text, created)
         pywikibot.output(f"计数: 更新 {changed} 个小节")
     if "stats" in actions:
-        counts = (count_by_listed(site, sections, legend, cache, participants_of)
+        counts = (count_by_listed(site, sections, legend, cache,
+                                  participants_of, songs_of)
                   if basis == "listed" else count_by_window(site, sections))
         text, _ = render_chart(text, sections, legend, counts)
         pywikibot.output(f"统计: 依据 {basis} 重算图表")

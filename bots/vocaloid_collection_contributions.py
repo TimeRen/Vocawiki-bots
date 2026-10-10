@@ -556,30 +556,36 @@ def batch_exists(site, titles: Iterable[str], exists: Dict[str, bool],
 
     When ``canonical`` is given it records **every** title's on-site form, so a
     caller can compare two hand-written title lists that spell the same page
-    differently (``ダウナ`` / ``Downa``, ``vivid(郁P)`` / ``Vivid(郁P)``).
+    differently (``ダウナ`` / ``Downa``, ``後篇`` / ``后篇``).
     """
     pending = [t for t in dict.fromkeys(titles) if t not in exists]
     for i in range(0, len(pending), 50):
         batch = pending[i:i + 50]
         try:
             data = site.simple_request(action="query", prop="info", redirects=1,
-                                       formatversion=2, titles="|".join(batch)).submit()
+                                       converttitles=1, formatversion=2,
+                                       titles="|".join(batch)).submit()
         except Exception as exc:  # noqa: BLE001
             pywikibot.error(f"批量存在性查询失败: {exc}")
             continue
         query = data.get("query", {})
         normalized = {n["from"]: n["to"] for n in query.get("normalized", [])}
+        # 繁简/日文汉字归一：模板写「後篇」「黒白」「失態生態実験体」，页面上
+        # 叫「后篇」「黑白」「失态生态实验体」，只有这一步能把它们对上。
+        converted = {cv["from"]: cv["to"] for cv in query.get("converted", [])}
         redirected = {r["from"]: r["to"] for r in query.get("redirects", [])}
         pages = query.get("pages", [])
         if isinstance(pages, dict):
             pages = list(pages.values())
         present = {p["title"]: not p.get("missing") for p in pages}
         for title in batch:
+            # MediaWiki 也是按 normalize → 变体转换 → redirect 的顺序解析的
             key = normalized.get(title, title)
-            final = redirected.get(key, key)
+            variant = converted.get(key, key)
+            final = redirected.get(variant, redirected.get(key, key))
             exists[title] = present.get(final, False)
             if canonical is not None:
-                canonical[title] = final
+                canonical[title] = converted.get(final, final)
             if resolved is not None and final != key:
                 resolved[title] = final
 

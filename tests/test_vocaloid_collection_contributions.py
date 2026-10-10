@@ -13,8 +13,9 @@ from bots.vocaloid_collection_contributions import (
 
 
 class FakeSite:
-    def __init__(self, redirects=None):
+    def __init__(self, redirects=None, converted=None):
         self.redirects = redirects or {}
+        self.converted = converted or {}
 
     def simple_request(self, **kwargs):
         self.titles = kwargs["titles"].split("|")
@@ -28,7 +29,13 @@ class FakeSite:
             for title, target in resolved.items()
             if title != target
         ]
-        return {"query": {"pages": pages, "redirects": redirects}}
+        converted = [
+            {"from": title, "to": self.converted[title]}
+            for title in self.titles
+            if title in self.converted
+        ]
+        return {"query": {"pages": pages, "redirects": redirects,
+                          "converted": converted}}
 
 
 class PagedSite:
@@ -138,6 +145,15 @@ class TestCountByListed(TestCase):
 
         self.assertEqual(exists, {"ダウナ": True, "Downa": True})
         self.assertEqual(canonical, {"ダウナ": "Downa", "Downa": "Downa"})
+
+    def test_batch_exists_canonicalises_variant_spellings(self):
+        # 模板写日文/繁体（後篇、黒白），页面上是简体：靠 converttitles 归一。
+        site = FakeSite(converted={"後篇": "后篇", "黒白": "黑白"})
+        exists, canonical = {}, {}
+
+        contributions.batch_exists(site, ["後篇", "黒白"], exists, None, canonical)
+
+        self.assertEqual(canonical, {"後篇": "后篇", "黒白": "黑白"})
 
     def test_template_participants_follows_api_continuation(self):
         site = PagedSite([

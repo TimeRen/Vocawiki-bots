@@ -5,6 +5,12 @@ family_files['library'] = 'https://library.moegirl.org.cn/api.php'
 family_files['voca'] = 'https://voca.wiki/api.php'
 family_files['commons'] = 'https://commons.moegirl.org.cn/api.php'
 family_files['en'] = 'https://en.moegirl.org.cn/api.php'
+# 萌娘百科主站（官方站）：pywikibot.Site('zh', 'zh')。
+# 官方站对匿名调用只放行 prop=info / titles= 这类模块，要查版本（prop=revisions）
+# 得先登录：加一行 usernames['zh']['*']，并在 user-password.py 里写
+# ('zh', '<账号>', '<密码>')（或 BotPassword）。机器人查创建者目前走镜像 icu，
+# 见 vocaloid_collection_contributions.py 的 MOEGIRL_API 与 deploy/toolforge/README.md。
+family_files['zh'] = 'https://zh.moegirl.org.cn/api.php'
 family_files['mirror'] = 'https://moegirl.uk/api.php'
 family_files['icu'] = 'https://moegirl.icu/api.php'
 family_files['icu_cm'] = 'https://commons.moegirl.icu/api.php'

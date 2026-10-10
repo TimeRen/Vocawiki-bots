@@ -199,8 +199,9 @@ cat ~/moereport.out
 `action-notallowed / Unauthorized API call`，`prop=revisions`、`action=parse`、
 `list=search` 一概不给（只有 `prop=info`、`titles=` 这类给用），拿不到最旧一版的
 作者。镜像的 pageid 与官方一致、历史也完整（`moegirl.uk` 就不行，它的历史是后来
-导入的，最旧一版是镜像自己的搬运账号）。要换成官方站的话，改 `MOEGIRL_API`
-即可，但得先有能登录的账号。
+导入的，最旧一版是镜像自己的搬运账号）。要换成官方站的话，`user-config.py` 里
+已经有 `family_files['zh']`（`pywikibot.Site('zh', 'zh')`），但得先有能登录的
+账号（`usernames['zh']['*']` + `user-password.py`），换 `MOEGIRL_API` 即可。
 
 每小时任务也会查镜像：跨站导入的条目要靠它找真正的创建者（见上一节），查到的
 结果同样缓存在 `data/vocaloid_collection_moegirl.pickle`。镜像不是自己的 wiki，

@@ -22,17 +22,17 @@ class FakeSite:
         return self
 
     def submit(self):
-        resolved = {title: self.redirects.get(title, title) for title in self.titles}
-        pages = [{"title": title} for title in dict.fromkeys(resolved.values())]
+        # 模仿 MediaWiki：先按变体转换，再解重定向，页面列表用最终标题
+        keyed = {t: self.converted.get(t, t) for t in self.titles}
+        resolved = {t: self.redirects.get(keyed[t], keyed[t]) for t in self.titles}
+        pages = [{"title": t} for t in dict.fromkeys(resolved.values())]
         redirects = [
-            {"from": title, "to": target}
-            for title, target in resolved.items()
-            if title != target
+            {"from": keyed[t], "to": resolved[t]}
+            for t in self.titles
+            if keyed[t] != resolved[t]
         ]
         converted = [
-            {"from": title, "to": self.converted[title]}
-            for title in self.titles
-            if title in self.converted
+            {"from": t, "to": keyed[t]} for t in self.titles if keyed[t] != t
         ]
         return {"query": {"pages": pages, "redirects": redirects,
                           "converted": converted}}
@@ -153,7 +153,18 @@ class TestCountByListed(TestCase):
 
         contributions.batch_exists(site, ["後篇", "黒白"], exists, None, canonical)
 
+        self.assertEqual(exists, {"後篇": True, "黒白": True})
         self.assertEqual(canonical, {"後篇": "后篇", "黒白": "黑白"})
+
+    def test_batch_exists_resolves_via_the_converted_title(self):
+        # 站点区分大小写：页面叫 parastraea，链接写 Parastraea。认转换后的标题才找得到。
+        site = FakeSite(converted={"Parastraea": "parastraea"})
+        exists, canonical = {}, {}
+
+        contributions.batch_exists(site, ["Parastraea"], exists, None, canonical)
+
+        self.assertEqual(exists, {"Parastraea": True})
+        self.assertEqual(canonical, {"Parastraea": "parastraea"})
 
     def test_template_participants_follows_api_continuation(self):
         site = PagedSite([

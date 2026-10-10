@@ -579,13 +579,14 @@ def batch_exists(site, titles: Iterable[str], exists: Dict[str, bool],
             pages = list(pages.values())
         present = {p["title"]: not p.get("missing") for p in pages}
         for title in batch:
-            # MediaWiki 也是按 normalize → 变体转换 → redirect 的顺序解析的
+            # MediaWiki 也是按 normalize → 变体转换 → redirect 的顺序解析的，
+            # 所以认的是转换后的标题（站点区分大小写时 parastraea 才算数）。
             key = normalized.get(title, title)
             variant = converted.get(key, key)
-            final = redirected.get(variant, redirected.get(key, key))
+            final = redirected.get(variant, variant)
             exists[title] = present.get(final, False)
             if canonical is not None:
-                canonical[title] = converted.get(final, final)
+                canonical[title] = final
             if resolved is not None and final != key:
                 resolved[title] = final
 
@@ -1214,13 +1215,17 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         repaired = 0
         normalised = 0
         foreign: List[str] = []
+        actionable = 0
         if diffs:
             probe: Dict[str, bool] = {}
             redirects: Dict[str, str] = {}
             batch_exists(site, [d[3] for d in diffs] + [d[4] for d in diffs], probe, redirects)
             for season, name, rank, current, want in diffs:
                 if not probe.get(want):
-                    continue  # 模板里的标题还没有页面，不动页面
+                    # 模板里的标题还没有页面（模板多写日文原名，那些链接是红的）：
+                    # 不动页面，也不计入报告——否则七百多条差异里全是这种写法差异。
+                    continue
+                actionable += 1
                 # 模板标题本身可能是重定向（"ダウナ" 指回 "Downa"），要取最终页面，
                 # 否则会把链接改成一个绕回原地的重定向。
                 target = redirects.get(want, want)
@@ -1238,8 +1243,9 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
                 else:
                     normalised += 1
         text, synced, notes = sync_entries(text, fixes)
-        pywikibot.output(f"条目: 赛季模板对比出 {len(diffs)} 处差异，改写 {synced} 个名次"
-                         f"（死链修复 {repaired}，统一成规范标题 {normalised}）")
+        if actionable:
+            pywikibot.output(f"条目: 赛季模板对比出 {actionable} 处差异，改写 {synced} 个名次"
+                             f"（死链修复 {repaired}，统一成规范标题 {normalised}）")
         for note in notes[:20]:
             pywikibot.output(f"  {note}")
         if len(notes) > 20:

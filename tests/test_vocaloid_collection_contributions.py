@@ -326,3 +326,158 @@ class TestScheduledMaintenance(TestCase):
         self.assertEqual(updated_sections[0].entries[0].title, "Canonical song")
         self.assertEqual(updated_sections[0].entries[0].colours, ["#123456"])
         render_chart.assert_called_once()
+
+
+class TestMoegirlCrossCheck(TestCase):
+    """voca 上说不出创建者时，拿萌娘百科的同名条目当参照。"""
+
+    def test_titles_follow_redirects_and_variant_conversions(self):
+        # 模板写日文原名、萌娘条目用中文：靠 converttitles 归一；
+        # 「ダウナ」在萌娘是重定向，要认最终标题。
+        data = {"query": {
+            "converted": [{"from": "後篇", "to": "后篇"}],
+            "redirects": [{"from": "ダウナ", "to": "Downa"}],
+            "pages": [{"title": "パメラ"}, {"title": "后篇"},
+                      {"title": "虚构曲", "missing": True}, {"title": "Downa"}],
+        }}
+        with patch.object(contributions, "moegirl_api", return_value=data), \
+                patch.object(contributions.time, "sleep"):
+            found = contributions.moegirl_titles(
+                ["パメラ", "後篇", "虚构曲", "ダウナ"])
+
+        self.assertEqual(found, {"パメラ": "パメラ", "後篇": "后篇",
+                                 "虚构曲": None, "ダウナ": "Downa"})
+
+    def test_titles_leave_unanswered_queries_out_of_the_result(self):
+        # 问不到 ≠ 没有：萌娘 API 挂了就不能返回「无同名条目」。
+        with patch.object(contributions, "moegirl_api", return_value=None), \
+                patch.object(contributions.time, "sleep"):
+            found = contributions.moegirl_titles(["甲"])
+
+        self.assertEqual(found, {})
+
+    def test_lookup_caches_creators_and_confirmed_absences(self):
+        def fake(params):
+            if params.get("prop") == "revisions":
+                return {"query": {"pages": [{"title": "甲",
+                                             "revisions": [{"user": "萌娘用户"}]}]}}
+            return {"query": {"pages": [{"title": "甲"},
+                                        {"title": "乙", "missing": True}]}}
+
+        with patch.object(contributions, "moegirl_api", side_effect=fake), \
+                patch.object(contributions.time, "sleep"):
+            cache = {}
+            pages = contributions.moegirl_lookup(["甲", "乙"], cache)
+
+        self.assertEqual((pages["甲"].title, pages["甲"].creator, pages["甲"].known),
+                         ("甲", "萌娘用户", True))
+        self.assertEqual((pages["乙"].title, pages["乙"].creator, pages["乙"].known),
+                         (None, None, True))
+        self.assertEqual(cache["甲"][:2], ("甲", "萌娘用户"))
+        self.assertEqual(cache["乙"][:2], (None, None))
+
+        # 第二次跑吃缓存，不再请求萌娘 API
+        with patch.object(contributions, "moegirl_api") as api:
+            again = contributions.moegirl_lookup(["甲", "乙"], cache)
+        api.assert_not_called()
+        self.assertEqual(again["甲"].creator, "萌娘用户")
+        self.assertTrue(again["乙"].known)
+
+    def test_candidates_flag_red_mismatched_and_bot_created_entries(self):
+        colour = "#FF0000"
+        legend = Legend(colour_to_name={colour: "某人"},
+                        name_to_colour={"某人": colour})
+        sections = [Section("2021秋", "TOP100", [
+            Entry("红链曲", []),
+            Entry("标注不符曲", [colour]),
+            Entry("标注相符曲", [colour]),
+            Entry("机器人建的曲", []),
+        ])]
+        exists = {"红链曲": False, "标注不符曲": True,
+                  "标注相符曲": True, "机器人建的曲": True}
+        creators = {"标注不符曲": "别人", "标注相符曲": "某人",
+                    "机器人建的曲": "星海-interfacebot"}
+
+        rows = contributions.moegirl_candidates(
+            sections, legend, None, exists, {}, creators)
+
+        self.assertEqual({(row["reason"], row["title"]) for row in rows},
+                         {("red", "红链曲"), ("mismatch", "标注不符曲"),
+                          ("bot", "机器人建的曲")})
+
+    def test_candidates_cover_outside_songs_from_the_season_template(self):
+        # 榜外原创曲在页面上没有名次格子，归属全靠赛季模板，也要拿去比对。
+        sections = [Section("2021秋", "TOP100", [Entry("榜内曲", [])])]
+
+        rows = contributions.moegirl_candidates(
+            sections, Legend(), lambda _season: {"榜外原创曲"}, {"榜内曲": False},
+            {}, {})
+
+        self.assertEqual([(row["reason"], row["title"]) for row in rows],
+                         [("red", "榜内曲"), ("red", "榜外原创曲")])
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "batch_exists")
+    def test_report_lists_moegirl_creators_without_touching_the_page(
+            self, batch_exists, batch_creators):
+        sections = [Section("2021秋", "TOP100", [Entry("红链曲", [])])]
+        pages = {"红链曲": contributions.MoePage("同曲", "萌娘用户", True)}
+
+        with patch.object(contributions, "moegirl_lookup", return_value=pages):
+            report = contributions.moegirl_report(
+                object(), sections, Legend(), {}, {}, moe_cache={})
+
+        self.assertIn("2021秋/TOP100 红链曲", report)
+        self.assertIn("萌娘《同曲》创建者 萌娘用户", report)
+        self.assertIn("萌娘用户：+1", report)
+        self.assertIn("只出报告", report)
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "batch_exists")
+    def test_report_keeps_coloured_cells_out_of_the_gain_tally(
+            self, batch_exists, batch_creators):
+        # 上色但页面不存在的格子已经算给标注的创建者了，萌娘的答案只是参照，
+        # 不能再加一遍。
+        colour = "#FF0000"
+        sections = [Section("2021秋", "TOP100", [Entry("红链曲", [colour])])]
+        legend = Legend(colour_to_name={colour: "某人"})
+        pages = {"红链曲": contributions.MoePage("同曲", "萌娘用户", True)}
+
+        with patch.object(contributions, "moegirl_lookup", return_value=pages):
+            report = contributions.moegirl_report(
+                object(), sections, legend, {}, {}, moe_cache={})
+
+        self.assertIn("标注 某人", report)
+        self.assertNotIn("萌娘用户：+1", report)
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "batch_exists")
+    def test_report_counts_a_legend_user_as_a_colour_gain(
+            self, batch_exists, batch_creators):
+        # 萌娘创建者在图例里有颜色：采用的话直接加到这个颜色上，不是新开一行。
+        colour = "#FF0000"
+        sections = [Section("2021秋", "TOP100", [Entry("红链曲", [])])]
+        legend = Legend(colour_to_name={colour: "某人"},
+                        name_to_colour={"某人": colour})
+        pages = {"红链曲": contributions.MoePage("同曲", "某人", True)}
+
+        with patch.object(contributions, "moegirl_lookup", return_value=pages):
+            report = contributions.moegirl_report(
+                object(), sections, legend, {}, {}, moe_cache={})
+
+        self.assertIn(f"某人（{colour}）：+1", report)
+
+
+class TestMoegirlAction(TestCase):
+    def test_moe_is_a_known_action_but_not_part_of_all(self):
+        self.assertNotIn("moe", contributions.ALL_ACTIONS)
+        self.assertIn("moe", contributions.EXTRA_ACTIONS)
+
+    @patch("sys.argv", ["vocaloid_collection_contributions.py", "moe"])
+    @patch.object(contributions.pywikibot, "Site")
+    @patch.object(contributions, "run_once")
+    def test_moe_action_runs_without_write(self, run_once, site_factory):
+        contributions.main()
+
+        run_once.assert_called_once_with(
+            site_factory.return_value, {"moe"}, "listed", False, None)

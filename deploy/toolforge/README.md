@@ -153,6 +153,24 @@ toolforge jobs delete hourly
 
 `jobs.yaml` 里配了 `emails: onfailure`，所以任务失败时会给你发邮件。
 
+## 8. 萌娘百科交叉比对报告（可选，手动）
+
+贡献列表记的是「萌娘百科及 Vocawiki 上」的创建：页面上标的创建者（格子颜色/图例）
+与本机页面的首版作者有时不是同一个人。`moe` 动作会去萌娘百科查同名条目的最旧一版
+作者，供人工判断——它**只出报告，不上色、不改数字**，也不在每小时任务里跑：
+
+```bash
+toolforge jobs run moereport --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-once.sh --dry-run moe"
+cat ~/moereport.out
+```
+
+报告分三类：`标注与 voca 首版作者不符`、`voca 首版作者是机器人/导入账号`、
+`voca 还没有页面（红链）`，末尾列出「若照萌娘结果归属，各创建者会得到多少」。
+结果缓存在 `data/vocaloid_collection_moegirl.pickle`（7 天有效期），同一条重复跑
+不会再把萌娘 API 敲一遍。萌娘百科是别人的 wiki，别把它加进 `hourly` 或
+`run-once.sh` 的默认 `all`。
+
 ## 更新代码
 
 **先 `become <工具名>`**（同第 7 节）：`~/Vocawiki-bots` 和 `toolforge jobs` 都只

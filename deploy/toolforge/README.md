@@ -160,6 +160,22 @@ toolforge jobs delete hourly
 `colour`、`counts`、`stats` 都走这条规则（见 `page_creator`），源站也查不到时
 宁可不归属，也不拿导入者顶替。`moe` 报告会把这类首版标成「（萌百导入）」。
 
+图表里已经被写进去的旧数字要靠一次性迁移搬正——图表只会把数字往上抬，
+所以「减旧加新」不能每轮都做：
+
+```bash
+# 先干跑看 diff（259283 是我的改动落地前的那一版）
+toolforge jobs run recredit --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-once.sh --dry-run recredit --from-rev=259283"
+# 确认无误后去掉 --dry-run 再跑一次
+toolforge jobs run recredit --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-once.sh recredit --from-rev=259283"
+cat ~/recredit.out
+```
+
+`--from-rev` 是**迁移基准**：老数字从那一版取，同一基准重复跑结果一致，
+CI 与 Toolforge 各跑一次也不会翻倍。迁移完照常跑 `all`，会打印「页面无需更新」。
+
 ## 8. 萌娘百科交叉比对报告（可选，手动）
 
 贡献列表记的是「萌娘百科及 Vocawiki 上」的创建：页面上标的创建者（格子颜色/图例）

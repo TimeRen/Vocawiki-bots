@@ -1,6 +1,6 @@
 import json
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import bots.vocaloid_collection_contributions as contributions
 
@@ -344,6 +344,60 @@ class TestRenderChart(TestCase):
         self.assertEqual(data["真创建者"], 10)      # 9 + 1：条目搬过来了
         self.assertEqual(data["导入版作者"], 2)      # 3 - 1：不再记在他头上
 
+    def test_migration_takes_the_old_numbers_from_the_base_revision(self):
+        # 一次性迁移以固定的基准版为准：当前页面就算已经被加过一次，也不会越滚越大。
+        colour = "#000000"
+        base = {
+            "legend": {"data": ["ボカコレ2021秋"]},
+            "yAxis": {"data": ["真创建者", "导入版作者"]},
+            "series": [{"name": "ボカコレ2021秋", "type": "bar",
+                        "itemStyle": {"color": "#111111"}, "data": [9, 3]}],
+        }
+        base_text = ("{{Echart|data=<nowiki>"
+                     + json.dumps(base, ensure_ascii=False) + "</nowiki>}}")
+        now = {
+            "legend": {"data": ["ボカコレ2021秋"]},
+            "yAxis": {"data": ["真创建者", "导入版作者"]},
+            "series": [{"name": "ボカコレ2021秋", "type": "bar",
+                        "itemStyle": {"color": "#111111"}, "data": [12, 0]}],
+        }
+        text = ("{{Echart|data=<nowiki>"
+                + json.dumps(now, ensure_ascii=False) + "</nowiki>}}")
+        sections = [Section("2021秋", "TOP100", [Entry("甲", [colour])])]
+        legend = Legend(colour_to_name={colour: "真创建者"})
+
+        updated, _ = contributions.render_chart(
+            text, sections, legend, {"2021秋": {"#000000": 2}},
+            {"2021秋": {"导入版作者": 1}}, {"2021秋": {"#000000": 1}},
+            base_text=base_text)
+
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        data = dict(zip(parsed["yAxis"]["data"], parsed["series"][0]["data"]))
+        self.assertEqual(data["真创建者"], 10)      # 9 + 1，而不是 12 + 1
+        self.assertEqual(data["导入版作者"], 2)      # 3 - 1
+
+
+class TestRecredit(TestCase):
+    """一次性迁移：把导入错记的数字搬到真创建者头上。"""
+
+    def test_requires_a_base_revision(self):
+        with self.assertRaises(ValueError):
+            contributions.recredit(None, None, "", [], Legend(), {}, {},
+                                   None, None, None, None)
+
+    @patch.object(contributions, "render_chart", return_value=("NEW", {}))
+    @patch.object(contributions, "count_by_listed", return_value={})
+    def test_uses_the_given_revision_as_the_base(self, _count, render_chart):
+        page = Mock()
+        page.getOldVersion.return_value = "BASETEXT"
+
+        text = contributions.recredit(Mock(), page, "TEXT", [], Legend(), {}, {},
+                                      None, None, None, 123)
+
+        page.getOldVersion.assert_called_once_with(oldid=123)
+        self.assertEqual(text, "NEW")
+        self.assertEqual(render_chart.call_args.kwargs["base_text"], "BASETEXT")
+
 
 class TestScheduledMaintenance(TestCase):
     @patch("sys.argv", ["vocaloid_collection_contributions.py", "all", "--write"])
@@ -356,7 +410,7 @@ class TestScheduledMaintenance(TestCase):
         contributions.main()
 
         run_once.assert_called_once_with(
-            site, set(contributions.ALL_ACTIONS), "listed", True, None)
+            site, set(contributions.ALL_ACTIONS), "listed", True, None, None)
 
     @patch.object(contributions, "load_cache", return_value={})
     @patch.object(contributions, "save_cache")
@@ -684,4 +738,4 @@ class TestMoegirlAction(TestCase):
         contributions.main()
 
         run_once.assert_called_once_with(
-            site_factory.return_value, {"moe"}, "listed", False, None)
+            site_factory.return_value, {"moe"}, "listed", False, None, None)

@@ -38,12 +38,12 @@ The bot can:
   the chart reads 多→少 from top to bottom.  A cell's colour is the hand-made
   creator annotation and wins outright; other entries use the creator of the
   local page. Some chart numbers come from bookkeeping outside the wiki and
-  cannot be derived at all, so a cell is normally only raised, never lowered -
-  with two exceptions: whatever the REMIX/二创 songs had added to a cell is
-  subtracted again, and whatever earlier runs had given to the author of an
-  *imported* revision (that author is the source article's last editor, not its
-  creator, see ``page_creator``) is subtracted there and added to the real
-  creator's cell, so the entry does move over.
+  cannot be derived at all, so a cell is normally only raised, never lowered.
+  Two exceptions subtract from a cell: the REMIX/二创 songs, and the credits
+  earlier runs gave to the author of an *imported* revision (that author is the
+  source article's last editor, see ``page_creator``).  Moving those credits to
+  the real creator's cell is a one-off migration - ``recredit`` - because
+  re-applying the delta every hour would keep growing the number.
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured).
 * ``moe``     - 与萌娘百科交叉比对创建者，**只出报告、不改页面**。贡献列表记的是
@@ -54,6 +54,10 @@ The bot can:
   ``zh.moegirl.org.cn`` 对匿名调用回 ``action-notallowed``，拿不到版本），
   镜像的最旧一版同样可能是导入/搬运留下的作者，所以这份报告只供人工判断，
   机器人不据此上色或计数。
+* ``recredit`` - 一次性迁移（必须给 ``--from-rev <版本号>``）：把早期按「导入版
+  作者」记进图表的那些数字减掉，并加到源站真正的创建者那一格。图表本身只把数字
+  往上抬，所以这件事不能每轮都做——必须以某个基准版为参照跑一次，否则每跑一轮
+  都会再加一遍。之后每小时的任务会照旧把结果保持住。
 * ``all``      - run all maintenance actions once. Toolforge and GitHub Actions
   schedule this full pass hourly; it does not poll ``list=recentchanges``, whose
   results can omit entries that have not yet appeared in the maintained list.
@@ -790,12 +794,12 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
     (REMIX 赛道、neta 的二创): they are tallied separately into ``excluded`` so
     that ``render_chart`` can undo the numbers earlier runs had added for them.
 
-    ``corrections`` receives, per season, the credits earlier runs gave under the
-    old rule that are wrong now (a cross-wiki import's author is the source
-    article's last editor, not its creator); ``gains`` receives the same credits
-    under the name that should have got them.  ``render_chart`` subtracts the
-    first and adds the second, so the page shows the corrected numbers instead
-    of keeping the wrong ones (it never lowers an existing number by itself).
+    ``corrections`` and ``gains`` are only for the one-off ``recredit`` migration:
+    they collect, per season, the credits earlier runs gave to the author of an
+    imported revision (``corrections``) and the same credits under the name that
+    should have got them (``gains``).  The hourly pass must not apply them - the
+    chart only ever raises a number, so re-applying the delta every run would
+    grow it forever.
 
     A ranked cell's colour is its creator annotation. Redirects and pages listed
     more than once count only once.
@@ -1047,7 +1051,8 @@ def _relabel_series(model: Optional[str], name: str, colour: str,
 def render_chart(text: str, sections: List[Section], legend: Legend,
                  counts: Dict[str, Counter],
                  excluded: Optional[Dict[str, Counter]] = None,
-                 gained: Optional[Dict[str, Counter]] = None) -> Tuple[str, dict]:
+                 gained: Optional[Dict[str, Counter]] = None,
+                 base_text: Optional[str] = None) -> Tuple[str, dict]:
     match = CHART_RE.search(text)
     if not match:
         raise RuntimeError("未找到 {{Echart}} - 页面结构可能已改变")
@@ -1100,13 +1105,24 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
             continue
 
     palette = [obj.get("itemStyle", {}).get("color") for _, obj in blocks]
+    # 每格的老数字取自 ``base_text`` 那一版（默认就是当前页面）。一次性的迁移
+    # 必须相对一个固定的基准版算，否则「减旧加新」每轮都会重来一遍。
+    base = base_text if base_text is not None else text
+    base_match = CHART_RE.search(base)
+    if base_match is None:
+        raise RuntimeError("基准版本里没有 {{Echart}}，取不到老的数字")
+    try:
+        base_chart = json.loads(base_match.group(2))
+    except ValueError as exc:
+        raise RuntimeError(f"基准版本的 {{Echart}} 解析失败：{exc}") from exc
+    base_axis: List[str] = base_chart["yAxis"]["data"]
     # 有些数字来自站外的人工记账（既没上色、本地也没页面），任何算法都推不出来，
     # 所以只在机器人算得更多时提高，绝不把人工数字改小。
     kept: Dict[str, Dict[str, int]] = {}
-    for _, obj in blocks:
-        for name, value in zip(yaxis, obj.get("data", [])):
-            if value:
-                kept.setdefault(obj.get("name", ""), {})[name] = value
+    for series in base_chart.get("series", []):
+        label = series.get("name", "")
+        kept[label] = {name: value for name, value in
+                       zip(base_axis, series.get("data", [])) if value}
 
     users = [u for u in yaxis if totals[u] >= 5 or any(u in kept.get(l, {}) for l in labels)]
     users += [u for u in totals if totals[u] >= 5 and u not in users]
@@ -1655,8 +1671,9 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
 
 # --------------------------------------------------------------------------- #
 ALL_ACTIONS = ("entries", "counts", "colour", "stats", "report")
-# 不进 ``all``：萌娘百科是别人的 wiki，别让每小时一次的维护去敲它
-EXTRA_ACTIONS = ("moe",)
+# 不进 ``all``：萌娘百科是别人的 wiki，别让每小时一次的维护去敲它；
+# recredit 是一次性迁移，必须显式带着基准版本跑，见 ``recredit``。
+EXTRA_ACTIONS = ("moe", "recredit")
 DEFAULT_SUMMARY = "机器人：自动维护贡献列表"
 
 
@@ -1733,8 +1750,41 @@ def save_page(page: Page, text: str, summary: Optional[str]) -> bool:
         return _abandon_round(page, exc)
 
 
+def recredit(site, page: Page, text: str, sections: List[Section], legend: Legend,
+             cache: Dict, moe_cache: Dict,
+             participants_of, songs_of, excluded_of,
+             from_rev: Optional[int]) -> str:
+    """一次性把记在「导入版作者」名下的数字搬到真创建者头上。
+
+    为什么不能每轮都做：图表只会把数字往上抬（站外的人工记账推不出来，不能丢），
+    所以「减掉旧口径那份、给真创建者加上」必须相对**某个基准版**做一次；否则每跑
+    一轮都会再加一遍，数字越滚越大。基准版由 ``from_rev`` 指定，同一版重跑得到的
+    结果一致，所以重复执行、或者 CI 与 Toolforge 各跑一次，结果都一样。
+    """
+    if not from_rev:
+        raise ValueError("recredit 需要 --from-rev <版本号>：拿哪一版的图表当基准")
+    base_text = page.getOldVersion(oldid=from_rev)
+    if not base_text:
+        raise ValueError(f"拿不到版本 {from_rev} 的内容")
+    excluded: Dict[str, Counter] = {}
+    corrections: Dict[str, Counter] = {}
+    gains: Dict[str, Counter] = {}
+    counts = count_by_listed(site, sections, legend, cache, participants_of,
+                             songs_of, excluded_of, excluded, moe_cache,
+                             corrections, gains)
+    for season, counter in corrections.items():
+        excluded.setdefault(season, Counter()).update(counter)
+    moved = sum(sum(counter.values()) for counter in gains.values())
+    dropped = sum(sum(counter.values()) for counter in corrections.values())
+    updated, _ = render_chart(text, sections, legend, counts, excluded, gains,
+                              base_text=base_text)
+    pywikibot.output(f"迁移: 以版本 {from_rev} 为基准，导入误记改归真创建者 "
+                     f"{moved} 处（从旧口径减掉 {dropped} 处）")
+    return updated
+
+
 def run_once(site, actions, basis: str = "listed", write: bool = False,
-             summary: Optional[str] = None) -> bool:
+             summary: Optional[str] = None, from_rev: Optional[int] = None) -> bool:
     """Run one maintenance pass.  Returns True when the page changed.
 
     Returns False when there was nothing to do, and also when the save was
@@ -1874,22 +1924,15 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         pywikibot.output(f"计数: 更新 {changed} 个小节")
     if "stats" in actions:
         excluded: Dict[str, Counter] = {}
-        corrections: Dict[str, Counter] = {}
-        gains: Dict[str, Counter] = {}
         counts = (count_by_listed(site, sections, legend, cache, participants_of,
-                                  songs_of, excluded_of, excluded, moe_cache,
-                                  corrections, gains)
+                                  songs_of, excluded_of, excluded, moe_cache)
                   if basis == "listed" else count_by_window(site, sections))
+        text, _ = render_chart(text, sections, legend, counts, excluded)
         dropped = sum(sum(entry.values()) for entry in excluded.values())
-        fixed = sum(sum(entry.values()) for entry in corrections.values())
-        moved = sum(sum(entry.values()) for entry in gains.values())
-        # 归错的那份要从旧图表里减回去、并且记到真创建者头上：只减不加会被
-        # 「只升不降」挡住，页面上的数字就永远搬不过去。
-        for season, counter in corrections.items():
-            excluded.setdefault(season, Counter()).update(counter)
-        text, _ = render_chart(text, sections, legend, counts, excluded, gains)
-        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处，"
-                         f"导入误记改归真创建者 {moved}/{fixed} 处）")
+        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处）")
+    if "recredit" in actions:
+        text = recredit(site, page, text, sections, legend, cache, moe_cache,
+                        participants_of, songs_of, excluded_of, from_rev)
     if "report" in actions:
         report = build_report(site, sections, legend, cache, exists, plan)
         pywikibot.output("异常报告:\n" + (report or "  （无）"))
@@ -1919,12 +1962,14 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", default="all",
-                        help="all | one or more of counts,colour,stats,report,moe "
+                        help="all | one or more of counts,colour,stats,report,moe,recredit "
                              "(comma separated, e.g. counts,colour,report)")
     parser.add_argument("--basis", choices=["listed", "window"], default="listed",
                         help="how to resolve creators when recomputing the chart")
     parser.add_argument("--write", action="store_true", help="save the page (default: dry-run)")
     parser.add_argument("--summary", default=None)
+    parser.add_argument("--from-rev", type=int, default=None, dest="from_rev",
+                        help="recredit: 用哪一版的图表当迁移基准（版本号）")
     args = parser.parse_args()
 
     site = pywikibot.Site()
@@ -1935,7 +1980,7 @@ def main() -> None:
         unknown = actions - set(ALL_ACTIONS) - set(EXTRA_ACTIONS)
         if not actions or unknown:
             parser.error(f"未知的动作：{', '.join(sorted(unknown)) or args.action}")
-    run_once(site, actions, args.basis, args.write, args.summary)
+    run_once(site, actions, args.basis, args.write, args.summary, args.from_rev)
 
 
 if __name__ == "__main__":

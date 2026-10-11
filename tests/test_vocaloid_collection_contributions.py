@@ -457,6 +457,37 @@ class TestRenderChart(TestCase):
         self.assertEqual(corrected_chart["series"][0]["data"], [41])
         self.assertEqual(repeated_chart["series"][0]["data"], [41])
 
+    def test_summer_count_adjustment_survives_subsequent_runs(self):
+        chart = {
+            "legend": {"data": ["ボカコレ2025夏"]},
+            "yAxis": {"data": ["Zhoumou/周某不是轴某"]},
+            "series": [
+                {"name": "ボカコレ2025夏", "type": "bar",
+                 "itemStyle": {"color": "#111111"}, "data": [17]},
+            ],
+        }
+        text = ("{{Echart|data=<nowiki>"
+                + json.dumps(chart, ensure_ascii=False) + "</nowiki>}}")
+        sections = [Section("2025夏", "TOP100", [])]
+        legend = Legend(
+            colour_to_name={"#94F0FF": "周某不是轴某"},
+            name_to_colour={"周某不是轴某": "#94F0FF"},
+            alias_to_name={"zhoumou": "周某不是轴某",
+                           "周某不是轴某": "周某不是轴某"})
+        counts = {"2025夏": {"#94F0FF": 17}}
+
+        corrected, _ = contributions.render_chart(
+            text, sections, legend, counts)
+        repeated, _ = contributions.render_chart(
+            corrected, sections, legend, counts)
+
+        corrected_chart = json.loads(
+            contributions.CHART_RE.search(corrected).group(2))
+        repeated_chart = json.loads(
+            contributions.CHART_RE.search(repeated).group(2))
+        self.assertEqual(corrected_chart["series"][0]["data"], [16])
+        self.assertEqual(repeated_chart["series"][0]["data"], [16])
+
     def test_unverified_spring_count_is_removed_but_autumn_creation_remains(self):
         chart = {
             "legend": {"data": ["ボカコレ2021春", "ボカコレ2021秋",

@@ -133,6 +133,7 @@ CHART_NEW_USER_THRESHOLD = 5
 # otherwise preserve.
 CHART_COUNT_ADJUSTMENTS = {
     "2021春": {"#926CC6": -1},  # 奈汐子：没有找到该季对应条目
+    "2025夏": {"#94F0FF": -1},  # Zhoumou：修订 260461 将 17 改为 16
     "2025冬": {"#94F0FF": -1},  # Zhoumou：修订 260461 将 42 改为 41
 }
 

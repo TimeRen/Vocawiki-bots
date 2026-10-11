@@ -129,9 +129,12 @@ MOEGIRL_CACHE = DATA_DIR / "vocaloid_collection_moegirl.pickle"
 DERIVATIVE_CACHE = DATA_DIR / "vocaloid_collection_derivatives.pickle"
 CHART_SERIES_PREFIX = "ボカコレ"
 CHART_NEW_USER_THRESHOLD = 5
-# The edit at revision 260461 corrected this cell from 42 to 41. The chart's
-# high-water mark would otherwise restore 42 on the next maintenance run.
-CHART_COUNT_ADJUSTMENTS = {"2025冬": {"#94F0FF": -1}}
+# Correct verified historical chart cells that the high-water mark would
+# otherwise preserve.
+CHART_COUNT_ADJUSTMENTS = {
+    "2021春": {"#926CC6": -1},  # 奈汐子：没有找到该季对应条目
+    "2025冬": {"#94F0FF": -1},  # Zhoumou：修订 260461 将 42 改为 41
+}
 
 # 萌娘百科（voca.wiki 的条目大多从那边来，创建者对不上时拿它当参照）。它不在
 # pywikibot 的 family 里，直接走 HTTP API（stdlib，不引新依赖）。
@@ -186,6 +189,8 @@ MOEGIRL_FALLBACK: Dict[str, Tuple[str, str]] = {
     "Handicapper": ("Handicapper", "红茶大包子"),
     "Hello, world(Lastscaler)": ("Hello, world(夏色花梨)", "Sandyzikun"),
     "Lethe(Aliey:S)": ("Lethe", "Tibbie2017tibbie2018"),
+    # 萌百镜像首版记录为奈汐子；Toolforge 查询失败时仍应保留 2021秋 的创建记录。
+    "瓦解重整": ("瓦解重整", "奈汐子"),
     "哦齁爱": ("哦齁爱", "高级火法"),
     "奔向暗影，由阳光刺穿，闪耀着。": ("奔向暗影、由阳光刺穿、闪耀着。", "Luxzhuge"),
     "完成(巡巡)": ("完成(初音未来)", "Wecury"),

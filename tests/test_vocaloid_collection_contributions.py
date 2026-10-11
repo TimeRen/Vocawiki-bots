@@ -457,6 +457,45 @@ class TestRenderChart(TestCase):
         self.assertEqual(corrected_chart["series"][0]["data"], [41])
         self.assertEqual(repeated_chart["series"][0]["data"], [41])
 
+    def test_unverified_spring_count_is_removed_but_autumn_creation_remains(self):
+        chart = {
+            "legend": {"data": ["ボカコレ2021春", "ボカコレ2021秋",
+                                "ボカコレ2022春"]},
+            "yAxis": {"data": ["奈汐子"]},
+            "series": [
+                {"name": "ボカコレ2021春", "type": "bar",
+                 "itemStyle": {"color": "#111111"}, "data": [1]},
+                {"name": "ボカコレ2021秋", "type": "bar",
+                 "itemStyle": {"color": "#222222"}, "data": [1]},
+                {"name": "ボカコレ2022春", "type": "bar",
+                 "itemStyle": {"color": "#333333"}, "data": [3]},
+            ],
+        }
+        text = ("{{Echart|data=<nowiki>"
+                + json.dumps(chart, ensure_ascii=False) + "</nowiki>}}")
+        sections = [Section(season, "TOP100", []) for season in
+                    ("2021春", "2021秋", "2022春")]
+        legend = Legend(
+            colour_to_name={"#926CC6": "奈汐子"},
+            name_to_colour={"奈汐子": "#926CC6"})
+        counts = {"2021秋": {"#926CC6": 1},
+                  "2022春": {"#926CC6": 3}}
+
+        corrected, _ = contributions.render_chart(
+            text, sections, legend, counts)
+        repeated, _ = contributions.render_chart(
+            corrected, sections, legend, counts)
+
+        corrected_chart = json.loads(
+            contributions.CHART_RE.search(corrected).group(2))
+        repeated_chart = json.loads(
+            contributions.CHART_RE.search(repeated).group(2))
+        self.assertEqual(corrected_chart["yAxis"]["data"], ["奈汐子"])
+        self.assertEqual([series["data"][0]
+                          for series in corrected_chart["series"]], [0, 1, 3])
+        self.assertEqual([series["data"][0]
+                          for series in repeated_chart["series"]], [0, 1, 3])
+
     def test_excluded_tracks_lower_numbers_and_keep_manual_ones(self):
         # REMIX/二创以前被算进图表，现在不算了：要把那部分减回去，
         # 而站外人工记账的数字（机器人本来就推不出来）仍然保留。
@@ -1132,6 +1171,20 @@ class TestMoegirlOfficial(TestCase):
 
         self.assertEqual(creator, "Sayonzei")
         self.assertEqual(cache["迷路的孩子山中神隐奇谭"][3],
+                         contributions.MOEGIRL_SOURCE_FALLBACK)
+
+    @patch.object(contributions, "moegirl_official_page", return_value=None)
+    def test瓦解重整_import_is_credited_when_toolforge_cannot_query_moegirl(
+            self, _page):
+        # 源站首版作者是奈汐子；离线/云端查不到萌百时也不能漏掉 2021秋 这首。
+        self.assertIn("瓦解重整", contributions.MOEGIRL_FALLBACK)
+        cache = {}
+
+        creator = contributions.moegirl_imported_creator(
+            "瓦解重整", "鏡の影だ", "2022-12-28T01:32:58Z", cache)
+
+        self.assertEqual(creator, "奈汐子")
+        self.assertEqual(cache["瓦解重整"][3],
                          contributions.MOEGIRL_SOURCE_FALLBACK)
 
     @patch.object(contributions, "moegirl_source_title", return_value=(True, None))

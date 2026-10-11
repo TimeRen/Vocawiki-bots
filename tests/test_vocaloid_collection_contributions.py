@@ -527,7 +527,7 @@ class TestRenderChart(TestCase):
         self.assertEqual([series["data"][0]
                           for series in repeated_chart["series"]], [0, 1, 3])
 
-    def test_corrected_2022_spring_entry_lowers_only_the_retained_value(self):
+    def test_2022_spring_count_correction_survives_subsequent_runs(self):
         chart = {
             "legend": {"data": ["ボカコレ2022春"]},
             "yAxis": {"data": ["Zhoumou/周某不是轴某"]},
@@ -544,7 +544,7 @@ class TestRenderChart(TestCase):
             name_to_colour={"周某不是轴某": "#94F0FF"},
             alias_to_name={"zhoumou": "周某不是轴某",
                            "周某不是轴某": "周某不是轴某"})
-        counts = {"2022春": {"#94F0FF": 14}}
+        counts = {"2022春": {"#94F0FF": 15}}
 
         corrected, _ = contributions.render_chart(
             text, sections, legend, counts)

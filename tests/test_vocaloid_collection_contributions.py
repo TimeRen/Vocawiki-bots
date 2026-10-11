@@ -400,6 +400,32 @@ class TestRenderChart(TestCase):
         self.assertEqual(parsed["yAxis"]["data"], ["小戶", "中戶", "大戶"])
         self.assertEqual(parsed["series"][0]["data"], [1, 5, 20])
 
+    def test_removed_five_count_row_is_not_recreated(self):
+        chart = {
+            "legend": {"data": ["ボカコレ2021秋"]},
+            "yAxis": {"data": []},
+            "series": [
+                {"name": "ボカコレ2021秋", "type": "bar",
+                 "itemStyle": {"color": "#111111"}, "data": []},
+            ],
+        }
+        text = ("{{Echart|data=<nowiki>"
+                + json.dumps(chart, ensure_ascii=False) + "</nowiki>}}")
+        sections = [Section("2021秋", "TOP100", [])]
+
+        at_threshold, _ = contributions.render_chart(
+            text, sections, Legend(), {"2021秋": {"五次创建者": 5}})
+        above_threshold, _ = contributions.render_chart(
+            text, sections, Legend(), {"2021秋": {"六次创建者": 6}})
+
+        at_threshold_chart = json.loads(
+            contributions.CHART_RE.search(at_threshold).group(2))
+        above_threshold_chart = json.loads(
+            contributions.CHART_RE.search(above_threshold).group(2))
+        self.assertEqual(at_threshold_chart["yAxis"]["data"], [])
+        self.assertEqual(above_threshold_chart["yAxis"]["data"], ["六次创建者"])
+        self.assertEqual(above_threshold_chart["series"][0]["data"], [6])
+
     def test_excluded_tracks_lower_numbers_and_keep_manual_ones(self):
         # REMIX/二创以前被算进图表，现在不算了：要把那部分减回去，
         # 而站外人工记账的数字（机器人本来就推不出来）仍然保留。

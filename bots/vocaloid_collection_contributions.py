@@ -42,6 +42,8 @@ The bot can:
   creator annotation and wins outright; other entries use the creator of the
   local page. Some chart numbers come from bookkeeping outside the wiki and
   cannot be derived at all, so a cell is normally only raised, never lowered.
+  New chart rows are added only above five computed creations; manually removing
+  a row therefore keeps a five-or-fewer row from being added back.
   Two exceptions subtract from a cell: the REMIX/二创 songs, and the credits
   earlier runs gave to the author of an *imported* revision (that author is
   either the source article's last editor, see ``page_creator``, or the mover
@@ -123,6 +125,7 @@ CREATOR_CACHE = DATA_DIR / "vocaloid_collection_creators.pickle"
 MOEGIRL_CACHE = DATA_DIR / "vocaloid_collection_moegirl.pickle"
 DERIVATIVE_CACHE = DATA_DIR / "vocaloid_collection_derivatives.pickle"
 CHART_SERIES_PREFIX = "ボカコレ"
+CHART_NEW_USER_THRESHOLD = 5
 
 # 萌娘百科（voca.wiki 的条目大多从那边来，创建者对不上时拿它当参照）。它不在
 # pywikibot 的 family 里，直接走 HTTP API（stdlib，不引新依赖）。
@@ -1305,8 +1308,10 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
         kept[label] = {name: value for name, value in
                        zip(base_axis, series.get("data", [])) if value}
 
-    users = [u for u in yaxis if totals[u] >= 5 or any(u in kept.get(l, {}) for l in labels)]
-    users += [u for u in totals if totals[u] >= 5 and u not in users]
+    users = [u for u in yaxis if totals[u] > CHART_NEW_USER_THRESHOLD
+             or any(u in kept.get(l, {}) for l in labels)]
+    users += [u for u in totals
+              if totals[u] > CHART_NEW_USER_THRESHOLD and u not in users]
 
     def previous_of(label: str, season: str, user: str) -> int:
         """上一版图表里的数字，扣掉机器人不再计入的、加上改归到这一格的。"""

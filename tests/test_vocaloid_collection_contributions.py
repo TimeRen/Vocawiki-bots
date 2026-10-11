@@ -426,6 +426,37 @@ class TestRenderChart(TestCase):
         self.assertEqual(above_threshold_chart["yAxis"]["data"], ["六次创建者"])
         self.assertEqual(above_threshold_chart["series"][0]["data"], [6])
 
+    def test_manual_count_adjustment_survives_subsequent_runs(self):
+        chart = {
+            "legend": {"data": ["ボカコレ2025冬"]},
+            "yAxis": {"data": ["Zhoumou/周某不是轴某"]},
+            "series": [
+                {"name": "ボカコレ2025冬", "type": "bar",
+                 "itemStyle": {"color": "#111111"}, "data": [42]},
+            ],
+        }
+        text = ("{{Echart|data=<nowiki>"
+                + json.dumps(chart, ensure_ascii=False) + "</nowiki>}}")
+        sections = [Section("2025冬", "TOP100", [])]
+        legend = Legend(
+            colour_to_name={"#94F0FF": "周某不是轴某"},
+            name_to_colour={"周某不是轴某": "#94F0FF"},
+            alias_to_name={"zhoumou": "周某不是轴某",
+                           "周某不是轴某": "周某不是轴某"})
+        counts = {"2025冬": {"#94F0FF": 42}}
+
+        corrected, _ = contributions.render_chart(
+            text, sections, legend, counts)
+        repeated, _ = contributions.render_chart(
+            corrected, sections, legend, counts)
+
+        corrected_chart = json.loads(
+            contributions.CHART_RE.search(corrected).group(2))
+        repeated_chart = json.loads(
+            contributions.CHART_RE.search(repeated).group(2))
+        self.assertEqual(corrected_chart["series"][0]["data"], [41])
+        self.assertEqual(repeated_chart["series"][0]["data"], [41])
+
     def test_excluded_tracks_lower_numbers_and_keep_manual_ones(self):
         # REMIX/二创以前被算进图表，现在不算了：要把那部分减回去，
         # 而站外人工记账的数字（机器人本来就推不出来）仍然保留。

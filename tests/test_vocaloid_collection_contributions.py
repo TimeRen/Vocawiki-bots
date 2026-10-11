@@ -426,7 +426,7 @@ class TestRenderChart(TestCase):
         self.assertEqual(above_threshold_chart["yAxis"]["data"], ["六次创建者"])
         self.assertEqual(above_threshold_chart["series"][0]["data"], [6])
 
-    def test_manual_count_adjustment_survives_subsequent_runs(self):
+    def test_2025_winter_count_recomputes_to_42(self):
         chart = {
             "legend": {"data": ["ボカコレ2025冬"]},
             "yAxis": {"data": ["Zhoumou/周某不是轴某"]},
@@ -454,8 +454,8 @@ class TestRenderChart(TestCase):
             contributions.CHART_RE.search(corrected).group(2))
         repeated_chart = json.loads(
             contributions.CHART_RE.search(repeated).group(2))
-        self.assertEqual(corrected_chart["series"][0]["data"], [41])
-        self.assertEqual(repeated_chart["series"][0]["data"], [41])
+        self.assertEqual(corrected_chart["series"][0]["data"], [42])
+        self.assertEqual(repeated_chart["series"][0]["data"], [42])
 
     def test_summer_count_adjustment_survives_subsequent_runs(self):
         chart = {
@@ -526,6 +526,37 @@ class TestRenderChart(TestCase):
                           for series in corrected_chart["series"]], [0, 1, 3])
         self.assertEqual([series["data"][0]
                           for series in repeated_chart["series"]], [0, 1, 3])
+
+    def test_corrected_2022_spring_entry_lowers_only_the_retained_value(self):
+        chart = {
+            "legend": {"data": ["ボカコレ2022春"]},
+            "yAxis": {"data": ["Zhoumou/周某不是轴某"]},
+            "series": [
+                {"name": "ボカコレ2022春", "type": "bar",
+                 "itemStyle": {"color": "#111111"}, "data": [15]},
+            ],
+        }
+        text = ("{{Echart|data=<nowiki>"
+                + json.dumps(chart, ensure_ascii=False) + "</nowiki>}}")
+        sections = [Section("2022春", "TOP100", [])]
+        legend = Legend(
+            colour_to_name={"#94F0FF": "周某不是轴某"},
+            name_to_colour={"周某不是轴某": "#94F0FF"},
+            alias_to_name={"zhoumou": "周某不是轴某",
+                           "周某不是轴某": "周某不是轴某"})
+        counts = {"2022春": {"#94F0FF": 14}}
+
+        corrected, _ = contributions.render_chart(
+            text, sections, legend, counts)
+        repeated, _ = contributions.render_chart(
+            corrected, sections, legend, counts)
+
+        corrected_chart = json.loads(
+            contributions.CHART_RE.search(corrected).group(2))
+        repeated_chart = json.loads(
+            contributions.CHART_RE.search(repeated).group(2))
+        self.assertEqual(corrected_chart["series"][0]["data"], [14])
+        self.assertEqual(repeated_chart["series"][0]["data"], [14])
 
     def test_excluded_tracks_lower_numbers_and_keep_manual_ones(self):
         # REMIX/二创以前被算进图表，现在不算了：要把那部分减回去，

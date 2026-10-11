@@ -46,7 +46,8 @@ The bot can:
   a row therefore keeps a five-or-fewer row from being added back.
   Explicit corrections in ``CHART_COUNT_ADJUSTMENTS`` are applied to both the
   computed and retained chart values, so later runs do not undo a manual
-  correction.
+  correction. ``CHART_HISTORY_ADJUSTMENTS`` only corrects the retained value
+  when source data has since been fixed and the computed value is now accurate.
   Two exceptions subtract from a cell: the REMIX/二创 songs, and the credits
   earlier runs gave to the author of an *imported* revision (that author is
   either the source article's last editor, see ``page_creator``, or the mover
@@ -134,8 +135,10 @@ CHART_NEW_USER_THRESHOLD = 5
 CHART_COUNT_ADJUSTMENTS = {
     "2021春": {"#926CC6": -1},  # 奈汐子：没有找到该季对应条目
     "2025夏": {"#94F0FF": -1},  # Zhoumou：修订 260461 将 17 改为 16
-    "2025冬": {"#94F0FF": -1},  # Zhoumou：修订 260461 将 42 改为 41
 }
+# The 2022春 entry was corrected from Zhoumou's colored UTAU song 言灵 to
+# the uncolored VOCALOID entry 言灵(PiroP), so the computed count is now right.
+CHART_HISTORY_ADJUSTMENTS = {"2022春": {"#94F0FF": -1}}
 
 # 萌娘百科（voca.wiki 的条目大多从那边来，创建者对不上时拿它当参照）。它不在
 # pywikibot 的 family 里，直接走 HTTP API（stdlib，不引新依赖）。
@@ -1283,6 +1286,11 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
             after = max(0, before + adjustment)
             per_season.setdefault(season, {})[user] = after
             totals[user] += after - before
+    history_adjustments: Dict[str, Dict[str, int]] = defaultdict(dict)
+    for season, identities in CHART_HISTORY_ADJUSTMENTS.items():
+        for identity, adjustment in identities.items():
+            user = colours.get(legend.identity(identity), legend.display(identity))
+            history_adjustments[season][user] = adjustment
 
     # 排除曲目（REMIX/二创）以前也算进过图表，现在不算了：先按同一套归属规则
     # 算出一个减数，才能把以前多给的数字改回来，而不是被「只升不降」护住。
@@ -1339,6 +1347,7 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
         """上一版图表里的数字，扣掉机器人不再计入的、加上改归到这一格的。"""
         previous = kept.get(label, {}).get(user, 0)
         return max(0, previous + adjustments.get(season, {}).get(user, 0)
+                   + history_adjustments.get(season, {}).get(user, 0)
                    - removed.get(season, {}).get(user, 0)
                    + added.get(season, {}).get(user, 0))
 

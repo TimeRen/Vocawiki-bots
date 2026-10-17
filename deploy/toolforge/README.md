@@ -122,6 +122,7 @@ toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 | --- | --- | --- |
 | `hourly` | schedule（每小时 :17） | 单次完整维护榜单、计数、颜色、报告和统计图；不常驻轮询 |
 | `lyrics-plan` | schedule（每天 04:23 UTC） | 比对 AtWiki 歌词页与 voca.wiki 条目，维护「VOCALOID中文歌词wiki补完计划」清单（见第 9 节） |
+| `contributions` | schedule（每天 04:53 UTC） | 维护贡献页 [[User:人间百态/贡献]]：补新条目、去掉重定向 / 消歧义页，歌姬模板只留主模板（见第 10 节） |
 
 GitHub Actions 也会在每小时 :47 跑一次完整维护，作为错时的备份。完整扫描而不是
 依赖 `recentchanges`，因此即使条目尚未出现在当前列表中，也会由下一次定时任务发现。
@@ -296,6 +297,28 @@ cat ~/lyrics.out
 判定 30 天后重核。**第一次跑**要把还没对应的几千个 AtWiki 页面逐个抓一遍，慢几分钟；
 之后每轮只补新页面。抓不到的页面不会写进判定缓存，下一轮接着试（宁可多留一条，
 也不会因为一次网络失败把页面从清单里删掉）。
+
+## 10. 贡献页（每天）
+
+`bots/user_contributions_navbox.py` 维护 [[User:人间百态/贡献]]（[[User:人间百态]]
+上那个导航框）。`jobs.yaml` 里的 `contributions` 每天 04:53（UTC）跑一次：
+
+```bash
+toolforge jobs run contributions --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-contributions.sh --dry-run"
+cat ~/contributions.out
+```
+
+规则：
+
+* **Vocawiki时期**：用 `list=usercontribs&ucshow=new` 取这个账号建过的页面，注释以
+  「由 Vocawiki条目辅助工具 创建」开头（不含「同名条目消歧义」）的就是歌曲条目，
+  已经在清单里的按标题跳过，新的接在末尾、每组 10 条重新编号。
+  清单里已有的条目也复核一遍：**重定向**改写成它的目标页（目标已在清单里就直接去掉），
+  **消歧义页**（`Category:消歧义页面` 或挂了 `{{Disambig}}`）直接去掉。
+* **歌姬模板**：只取 `…创建：歌姬模板` 的**主模板**——`Template:IA/2026`、`Template:歌爱雪/2011`
+  这类按年份拆开的子页面归到 `Template:IA`、`Template:歌爱雪`，子模板本身不列。
+* 萌百时期、列表、职人模板等其余分组原样不动；内容没变就不保存。
 
 ## 更新代码
 

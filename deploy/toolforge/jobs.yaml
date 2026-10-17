@@ -24,11 +24,12 @@
   mem: 512Mi
   emails: onfailure
 
-# 每天维护贡献页 [[User:人间百态/贡献]]：补新条目、去掉重定向 / 消歧义页，
+# 每小时维护贡献页 [[User:人间百态/贡献]]：补新条目、去掉重定向 / 消歧义页，
 # 歌姬模板只留主模板（不列 Template:IA/2026 这类子模板）。
+# 与 hourly（:17）、GitHub Actions（:47）错开。
 - name: contributions
   image: python3.13
   command: ./Vocawiki-bots/deploy/toolforge/run-contributions.sh
-  schedule: "53 4 * * *"
+  schedule: "53 * * * *"
   mem: 512Mi
   emails: onfailure

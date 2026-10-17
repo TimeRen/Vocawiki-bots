@@ -480,6 +480,24 @@ toolforge jobs run dryrun --image python3.13 --wait \
 cat ~/dryrun.err
 ```
 
+### job 报 `exitcode 126`（Status: Failed for 3s）
+
+和 `127` 不同：文件找到了，但**没有可执行位**（`-rw-r--r--` 而不是 `-rwxr-xr-x`），
+shell 报 `Permission denied`。新加的 entry 脚本如果在 Windows 上提交，很容易漏掉
+可执行位。仓库里修好并推上去之后，在工具账号里 `git pull` 就会带上权限：
+
+```bash
+git update-index --chmod=+x deploy/toolforge/run-once.sh   # 在本地仓库里做
+git commit -m "Make the entry scripts executable" && git push
+```
+
+临时救急也可以直接在工具账号里 `chmod +x ~/Vocawiki-bots/deploy/toolforge/*.sh`。
+核对记录下来的权限：
+
+```bash
+git ls-files -s deploy/toolforge/     # 应该是 100755，不是 100644
+```
+
 ### `找不到仓库：/data/project/<tool>/Vocawiki-bots`
 
 脚本找不到代码。要么没 clone，要么 clone 到了个人 home：

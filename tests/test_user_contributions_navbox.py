@@ -115,6 +115,31 @@ class MergeSongsTest(TestCase):
         self.assertEqual(["丙", "丁", "新歌"],
                          merge_songs(["丙", "丁"], ["新歌", "丙"], status, {}))
 
+    def test_new_entries_with_a_disambiguation_suffix_show_the_bare_name(self):
+        """用户 2026-10-17 的手改口径（差异 272789）：带括号的标题只显示括号前的歌名。"""
+        status = {"希望(Dopamine)": {}, "我爱你(Mealerrand)": {}, "Redial(鹤三)": {},
+                  "Front Glass ni chou à la crème": {}}
+        self.assertEqual(
+            ["希望(Dopamine){{!}}希望", "我爱你(Mealerrand){{!}}我爱你",
+             "Redial(鹤三){{!}}Redial", "Front Glass ni chou à la crème"],
+            merge_songs([], ["希望(Dopamine)", "我爱你(Mealerrand)", "Redial(鹤三)",
+                             "Front Glass ni chou à la crème"], status, {}))
+
+    def test_full_width_parentheses_are_handled_too(self):
+        status = {"Redial（鹤三）": {}}
+        self.assertEqual(["Redial（鹤三）{{!}}Redial"],
+                         merge_songs([], ["Redial（鹤三）"], status, {}))
+
+    def test_existing_entries_keep_the_display_they_already_have(self):
+        status = {"希望(Dopamine)": {}, "甲(乙)": {}}
+        self.assertEqual(["希望(Dopamine){{!}}希望", "甲(乙)"],
+                         merge_songs(["希望(Dopamine){{!}}希望", "甲(乙)"], [], status, {}))
+
+    def test_redirect_target_with_a_suffix_shows_the_bare_name(self):
+        status = {"旧名": {"redirect": True}, "Redial(鹤三)": {}}
+        self.assertEqual(["Redial(鹤三){{!}}Redial"],
+                         merge_songs(["旧名"], [], status, {"旧名": "Redial(鹤三)"}))
+
     def test_display_forms_are_kept(self):
         status = {"乙(作者)": {}}
         self.assertEqual(["乙(作者){{!}}乙"],

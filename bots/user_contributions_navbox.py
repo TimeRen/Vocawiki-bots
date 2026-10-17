@@ -11,6 +11,8 @@
 1. **补新条目**：``list=usercontribs&ucshow=new`` 取这个账号建过的页面，
    注释以「由 Vocawiki条目辅助工具 创建」开头（不含「同名条目消歧义」）的就是
    歌曲条目、``…创建：歌姬模板`` 的就是歌姬模板。已经在清单里的按标题跳过。
+   标题末尾带括号消歧后缀的（``希望(Dopamine)``、``Redial(鹤三)``）写成
+   ``希望(Dopamine){{!}}希望``，只显示括号前的歌名（用户 2026-10-17 的手改口径）。
 2. **清掉不该出现的条目**（用户 2026-10-17 要求）：
    * **重定向**改成它的目标页（目标已在清单里就直接去掉）——导航框里不该出现
      指向重定向的链接（``Boo! Boo! Etranger`` 实际是 ``Boo！Boo！Etranger`` 的重定向）；
@@ -54,6 +56,8 @@ CLOSING_INDENT = " " * 5
 
 LINKS_PREFIX = "{{links|n=4|"
 TEMPLATE_LINK_RE = re.compile(r"\{\{tl\|([^}|]+)\}\}")
+# 条目名末尾的括号消歧后缀：`希望(Dopamine)`、`Redial（鹤三）`
+PAREN_SUFFIX_RE = re.compile(r"^(?P<base>.+?)\s*[(（][^()（）]+[)）]$")
 
 
 # ---------------------------------------------------------------- wikitext
@@ -147,6 +151,24 @@ def entry_target(entry: str) -> str:
     return entry.split("{{!}}")[0].strip()
 
 
+def display_entry(title: str) -> str:
+    """新条目写进清单的形式：标题带括号消歧后缀时，只显示括号前的名字。
+
+    用户 2026-10-17 手工改的这几条就是这个口径（差异 272789）：
+    ``希望(Dopamine)`` → ``希望(Dopamine){{!}}希望``、
+    ``我爱你(Mealerrand)`` → ``我爱你(Mealerrand){{!}}我爱你``、
+    ``Redial(鹤三)`` → ``Redial(鹤三){{!}}Redial``。
+    括号是条目名的一部分（同名曲要加作者区分），但导航框里只要看到歌名。
+    """
+    match = PAREN_SUFFIX_RE.match(title or "")
+    if not match:
+        return title
+    base = match.group("base").strip()
+    if not base or "|" in base:
+        return title
+    return f"{title}{{{{!}}}}{base}"
+
+
 def queryable(title: str) -> bool:
     """能不能直接拿标题去查：``Template:…`` 与主名字空间可以，``vcp:…`` 这类跨站链接不行。"""
     return title.startswith("Template:") or ":" not in title
@@ -231,7 +253,7 @@ def merge_songs(existing: Sequence[str], creations: Sequence[str],
             target = redirects.get(title, "")
             if not target or status.get(target, {}).get("disambig"):
                 continue
-            add(target, target)              # 直接写目标页的名字
+            add(display_entry(target), target)   # 直接写目标页的名字
             continue
         add(entry, title)
 
@@ -242,7 +264,7 @@ def merge_songs(existing: Sequence[str], creations: Sequence[str],
         resolution = redirects.get(title, title) if info.get("redirect") else title
         if status.get(resolution, {}).get("disambig"):
             continue
-        add(resolution, resolution)
+        add(display_entry(resolution), resolution)
     return result
 
 

@@ -116,11 +116,12 @@ toolforge jobs delete watcher   # 如果之前部署过旧版常驻 watcher
 toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 ```
 
-会创建或更新 `hourly` 任务：
+会创建或更新 `hourly` 与 `lyrics-plan` 任务：
 
 | job | 类型 | 作用 |
 | --- | --- | --- |
 | `hourly` | schedule（每小时 :17） | 单次完整维护榜单、计数、颜色、报告和统计图；不常驻轮询 |
+| `lyrics-plan` | schedule（每天 04:23 UTC） | 比对 AtWiki 歌词页与 voca.wiki 条目，维护「VOCALOID中文歌词wiki补完计划」清单（见第 9 节） |
 
 GitHub Actions 也会在每小时 :47 跑一次完整维护，作为错时的备份。完整扫描而不是
 依赖 `recentchanges`，因此即使条目尚未出现在当前列表中，也会由下一次定时任务发现。
@@ -260,6 +261,41 @@ call`，连 pywikibot 探测模块参数的 `action=paraminfo` 都挡），而�
 每小时任务也会查镜像：跨站导入的条目要靠它找真正的创建者（见上一节），查到的
 结果同样缓存在 `data/vocaloid_collection_moegirl.pickle`。镜像不是自己的 wiki，
 请保持 `MOEGIRL_DELAY` 这层限速，别把间隔调没。
+
+## 9. VOCALOID中文歌词wiki 补完计划（每天）
+
+`bots/vocaloid_lyrics_completion.py` 维护
+[[User:人间百态/VOCALOID中文歌词wiki补完计划]]：Vocaloid 中文歌词wiki
+（`w.atwiki.jp/vocaloidchly`）里**还没有** voca.wiki 条目的歌曲页面清单。
+`jobs.yaml` 里的 `lyrics-plan` 每天 04:23（UTC）跑一次，也可以手动跑：
+
+```bash
+toolforge jobs run lyrics --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-lyrics-completion.sh --dry-run"
+cat ~/lyrics.out
+```
+
+比对的三条规则：
+
+* **来源**：AtWiki 的「全ページ一覧」（`/list?sort=pagename`，100 条一页，约 86 页）。
+  按页面名排序而不是按更新时间，否则抓取过程中更新的页面会漏页 / 重页。
+* **对应**：voca.wiki 上所有带 `{{VOCALOID Songbox}}` 的条目，比对名有三种——条目
+  标题、条目的全部重定向、Songbox 的 `|歌曲名称=`（`{{lj|…}}` 里的日文名与中文名）。
+  AtWiki 页面名是日文、voca 条目标题多是简中，只比标题会把「千本桜」
+  （条目标题 `千本樱`）、「卑怯戦隊うろたんだー！」（条目标题 `卑怯战队UROTANDA`）
+  当成还没建，其实两者都是条目的重定向。歌名结尾的 `！` / `?` 各站写法不一
+  （AtWiki 写「卑怯戦隊うろたんだー！」，条目的重定向只写「卑怯戦隊うろたんだー」），
+  所以精确比对落空后还会再去掉**结尾**标点比一次；名字中间的标点不动，
+  否则「14」与「1/4」会被并成一条。
+* **消歧义页**：正文去掉链接后几乎没有文字（`pages/667`「Alice in Dreamland」
+  就只有两个链接），或页面上写着「消歧義頁」的，都不是歌曲，不进清单。
+  导航 / 目录 / 站务 / 测试页同理（`歌名な行`、`初音ミク` 这种索引页也靠这条排掉）。
+
+缓存都在 `data/` 下：`..._pages.pickle`（AtWiki 清单）、`..._index.pickle`
+（voca 歌名索引）、`..._verdicts.pickle`（逐页判定）。清单与索引默认 12 小时有效，
+判定 30 天后重核。**第一次跑**要把还没对应的几千个 AtWiki 页面逐个抓一遍，慢几分钟；
+之后每轮只补新页面。抓不到的页面不会写进判定缓存，下一轮接着试（宁可多留一条，
+也不会因为一次网络失败把页面从清单里删掉）。
 
 ## 更新代码
 

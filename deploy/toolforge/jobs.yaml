@@ -13,3 +13,13 @@
   schedule: "17 * * * *"
   mem: 512Mi
   emails: onfailure
+
+# 每天维护「VOCALOID中文歌词wiki补完计划」清单（AtWiki 歌词页 ↔ voca.wiki 条目比对）。
+# 单独一条 job：它要抓上千个 AtWiki 页面、还要读一遍 voca.wiki 的 Songbox，
+# 别和每小时的榜单维护挤在一起。第一次跑最慢（几分钟），之后只补新页面。
+- name: lyrics-plan
+  image: python3.13
+  command: ./Vocawiki-bots/deploy/toolforge/run-lyrics-completion.sh
+  schedule: "23 4 * * *"
+  mem: 512Mi
+  emails: onfailure

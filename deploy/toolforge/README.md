@@ -480,6 +480,23 @@ toolforge jobs run dryrun --image python3.13 --wait \
 cat ~/dryrun.err
 ```
 
+### `Unable to parse yaml file 'deploy/toolforge/jobs.yaml'`
+
+先看是不是**路径**写错了：`toolforge jobs load` 是在**当前目录**找文件，站在工具
+home（`~`）下写 `deploy/toolforge/jobs.yaml` 是找不到的，而它把「文件不存在」也报成
+「无法解析 YAML」。先 `cd ~/Vocawiki-bots`，或者直接写全路径：
+
+```bash
+toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
+```
+
+确认文件在、内容也正常：
+
+```bash
+ls -l ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
+grep -c "^- name:" ~/Vocawiki-bots/deploy/toolforge/jobs.yaml    # 现在应该是 3
+```
+
 ### job 报 `exitcode 126`（Status: Failed for 3s）
 
 和 `127` 不同：文件找到了，但**没有可执行位**（`-rw-r--r--` 而不是 `-rwxr-xr-x`），

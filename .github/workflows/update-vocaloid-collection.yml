@@ -13,6 +13,7 @@ name: Update VOCALOID Collection contribution list
 #   · push 到 main 且改动到机器人脚本或本工作流 -> 立即运行（改完即可验证）
 #   · schedule 每小时运行一次完整维护（UTC 分钟 47）；Toolforge 在分钟 17 运行，
 #     两处错开，且都不依赖 recentchanges 增量列表
+#     目前已按需求暂停（schedule 触发被注释掉），恢复时取消下面 schedule 那几行的注释
 #   · workflow_dispatch -> Actions 页面手动 Run workflow
 #   · repository_dispatch -> 外部心跳（自建 VPS / cron 服务）即时触发：
 #       curl -X POST -H "Authorization: Bearer <PAT>" \
@@ -22,9 +23,10 @@ name: Update VOCALOID Collection contribution list
 # Actions 与 Toolforge 都是单次定时运行，不会常驻轮询。
 
 on:
-  schedule:
-    # 每小时一次；与 Toolforge 的 :17 错开
-    - cron: '47 * * * *'
+  # 定时更新已暂停（恢复时取消注释）
+  # schedule:
+  #   # 每小时一次；与 Toolforge 的 :17 错开
+  #   - cron: '47 * * * *'
   push:
     branches: [main]
     paths:

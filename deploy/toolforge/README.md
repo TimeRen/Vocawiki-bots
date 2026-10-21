@@ -116,7 +116,7 @@ toolforge jobs delete watcher   # 如果之前部署过旧版常驻 watcher
 toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 ```
 
-会创建或更新 `hourly` 与 `lyrics-plan` 任务：
+会创建或更新 `hourly` / `lyrics-plan` / `contributions` 三个任务：
 
 | job | 类型 | 作用 |
 | --- | --- | --- |
@@ -124,9 +124,17 @@ toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 | `lyrics-plan` | schedule（每天 04:23 UTC） | 比对 AtWiki 歌词页与 voca.wiki 条目，维护「VOCALOID中文歌词wiki补完计划」清单（见第 9 节） |
 | `contributions` | schedule（每小时 :53） | 维护贡献页 [[User:人间百态/贡献]]：补新条目、去掉重定向 / 消歧义页，歌姬模板只留主模板（见第 10 节） |
 
-GitHub Actions 也会在每小时 :47 跑一次完整维护，作为错时的备份。完整扫描而不是
-依赖 `recentchanges`，因此即使条目尚未出现在当前列表中，也会由下一次定时任务发现。
-Toolforge 的 `schedule` 任务在两次运行之间显示 `Pending` 是正常的。
+**三个任务都有 GitHub Actions 兜底**（Toolforge 故障时顶上），详见第 11 节：
+
+| Toolforge | GitHub Actions | 错开的方式 |
+| --- | --- | --- |
+| `hourly`（每小时 :17） | `update-vocaloid-collection.yml`（每小时 :47） | 差 30 分钟 |
+| `contributions`（每小时 :53） | `update-contributions.yml`（每小时 :23） | 差 30 分钟 |
+| `lyrics-plan`（每天 04:23） | `update-lyrics-completion.yml`（每天 05:13） | 差 50 分钟 |
+
+GitHub Actions 跑的也是同一份脚本；两处同时在一轮里相遇时靠编辑冲突（`baserevid`）
+让后到的那次放弃，不会互相覆盖。Toolforge 的 `schedule` 任务在两次运行之间显示
+`Pending` 是正常的。
 
 需要临时整体跑一轮时，用一次性 job 即可（`run-once.sh` 就是为它留的）：
 
@@ -321,6 +329,37 @@ cat ~/contributions.out
 * **歌姬模板**：只取 `…创建：歌姬模板` 的**主模板**——`Template:IA/2026`、`Template:歌爱雪/2011`
   这类按年份拆开的子页面归到 `Template:IA`、`Template:歌爱雪`，子模板本身不列。
 * 萌百时期、列表、职人模板等其余分组原样不动；内容没变就不保存。
+
+## 11. GitHub Actions 兜底（Toolforge 故障时）
+
+三个机器人各有一份 GitHub Actions 工作流，跑的是同一份脚本，只是时间错开：
+
+| 工作流 | 对应 Toolforge 任务 | 运行时间 |
+| --- | --- | --- |
+| `.github/workflows/update-vocaloid-collection.yml` | `hourly` | 每小时 :47（Toolforge :17） |
+| `.github/workflows/update-contributions.yml` | `contributions` | 每小时 :23（Toolforge :53） |
+| `.github/workflows/update-lyrics-completion.yml` | `lyrics-plan` | 每天 05:13（Toolforge 04:23） |
+
+**唯一的前置条件**是本仓库 Settings > Secrets and variables > Actions 里的
+`USER_PASSWORD_PY`（三个工作流共用，写法见工作流文件顶部的注释）；`VOCA_USERNAME`
+可选。
+
+Toolforge 挂掉时不用做任何事，他们照常按上表运行。想立刻手动跑一轮：Actions 页面
+选中工作流点 **Run workflow**，或用外部心跳（`repository_dispatch`，事件名分别是
+`update-vocaloid-collection` / `update-contributions` / `update-lyrics-completion`）。
+
+两点差别要知道：
+
+* `update-lyrics-completion.yml` 用 `actions/cache` 保存 `data/`（AtWiki 页面清单、
+  voca 歌名索引、逐页判定），并以 `--max-age 90000`（25 小时）复用：没有这份缓存，
+  每轮都要重新抓几千个 AtWiki 页面。**第一次**跑（缓存还没有）要 40~50 分钟，
+  工作流给了 120 分钟超时。
+* GitHub Actions runner 是公网 IP，AtWiki 可能给它 Cloudflare 挑战。挑战页会被判成
+  「读不到正文」，机器人对读不到的页面一律**保留**（不删清单条目），清单页本身也
+  不会因为抓不到来源而被刷空（`collect_pages` 会直接放弃本轮）——只会少更新，不会写坏。
+
+Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `schedule` 触发器（保留
+`workflow_dispatch`）即可；反之同理。
 
 ## 更新代码
 

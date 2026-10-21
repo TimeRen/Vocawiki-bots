@@ -1,0 +1,86 @@
+name: Update the VOCALOID lyrics wiki completion plan
+
+# 这是 Toolforge 上 `lyrics-plan` 任务的 GitHub Actions 兜底（Toolforge 故障时顶上）。
+#
+# 需要先在本仓库 Settings > Secrets and variables > Actions 里添加：
+#   USER_PASSWORD_PY = user-password.py 的完整内容（写法与 update-vocaloid-collection 相同）：
+#     · 普通密码：      ('Renjian-bot', '账号密码')
+#     · 机器人密码(推荐)：('Renjian-bot', BotPassword('后缀', '机器人密码'))
+#   VOCA_USERNAME（可选）= voca.wiki 上的机器人账号名
+#
+# 与 update-vocaloid-collection 不同的是：这个任务**必须**跨运行保留 data/ 下的缓存
+# （AtWiki 页面清单、voca 歌名索引、逐页判定）。没有缓存时每轮都要把几千个 AtWiki
+# 页面重新抓一遍（约 40 分钟，还容易被 Cloudflare 卡）。所以这里用 actions/cache
+# 恢复上一次运行留下的 data/，并用 --max-age 让清单在 25 小时内直接复用。
+#
+# 触发方式：
+#   · schedule 每天 05:13 UTC；Toolforge 的 lyrics-plan 在 04:23 UTC，两处错开
+#   · push 到 main 且改动到脚本或本工作流 -> 立即运行（改完即可验证）
+#   · workflow_dispatch -> Actions 页面手动 Run workflow
+#   · repository_dispatch -> 外部心跳即时触发：
+#       curl -X POST -H "Authorization: ******" \
+#            -H "Accept: application/vnd.github+json" \
+#            https://api.github.com/repos/TimeRen/Vocawiki-bots/dispatches \
+#            -d '{"event_type":"update-lyrics-completion"}'
+
+on:
+  schedule:
+    - cron: '13 5 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'bots/vocaloid_lyrics_completion.py'
+      - '.github/workflows/update-lyrics-completion.yml'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [update-lyrics-completion]
+
+concurrency:
+  group: lyrics-completion
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    # 第一次（没有缓存）要把几千个 AtWiki 页面抓一遍，约 40~50 分钟；给足余量
+    timeout-minutes: 120
+    env:
+      PYTHONIOENCODING: utf-8
+      VOCA_USERNAME: ${{ secrets.VOCA_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pywikibot
+        run: pip install --disable-pip-version-check pywikibot
+
+      - name: Write user-password.py
+        env:
+          USER_PASSWORD_PY: ${{ secrets.USER_PASSWORD_PY }}
+        run: |
+          if [ -z "$USER_PASSWORD_PY" ]; then
+            echo "::error::请先在仓库 Secrets 中配置 USER_PASSWORD_PY"
+            exit 1
+          fi
+          printf '%s\n' "$USER_PASSWORD_PY" > user-password.py
+          chmod 600 user-password.py
+
+      - name: Restore the AtWiki / voca.wiki caches
+        # 丢了这份缓存也不会写错页面（抓不到来源时机器人直接放弃本轮），只是慢
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: voca-lyrics-cache-${{ github.run_id }}
+          restore-keys: voca-lyrics-cache-
+
+      - name: Update the completion plan
+        run: |
+          # --max-age 25 小时：每天跑一次时直接复用上一次的页面清单与歌名索引，
+          # 只重新比对；Toolforge 上仍是 12 小时的默认值（它每小时都更新缓存文件）。
+          python bots/vocaloid_lyrics_completion.py --write --max-age 90000

@@ -9,9 +9,9 @@
 
 * **VOCALOID中文歌词wiki（AtWiki）**：拿页面名去比「全ページ一覧」的 8553 个页面名
   （名字完全一致才算），再读页面里的 ``翻譯：某人``。这是最可靠的来源。
-* **网易云音乐**：`/api/search/get` 搜日文名 / 中文名，标题对上才用；
-  `/api/song/lyric` 里有 ``tlyric``（确实有译文）才记，译者取 ``transUser``
-  （其次 ``lyricUser``）。
+* **网易云音乐**：`/api/search/get` 搜日文名 / 中文名，标题对上**且** P主 出现在
+  歌手或专辑名里才用（只有标题对上不够：同名不同曲太多）；`/api/song/lyric` 里有
+  ``tlyric``（确实有译文）才记，译者取 ``transUser``（其次 ``lyricUser``）。
 * **B站**：先看 voca 条目 Songbox 里的 ``bb_id``（本家投稿），再用站内搜索找
   「歌名 翻译」的视频；对候选视频读简介、前几页评论、弹幕：
   简介 / 评论 / 弹幕里出现 `翻译：X` / `翻譯：X` / `译：X` 才记，并记下是谁说的。
@@ -22,6 +22,11 @@
 
 「标题对上」用 ``title_key()``（全半角、大小写、空白、``{{lj|…}}``、括号消歧后缀
 都归一化）。查不到就留空——宁可少填，也不要把别人的翻译安到另一首歌上。
+
+**维护自己的写法**：机器人只改两种格子——空的，和自己上轮写的（内容与缓存里的
+结论一致，或整格都是 ``[链接 说明(by. 译者)]`` 这种它自己的格式）。这些格子会随
+新结论更新 / 清空；别人写过的格子一个字都不碰。判定规则变化时把 ``CACHE_VERSION``
+加一，旧结论自动作废、重查。
 
 结果（含「查过、没有」）缓存在 ``data/vocaloid_collection_translations.pickle``，
 默认 14 天后重新核对；AtWiki 页面清单缓存 7 天。
@@ -58,6 +63,7 @@ ATWIKI_CACHE = DATA_DIR / "vocaloid_collection_translations_atwiki.pickle"
 
 CACHE_TTL = 14 * 24 * 3600          # 一首歌多久重新核对一次
 ATWIKI_TTL = 7 * 24 * 3600          # AtWiki 页面清单多久重建一次
+CACHE_VERSION = 2                   # 判定规则变了就 +1，旧缓存自动作废
 REQUEST_TIMEOUT = 25
 MAX_SOURCES = 3
 
@@ -134,6 +140,21 @@ def title_key(text: str) -> str:
     if match:
         text = match.group("base")
     return text.lower()
+
+
+def person_key(name: str) -> str:
+    """比对用的 P主 / 歌手名：和 ``title_key()`` 同一套归一化，另去掉 ``{{…|名字}}`` 外壳。
+
+    ``{{lj|かぁ君}}``、``EO({{lj|エオ}})``、``buzzG`` 都要能和对得上。
+    """
+    text = str(name or "")
+    for _ in range(3):                  # {{lj|甲}} → 甲
+        replaced = re.sub(r"\{\{[^{}]*\|([^{}]*)\}\}",
+                          lambda m: m.group(1), text)
+        if replaced == text:
+            break
+        text = replaced
+    return title_key(text)
 
 
 def link_target(cell: str) -> str:
@@ -343,8 +364,39 @@ def render_source(url: str, label: str, translator: str = "") -> str:
     return text + "]"
 
 
+# 机器人写进格子的来源就是这些写法；用它来认出「这格是自己上轮填的」
+SOURCE_LABELS = ("网易云音乐", "VOCALOID中文歌词wiki", "B站视频简介", "B站评论区",
+                 "B站弹幕", "B站笔记", "巴哈姆特")
+BOT_SOURCE_RE = re.compile(
+    r"^\[https?://\S+ (?:%s)(?:\(by\. [^\]]{1,40}\))?\]$"
+    % "|".join(re.escape(label) for label in SOURCE_LABELS))
+
+
+def is_bot_source(value: str) -> bool:
+    """这一格是不是机器人写的（每一条都是 ``[链接 说明(by. 译者)]`` 这种格式）。"""
+    items = [item.strip() for item in str(value or "").split("<br/>") if item.strip()]
+    return bool(items) and all(BOT_SOURCE_RE.match(item) for item in items)
+
+
 def join_sources(sources: Sequence[str]) -> str:
     return "<br/>".join(sources)
+
+
+def cell_state(existing: str, cached: Optional[Dict]) -> str:
+    """这一格归谁：``empty``（还没填）/ ``ours``（机器人填的）/ ``skip``（别人写的）。
+
+    判据：内容与缓存里的结论一致，或者整格都是机器人那套 ``[链接 说明(by. 译者)]``
+    格式。后者让机器人在缓存丢失（换了运行环境）时也认得出自己写过的格子，
+    这样才能把查错的来源改掉 —— 只写不认的机器人会把错数据永久留在页面上。
+    别人写的内容一律不动。
+    """
+    text = str(existing or "").strip()
+    if not text:
+        return "empty"
+    previous = join_sources((cached or {}).get("sources") or [])
+    if previous and text == previous:
+        return "ours"
+    return "ours" if is_bot_source(text) else "skip"
 
 
 # ---------------------------------------------------------------- 网络
@@ -418,6 +470,12 @@ def is_fresh(stamp: object, ttl: float) -> bool:
     except (TypeError, ValueError):
         return False
     return 0 <= age < ttl
+
+
+def is_current(entry: Optional[Dict], ttl: float) -> bool:
+    """这条缓存还能直接用（同版本、没过期）。规则一改就靠版本号整体作废。"""
+    return (isinstance(entry, dict) and entry.get("v") == CACHE_VERSION
+            and is_fresh(entry.get("at"), ttl))
 
 
 # ---------------------------------------------------------------- AtWiki
@@ -494,17 +552,43 @@ def netease_lyrics(fetcher: Fetcher, song_id: str) -> Optional[dict]:
     return fetcher.json(NETEASE_LYRIC.format(id=song_id))
 
 
+def netease_titles(candidate: dict) -> set:
+    """搜索结果里的所有歌名写法（本名 / alias / transNames）。"""
+    names = {title_key(candidate.get("name"))}
+    for alias in candidate.get("alias") or []:
+        names.add(title_key(alias))
+    for trans in (candidate.get("transNames") or []):
+        names.add(title_key(trans))
+    names.discard("")
+    return names
+
+
+def netease_credits(candidate: dict) -> set:
+    """搜索结果里的歌手名与专辑名（用来核对是不是同一首歌）。"""
+    credits = {person_key(artist.get("name"))
+               for artist in candidate.get("artists") or []}
+    credits.add(person_key((candidate.get("album") or {}).get("name")))
+    credits.discard("")
+    return credits
+
+
 def lookup_netease(fetcher: Fetcher, song: Song) -> List[str]:
+    """歌名对上**且** P主 出现在歌手 / 专辑里才记。
+
+    只有歌名对上是不够的：``月之花`` 能搜到 Daoko 的 ``月の花``，``言灵`` 能搜到
+    V.W.P 的 ``言霊``，都是同名不同曲。网易云上 Vocaloid 曲一般由 P主 自己上传，
+    所以「歌手或专辑里有 P主」是个便宜又准的判据；查不到 P主 就干脆不记。
+    """
     wanted = {title_key(song.title_target), title_key(song.title_display)}
     wanted.discard("")
+    producer = person_key(song.producer)
+    if not producer:
+        return []
     for keyword in (song.title_target, song.title_display):
         for candidate in netease_search(fetcher, keyword):
-            names = {title_key(candidate.get("name"))}
-            for alias in candidate.get("alias") or []:
-                names.add(title_key(alias))
-            for trans in (candidate.get("transNames") or []):
-                names.add(title_key(trans))
-            if not (names & wanted):
+            if not (netease_titles(candidate) & wanted):
+                continue
+            if producer not in netease_credits(candidate):
                 continue
             payload = netease_lyrics(fetcher, str(candidate.get("id")))
             if not payload or not (payload.get("tlyric") or {}).get("lyric"):
@@ -813,38 +897,43 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     songs = songs_from(original)
 
     rows, _ = parse_rows(original)
-    empty_sources = {(row.line, side) for row in rows for side in range(row.sides)
-                     if not row.text(side, COLUMNS.index("source")).strip()
-                     and row.text(side, COLUMNS.index("title")).strip()}
+    current: Dict[Tuple[int, int], str] = {}
+    for row in rows:
+        for side in range(row.sides):
+            if row.text(side, COLUMNS.index("title")).strip():
+                cell = (row.line, side)
+                current[cell] = row.text(side, COLUMNS.index("source")).strip()
     cache = {} if refresh else load_cache()
     index = atwiki_page_index(fetcher)
 
     fills: Dict[Tuple[int, int], str] = {}
     queried = 0
     for song in songs:
-        if (song.line, song.side) not in empty_sources:
-            continue                    # 已经有内容：不覆盖别人的编辑
+        cell = (song.line, song.side)
         cached = cache.get(song.key)
-        if cached and is_fresh(cached.get("at"), ttl) and not refresh:
-            if cached.get("sources"):
-                fills[(song.line, song.side)] = join_sources(cached["sources"])
-            continue
+        existing = current.get(cell, "")
+        if cell_state(existing, cached) == "skip":
+            continue                    # 别人写的内容：一个字都不动
+        if is_current(cached, ttl) and not refresh:
+            continue                    # 缓存里已有结论：上一轮就写进页面了
         if limit and queried >= limit:
             break
         queried += 1
         sources = collect_sources(fetcher, song, index, site)
-        cache[song.key] = {"at": time.time(), "sources": sources,
-                           "title": song.title_display}
+        cache[song.key] = {"at": time.time(), "v": CACHE_VERSION,
+                           "sources": sources, "title": song.title_display}
+        value = join_sources(sources)
+        if value != existing:
+            fills[cell] = value         # 新内容 / 更新 / 清掉自己以前写的
         if sources:
-            fills[(song.line, song.side)] = join_sources(sources)
             pywikibot.output(f"  {song.rank or '-'} {song.title_display}："
                              f"{len(sources)} 个来源")
         else:
             pywikibot.output(f"  {song.rank or '-'} {song.title_display}：没找到")
 
     save_cache(cache)
-    pywikibot.output(f"待补 {len(empty_sources)} 行，本轮查了 {queried} 首，"
-                     f"填上 {len(fills)} 行")
+    pywikibot.output(f"待查 {len(current)} 行、本轮查了 {queried} 首、"
+                     f"改动 {len(fills)} 行")
     text = apply_fills(original, fills)
     if text == original:
         pywikibot.output("页面无需更新。")

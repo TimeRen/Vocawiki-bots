@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """bots/vocaloid_collection_translations.py 的测试（不联网）。"""
+import time
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -181,6 +182,48 @@ class CreditNameTest(TestCase):
         self.assertEqual("", credit_name(text))
 
 
+class CellStateTest(TestCase):
+    """机器人只维护自己写过的格子：内容与缓存里的结论一致才算「自己的」。"""
+
+    def test_empty_cell(self):
+        self.assertEqual("empty", tr.cell_state("", {"sources": ["[u 甲]"]}))
+        self.assertEqual("empty", tr.cell_state(" ", None))
+
+    def test_our_own_value(self):
+        self.assertEqual("ours", tr.cell_state("[u 甲]<br/>[u 乙]",
+                                               {"sources": ["[u 甲]", "[u 乙]"]}))
+
+    def test_edited_by_someone_else(self):
+        self.assertEqual("skip", tr.cell_state("网易云", {"sources": ["[u 甲]"]}))
+        self.assertEqual("skip", tr.cell_state("网易云", None))
+
+    def test_bot_format_is_recognized_without_a_cache(self):
+        """缓存丢了（换了运行环境）也要认得出自己写的格子，否则错数据永远改不掉。"""
+        value = ("[https://music.163.com/#/song?id=1 网易云音乐(by. 甲)]<br/>"
+                 "[https://www.bilibili.com/video/BV1 B站视频简介]")
+        self.assertEqual("ours", tr.cell_state(value, None))
+        self.assertEqual("ours", tr.cell_state("[https://a.example 巴哈姆特]", {}))
+        self.assertTrue(tr.is_bot_source(value))
+
+    def test_other_formats_are_not_ours(self):
+        self.assertFalse(tr.is_bot_source("[[月之花]]"))
+        self.assertFalse(tr.is_bot_source("[https://music.163.com/#/song?id=1]"))
+        self.assertFalse(tr.is_bot_source("[https://a.example 我自己写的]"))
+        self.assertFalse(tr.is_bot_source(""))
+
+    def test_our_sources_were_dropped(self):
+        """机器人上轮查出过来源、这轮结论变成空 —— 那格仍是自己的，可以清空。"""
+        self.assertEqual("skip", tr.cell_state("[u 甲]", {"sources": []}))
+        self.assertEqual("ours", tr.cell_state("[u 甲]", {"sources": ["[u 甲]"]}))
+
+    def test_cache_version_gate(self):
+        self.assertTrue(tr.is_current({"at": time.time(), "v": tr.CACHE_VERSION}, 60))
+        self.assertFalse(tr.is_current({"at": time.time(), "v": 0}, 60))
+        self.assertFalse(tr.is_current({"at": time.time()}, 60))
+        self.assertFalse(tr.is_current({"at": time.time(), "v": tr.CACHE_VERSION}, 0))
+        self.assertFalse(tr.is_current(None, 60))
+
+
 class RenderSourceTest(TestCase):
     def test_with_and_without_translator(self):
         self.assertEqual("[https://a.example 网易云音乐(by. 白夜)]",
@@ -251,7 +294,8 @@ class LookupTest(TestCase):
         lyric_url = tr.NETEASE_LYRIC.format(id="2386546")
         fetcher = self.FakeFetcher(
             payloads={search_url: {"result": {"songs": [
-                {"id": 2386546, "name": "千本桜", "alias": [], "transNames": []}]}},
+                {"id": 2386546, "name": "千本桜", "alias": [], "transNames": [],
+                 "artists": [{"name": "黒うさP"}]}]}},
                 lyric_url: {"tlyric": {"lyric": "[00:01]千本樱"},
                             "transUser": {"nickname": "白夜"}}})
         self.assertEqual(["[https://music.163.com/#/song?id=2386546 网易云音乐(by. 白夜)]"],
@@ -263,7 +307,8 @@ class LookupTest(TestCase):
         lyric_url = tr.NETEASE_LYRIC.format(id="2386546")
         fetcher = self.FakeFetcher(
             payloads={search_url: {"result": {"songs": [
-                {"id": 2386546, "name": "千本桜", "alias": [], "transNames": []}]}},
+                {"id": 2386546, "name": "千本桜", "alias": [], "transNames": [],
+                 "artists": [{"name": "黒うさP"}]}]}},
                 lyric_url: {"tlyric": {"lyric": ""}}})
         self.assertEqual([], tr.lookup_netease(fetcher, song))
 
@@ -271,7 +316,28 @@ class LookupTest(TestCase):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
         search_url = tr.NETEASE_SEARCH.format(kw="%E5%8D%83%E6%9C%AC%E6%A1%9C")
         fetcher = self.FakeFetcher(payloads={search_url: {"result": {"songs": [
-            {"id": 1, "name": "别的歌", "alias": [], "transNames": []}]}}})
+            {"id": 1, "name": "别的歌", "alias": [], "transNames": [],
+             "artists": [{"name": "黒うさP"}]}]}}})
+        self.assertEqual([], tr.lookup_netease(fetcher, song))
+
+    def test_netease_needs_the_producer_in_the_credits(self):
+        """同名不同曲：``月之花`` 能搜到 Daoko 的 ``月の花``，歌手/专辑里都没有 P主 就不算。"""
+        song = Song(0, 0, "18", "月之花", "月之花", "R Sound Design")
+        search_url = tr.NETEASE_SEARCH.format(kw="%E6%9C%88%E4%B9%8B%E8%8A%B1")
+        lyric_url = tr.NETEASE_LYRIC.format(id="2046697266")
+        fetcher = self.FakeFetcher(
+            payloads={search_url: {"result": {"songs": [
+                {"id": 2046697266, "name": "月の花", "alias": [], "transNames": ["月之花"],
+                 "artists": [{"name": "Daoko"}], "album": {"name": "月の花"}}]}},
+                lyric_url: {"tlyric": {"lyric": "[00:01]月之花"}}})
+        self.assertEqual([], tr.lookup_netease(fetcher, song))
+
+    def test_netease_song_without_producer_cell_is_skipped(self):
+        song = Song(0, 0, "18", "月之花", "月之花", "")
+        search_url = tr.NETEASE_SEARCH.format(kw="%E6%9C%88%E4%B9%8B%E8%8A%B1")
+        fetcher = self.FakeFetcher(payloads={search_url: {"result": {"songs": [
+            {"id": 1, "name": "月之花", "alias": [], "transNames": [],
+             "artists": [{"name": "某人"}]}]}}})
         self.assertEqual([], tr.lookup_netease(fetcher, song))
 
 

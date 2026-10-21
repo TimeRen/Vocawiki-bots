@@ -9,9 +9,10 @@ name: Update the VOCALOID lyrics wiki completion plan
 #   VOCA_USERNAME（可选）= voca.wiki 上的机器人账号名
 #
 # 与 update-vocaloid-collection 不同的是：这个任务**必须**跨运行保留 data/ 下的缓存
-# （AtWiki 页面清单、voca 歌名索引、逐页判定）。没有缓存时每轮都要把几千个 AtWiki
-# 页面重新抓一遍（约 40 分钟，还容易被 Cloudflare 卡）。所以这里用 actions/cache
-# 恢复上一次运行留下的 data/，并用 --max-age 让清单在 25 小时内直接复用。
+# （AtWiki 页面清单、voca 歌名索引、逐页判定）。没有缓存时要把几千个 AtWiki 页面
+# 重新抓一遍；用 actions/cache 恢复上一次运行留下的 data/，并用 --max-age 让清单在
+# 25 小时内直接复用。实测（2026-10-21，冷缓存）：清单 23 秒、歌名索引 2.5 分钟、
+# 逐页判定 3.4 分钟，整轮约 6.5 分钟。
 #
 # 触发方式：
 #   · schedule 每天 05:13 UTC；Toolforge 的 lyrics-plan 在 04:23 UTC，两处错开
@@ -45,8 +46,9 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-    # 第一次（没有缓存）要把几千个 AtWiki 页面抓一遍，约 40~50 分钟；给足余量
-    timeout-minutes: 120
+    # 冷缓存一轮约 7 分钟（实测 2026-10-21：清单 23s、索引 2.5min、判定 3.4min）；
+    # 网络变慢或首次判定大量页面时给足余量
+    timeout-minutes: 60
     env:
       PYTHONIOENCODING: utf-8
       VOCA_USERNAME: ${{ secrets.VOCA_USERNAME }}

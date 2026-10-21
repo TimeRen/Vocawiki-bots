@@ -378,6 +378,11 @@ def is_bot_source(value: str) -> bool:
     return bool(items) and all(BOT_SOURCE_RE.match(item) for item in items)
 
 
+def source_count(value: str) -> int:
+    """格子里有几条来源（``<br/>`` 分隔）。"""
+    return len([item for item in str(value or "").split("<br/>") if item.strip()])
+
+
 def join_sources(sources: Sequence[str]) -> str:
     return "<br/>".join(sources)
 
@@ -915,7 +920,12 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         if cell_state(existing, cached) == "skip":
             continue                    # 别人写的内容：一个字都不动
         if is_current(cached, ttl) and not refresh:
-            continue                    # 缓存里已有结论：上一轮就写进页面了
+            # 缓存里有结论，但页面可能还没跟上（上次保存失败 / 另一台机器写的）：
+            # 只在结论更全时补写，避免两边来回覆盖。
+            value = join_sources(cached.get("sources") or [])
+            if value and source_count(value) > source_count(existing):
+                fills[cell] = value
+            continue
         if limit and queried >= limit:
             break
         queried += 1

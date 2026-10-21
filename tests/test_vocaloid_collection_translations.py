@@ -229,6 +229,11 @@ class CellStateTest(TestCase):
         self.assertEqual("skip", tr.cell_state("[u 甲]", {"sources": []}))
         self.assertEqual("ours", tr.cell_state("[u 甲]", {"sources": ["[u 甲]"]}))
 
+    def test_source_count(self):
+        self.assertEqual(0, tr.source_count(""))
+        self.assertEqual(1, tr.source_count("[u 甲]"))
+        self.assertEqual(2, tr.source_count("[u 甲]<br/>[u 乙]"))
+
     def test_cache_version_gate(self):
         self.assertTrue(tr.is_current({"at": time.time(), "v": tr.CACHE_VERSION}, 60))
         self.assertFalse(tr.is_current({"at": time.time(), "v": 0}, 60))

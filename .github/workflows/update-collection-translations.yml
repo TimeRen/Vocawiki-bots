@@ -1,0 +1,86 @@
+name: Fill the VOCALOID collection translation sources
+
+# 这是 Toolforge 上 `translations` 任务的 GitHub Actions 兜底（Toolforge 故障时顶上）。
+#
+# 它填的是 [[User:周某不是轴某/VOCALOID collection搜集库]] 的「翻译来源」一栏：
+# 只填**空**格，逐首查 VOCALOID中文歌词wiki（AtWiki）/ 网易云音乐 / B站（简介、
+# 评论区、弹幕、笔记）/ 巴哈姆特。抓取很慢，所以每轮靠 data/ 里的缓存逐日补齐：
+# 一首歌查过之后 14 天内不再重复查，AtWiki 全ページ一覧缓存 7 天。
+#
+# Secrets 与 update-lyrics-completion 相同：USER_PASSWORD_PY（必填）、
+# VOCA_USERNAME（可选）。缓存必须跨运行保留，否则每轮都会把整页重查一遍。
+#
+# 触发方式：
+#   · schedule 每天 06:43 UTC；Toolforge 的 translations 在 06:37 UTC，两处错开
+#   · push 到 main 且改动到脚本或本工作流 -> 立即运行（改完即可验证）
+#   · workflow_dispatch -> Actions 页面手动 Run workflow（可填额外参数，如 --limit 30）
+#   · repository_dispatch -> 外部心跳即时触发：
+#       curl -X POST -H "Authorization: ******" \
+#            -H "Accept: application/vnd.github+json" \
+#            https://api.github.com/repos/TimeRen/Vocawiki-bots/dispatches \
+#            -d '{"event_type":"update-collection-translations"}'
+
+on:
+  schedule:
+    - cron: '43 6 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'bots/vocaloid_collection_translations.py'
+      - '.github/workflows/update-collection-translations.yml'
+  workflow_dispatch:
+    inputs:
+      args:
+        description: '额外参数（可留空），例如 --limit 30 或 --refresh'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [update-collection-translations]
+
+concurrency:
+  group: collection-translations
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    # 冷缓存时要把整页一百多首歌逐首抓一遍（每首几秒到十几秒），给足余量
+    timeout-minutes: 90
+    env:
+      PYTHONIOENCODING: utf-8
+      VOCA_USERNAME: ${{ secrets.VOCA_USERNAME }}
+      EXTRA_ARGS: ${{ github.event.inputs.args }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pywikibot
+        run: pip install --disable-pip-version-check pywikibot
+
+      - name: Write user-password.py
+        env:
+          USER_PASSWORD_PY: ${{ secrets.USER_PASSWORD_PY }}
+        run: |
+          if [ -z "$USER_PASSWORD_PY" ]; then
+            echo "::error::请先在仓库 Secrets 中配置 USER_PASSWORD_PY"
+            exit 1
+          fi
+          printf '%s\n' "$USER_PASSWORD_PY" > user-password.py
+          chmod 600 user-password.py
+
+      - name: Restore the per-song lookup caches
+        # 丢了这份缓存也不会写错页面（查不到来源的格子保持空白），只是慢
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: voca-translations-cache-${{ github.run_id }}
+          restore-keys: voca-translations-cache-
+
+      - name: Fill the translation sources
+        run: python bots/vocaloid_collection_translations.py --write $EXTRA_ARGS

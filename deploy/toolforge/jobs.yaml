@@ -33,3 +33,14 @@
   schedule: "53 * * * *"
   mem: 512Mi
   emails: onfailure
+
+# 每天填充 [[User:周某不是轴某/VOCALOID collection搜集库]] 的「翻译来源」一栏
+# （只填空格；AtWiki / 网易云 / B站 / 巴哈姆特 逐个查，逐首缓存 14 天）。
+# 抓取很慢（一首几秒到十几秒），所以每轮限 60 首，靠缓存逐日补齐；
+# 与 GitHub Actions（06:43）错开。
+- name: translations
+  image: python3.13
+  command: ./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --limit 60
+  schedule: "37 6 * * *"
+  mem: 512Mi
+  emails: onfailure

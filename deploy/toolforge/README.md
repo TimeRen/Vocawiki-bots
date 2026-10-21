@@ -116,21 +116,23 @@ toolforge jobs delete watcher   # 如果之前部署过旧版常驻 watcher
 toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 ```
 
-会创建或更新 `hourly` / `lyrics-plan` / `contributions` 三个任务：
+会创建或更新 `hourly` / `lyrics-plan` / `contributions` / `translations` 四个任务：
 
 | job | 类型 | 作用 |
 | --- | --- | --- |
 | `hourly` | schedule（每小时 :17） | 单次完整维护榜单、计数、颜色、报告和统计图；不常驻轮询 |
 | `lyrics-plan` | schedule（每天 04:23 UTC） | 比对 AtWiki 歌词页与 voca.wiki 条目，维护「VOCALOID中文歌词wiki补完计划」清单（见第 9 节） |
 | `contributions` | schedule（每小时 :53） | 维护贡献页 [[User:人间百态/贡献]]：补新条目、去掉重定向 / 消歧义页，歌姬模板只留主模板（见第 10 节） |
+| `translations` | schedule（每天 06:37 UTC） | 填充 [[User:周某不是轴某/VOCALOID collection搜集库]] 的「翻译来源」一栏（只填空格，见第 12 节） |
 
-**三个任务都有 GitHub Actions 兜底**（Toolforge 故障时顶上），详见第 11 节：
+**四个任务都有 GitHub Actions 兜底**（Toolforge 故障时顶上），详见第 11 节：
 
 | Toolforge | GitHub Actions | 错开的方式 |
 | --- | --- | --- |
 | `hourly`（每小时 :17） | `update-vocaloid-collection.yml`（每小时 :47） | 差 30 分钟 |
 | `contributions`（每小时 :53） | `update-contributions.yml`（每小时 :23） | 差 30 分钟 |
 | `lyrics-plan`（每天 04:23） | `update-lyrics-completion.yml`（每天 05:13） | 差 50 分钟 |
+| `translations`（每天 06:37） | `update-collection-translations.yml`（每天 06:43） | 差 6 分钟 |
 
 GitHub Actions 跑的也是同一份脚本；两处同时在一轮里相遇时靠编辑冲突（`baserevid`）
 让后到的那次放弃，不会互相覆盖。Toolforge 的 `schedule` 任务在两次运行之间显示
@@ -337,21 +339,23 @@ cat ~/contributions.out
 
 ## 11. GitHub Actions 兜底（Toolforge 故障时）
 
-三个机器人各有一份 GitHub Actions 工作流，跑的是同一份脚本，只是时间错开：
+四个机器人各有一份 GitHub Actions 工作流，跑的是同一份脚本，只是时间错开：
 
 | 工作流 | 对应 Toolforge 任务 | 运行时间 |
 | --- | --- | --- |
 | `.github/workflows/update-vocaloid-collection.yml` | `hourly` | 每小时 :47（Toolforge :17） |
 | `.github/workflows/update-contributions.yml` | `contributions` | 每小时 :23（Toolforge :53） |
 | `.github/workflows/update-lyrics-completion.yml` | `lyrics-plan` | 每天 05:13（Toolforge 04:23） |
+| `.github/workflows/update-collection-translations.yml` | `translations` | 每天 06:43（Toolforge 06:37） |
 
 **唯一的前置条件**是本仓库 Settings > Secrets and variables > Actions 里的
-`USER_PASSWORD_PY`（三个工作流共用，写法见工作流文件顶部的注释）；`VOCA_USERNAME`
+`USER_PASSWORD_PY`（四个工作流共用，写法见工作流文件顶部的注释）；`VOCA_USERNAME`
 可选。
 
 Toolforge 挂掉时不用做任何事，他们照常按上表运行。想立刻手动跑一轮：Actions 页面
 选中工作流点 **Run workflow**，或用外部心跳（`repository_dispatch`，事件名分别是
-`update-vocaloid-collection` / `update-contributions` / `update-lyrics-completion`）。
+`update-vocaloid-collection` / `update-contributions` / `update-lyrics-completion` /
+`update-collection-translations`）。
 
 两点差别要知道：
 
@@ -360,12 +364,62 @@ Toolforge 挂掉时不用做任何事，他们照常按上表运行。想立刻�
   冷缓存、GitHub runner）：清单 23 秒、歌名索引 2.5 分钟、逐页判定 3.4 分钟，
   一轮约 6.5 分钟；工作流给了 60 分钟超时作余量。Toolforge 上同一轮要慢得多
   （它的出口到 AtWiki 约 2～3 秒/页）。
+  `update-collection-translations.yml` 同理，缓存的是逐首查询结果（见第 12 节）；
+  丢了缓存只会慢，不会写错（查不到来源的格子保持空白）。
 * GitHub Actions runner 是公网 IP，AtWiki 可能给它 Cloudflare 挑战。挑战页会被判成
   「读不到正文」，机器人对读不到的页面一律**保留**（不删清单条目），清单页本身也
   不会因为抓不到来源而被刷空（`collect_pages` 会直接放弃本轮）——只会少更新，不会写坏。
 
 Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `schedule` 触发器（保留
 `workflow_dispatch`）即可；反之同理。
+
+## 12. VOCALOID collection 搜集库的「翻译来源」（每天）
+
+`bots/vocaloid_collection_translations.py` 填
+[[User:周某不是轴某/VOCALOID collection搜集库]] 表格里的「翻译来源」一栏，
+并顺带维护它（每次都是重新读页面、按当前内容算 diff 再保存）。
+
+**只填空白格**：别人已经写过的格子一个字都不动，所以可以和页面主人手工编辑共存。
+每首歌按可靠程度依次查四个来源，最多记 3 条：
+
+| 来源 | 判定方式 | 说明 |
+| --- | --- | --- |
+| VOCALOID中文歌词wiki | AtWiki 全ページ一覧里页面名与歌名**精确**相同 | 再读该页正文取 `翻譯：某人` 作署名 |
+| 网易云音乐 | 搜索结果里歌名（含 `alias` / `transNames`）与歌名相同，且 `tlyric` 非空 | 署名取译文上传者 `transUser`；没有译文的原曲不记 |
+| B站 | 条目里的 `{{BilibiliVideo}}` 优先，否则关键词搜索 | 读视频简介、评论区、弹幕里的「`翻译：某人`」+ 中文歌词；弹幕只在别的来源都空着时才读 |
+| 巴哈姆特 | 顺着 B站简介里的外链进入 | 站内搜索是 JS 渲染的，抓不到结果页，只能这样发现 |
+
+几点实现细节：
+
+* 署名（`credit_name`）只认**带冒号**的 `翻譯：` / `译者：` / `中文歌詞：` / `嵌字：`，
+  并且长度 ≤ 20 字。早年版本不要求冒号，于是「词句是用**谷歌翻译成英文后根据英文翻译而来**」
+  这种句子被当成了译者名（真实案例：`ensemble`）。
+* 歌名归一化（`title_key`）会去掉 `{{lj|}}`、链接、注释、末尾的 `(消歧义后缀)`，
+  但**不做**模糊匹配——同名不同曲宁可不记，也不能写错来源。
+* 逐首缓存（`data/vocaloid_collection_translations.pickle`，14 天）与 AtWiki 页面
+  清单缓存（`…_atwiki.pickle`，7 天）。所以第一轮最慢（一百多首歌要逐首抓），
+  之后每轮只查新出现的歌；`--refresh` 强制重查全部，`--ttl` 改缓存时长。
+* 每轮限量：`--limit N` 只查 N 首（Toolforge 的 `translations` 任务固定带
+  `--limit 60`，GitHub Actions 不带）。日志里 `待补 / 查了 / 填上` 三个数字就是进度；
+  查不到的格子保持空白（中文原创曲本来就没有「翻译来源」可填）。被 `--limit` 截住
+  还没查的歌不进缓存，下一轮继续；查过但没找到的按 `--ttl` 过期后再查。
+
+```bash
+source ~/pyvenv/bin/activate
+cd ~/Vocawiki-bots
+
+# 干跑：只打印将要做的改动
+python bots/vocaloid_collection_translations.py
+
+# 小批量试跑，确认结果再放开
+python bots/vocaloid_collection_translations.py --write --limit 20
+
+# 正常情况下交给定时任务，手动一般不需要跑全量
+python bots/vocaloid_collection_translations.py --write
+```
+
+`data/` 里的缓存别随手删：删了下一轮会把整页重查一遍（Toolforge 上要跑很久），
+但不会写坏页面。
 
 ## 更新代码
 

@@ -147,6 +147,19 @@ class ApplyFillsTest(TestCase):
         self.assertEqual("[u 乙]", cells[1 * tr.PER_SIDE + tr.SOURCE_INDEX])
         self.assertEqual("偏渣翻", cells[1 * tr.PER_SIDE + tr.COLUMNS.index("note")])
 
+    def test_clearing_puts_the_cell_back_to_blank(self):
+        """自己上轮写错的内容要能清回空格，别留下空方括号之类。"""
+        page = ("{|\n"
+                "! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注\n"
+                "|-\n"
+                "| 13 || [[Empty Dumpty]] || A:me || 未创建 || [https://a.example 网易云音乐] || \n"
+                "|}")
+        song = songs_from(page)[0]
+        text = apply_fills(page, {(song.line, song.side): ""})
+        row = [line for line in text.split("\n") if "Empty Dumpty" in line][0]
+        self.assertEqual("| 13 || [[Empty Dumpty]] || A:me || 未创建 ||  || ", row)
+        self.assertEqual("", split_row(row)[tr.COLUMNS.index("source")].value)
+
     def test_no_fills_returns_the_same_text(self):
         self.assertEqual(PAGE, apply_fills(PAGE, {}))
 
@@ -411,8 +424,8 @@ class BilibiliTest(TestCase):
         self.assertEqual(["[https://home.gamer.com.tw/artwork.php?sn=1 巴哈姆特(by. 某人)]"],
                          tr.lookup_bahamut(fetcher, "https://home.gamer.com.tw/artwork.php?sn=1",
                                            song))
-        self.assertEqual([], tr.lookup_bahamut(fetcher, "https://home.gamer.com.tw/artwork.php?sn=2",
-                                              song))
+        self.assertEqual([], tr.lookup_bahamut(
+            fetcher, "https://home.gamer.com.tw/artwork.php?sn=2", song))
 
 
 class CollectSourcesTest(TestCase):

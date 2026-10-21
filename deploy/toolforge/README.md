@@ -406,11 +406,12 @@ Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `sched
 * 逐首缓存（`data/vocaloid_collection_translations.pickle`，14 天）与 AtWiki 页面
   清单缓存（`…_atwiki.pickle`，7 天）。所以第一轮最慢（一百多首歌要逐首抓），
   之后每轮只查新出现的歌；`--refresh` 强制重查全部，`--ttl` 改缓存时长。
-* 每轮限量：`--limit N` 只查 N 首（Toolforge 的 `translations` 任务固定带
-  `--limit 60`，GitHub Actions 不带）。日志里 `待查 / 查了 / 改动` 三个数字就是进度；
+* 每轮限量：`--limit N` 只查 N 首（Toolforge 的 `translations` 任务和 GitHub Actions
+  都固定带 `--limit 60`）。日志里 `待查 / 查了 / 改动` 三个数字就是进度；
   查不到的格子保持空白（中文原创曲本来就没有「翻译来源」可填），实测命中率约
   1/6——**宁可空着也不写错**。被 `--limit` 截住还没查的歌不进缓存，下一轮继续；
-  查过但没找到的按 `--ttl` 过期后再查。
+  查过但没找到的按 `--ttl` 过期后再查。GitHub runner 出口到 AtWiki / B 站都慢，
+  不设上限时一轮容易跑到超时（实测冷缓存 55 分钟还没跑完），所以那边也限 60 首。
 
 ```bash
 source ~/pyvenv/bin/activate

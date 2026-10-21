@@ -821,9 +821,7 @@ def lookup_bahamut(fetcher: Fetcher, url: str, song: Song) -> List[str]:
     name = credit_name(body)
     if not name:
         return []
-    card = re.search(r'class="caption-text primary"[^>]*>([^<]{1,40})<', markup)
-    author = clean_name(card.group(1)) if card else ""
-    return [render_source(url, "巴哈姆特", name or author)]
+    return [render_source(url, "巴哈姆特", name)]
 
 
 # ---------------------------------------------------------------- voca 条目

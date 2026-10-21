@@ -83,4 +83,8 @@ jobs:
           restore-keys: voca-translations-cache-
 
       - name: Fill the translation sources
-        run: python bots/vocaloid_collection_translations.py --write $EXTRA_ARGS
+        run: |
+          # 每轮最多查 60 首（与 Toolforge 的 translations 任务一致）：GitHub runner
+          # 出口到 AtWiki / B 站都慢，不限量时一轮可能跑到超时；被截住没查的歌
+          # 不进缓存，下一轮继续。workflow_dispatch 里可以用 args 覆盖。
+          python bots/vocaloid_collection_translations.py --write --limit 60 $EXTRA_ARGS

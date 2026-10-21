@@ -16,13 +16,18 @@
 2. **清掉不该出现的条目**（用户 2026-10-17 要求）：
    * **重定向**改成它的目标页（目标已在清单里就直接去掉）——导航框里不该出现
      指向重定向的链接（``Boo! Boo! Etranger`` 实际是 ``Boo！Boo！Etranger`` 的重定向）；
-   * **消歧义页**（``Category:消歧义页面`` 或挂了 ``{{Disambig}}``）直接去掉，
-     它不是歌曲条目。
+   * **消歧义页**（``Category:消歧义页`` 或挂了 ``{{消歧义页}}`` / ``{{Disambig}}``）
+     直接去掉，它不是歌曲条目。
+     ⚠️ 只认这两个标记，**不能**按「分类名里含『消歧』」判断：voca.wiki 还有
+     ``Category:消歧义模板链入页面错误``（正文的 ``{{About}}`` 指向消歧义页时的维护分类），
+     按子串判会把正常条目当成消歧义页删掉（2026-10-21：``涅槃(HotaRu)`` 就是这么被删的）。
+   * 重定向的目标查不到时**保留原条目**：宁可留一条，也不因为一次查询失败删东西。
 3. **歌姬模板只列主模板**：工具建的是 ``Template:IA/2026``、``Template:歌爱雪/2011``
    这种按年份拆的子页面，导航框里要的是 ``Template:IA``、``Template:歌爱雪``；
    子页面（名字里带 ``/``）一律不列。
 
-``Vocawiki时期`` 每组 10 条（``1-10`` / ``11-20`` …），补完之后重新编号；
+``Vocawiki时期`` 每组 10 条（``1-10`` / ``11-20`` …），按**创建时间**排序后重新编号；
+补回来的旧条目也会插回原来的位置，而不是排到最末尾。
 其余分组（萌百时期、列表、职人模板…）原样保留。
 
 Everything is a dry run unless ``--write`` is given.
@@ -58,6 +63,13 @@ LINKS_PREFIX = "{{links|n=4|"
 TEMPLATE_LINK_RE = re.compile(r"\{\{tl\|([^}|]+)\}\}")
 # 条目名末尾的括号消歧后缀：`希望(Dopamine)`、`Redial（鹤三）`
 PAREN_SUFFIX_RE = re.compile(r"^(?P<base>.+?)\s*[(（][^()（）]+[)）]$")
+# **真正的**消歧义标记。不能用「分类名含『消歧』」来判：voca.wiki 还有
+# `Category:消歧义模板链入页面错误`（正文里的 `{{About}}` 指向消歧义页时的维护分类）、
+# `消歧义分类` / `消歧义导航模板` 这些分类，一律按「含消歧」判会把正常条目当成消歧义页
+# 删掉（2026-10-21：`涅槃(HotaRu)`、`KEI(画师)` 就挂在那个维护分类里）。
+DISAMBIG_CATEGORIES = frozenset({"消歧义页", "消歧义", "disambiguation pages"})
+DISAMBIG_TEMPLATES = frozenset({"Template:消歧义页", "Template:Disambig",
+                                "Template:Disambig-list"})
 
 
 # ---------------------------------------------------------------- wikitext
@@ -174,6 +186,24 @@ def queryable(title: str) -> bool:
     return title.startswith("Template:") or ":" not in title
 
 
+def is_disambiguation(categories: Iterable[str], templates: Iterable[str]) -> bool:
+    """这个页面是不是消歧义页。
+
+    只认**真正的**标记：``Category:消歧义页``（模板自动加的）或
+    ``{{消歧义页}}`` / ``{{Disambig}}`` 本身。带「消歧」二字的维护分类
+    （``消歧义模板链入页面错误``、``消歧义模板链入页面不存在``）不算 ——
+    那是「正常条目用错了模板」，页面本身仍是条目。
+    """
+    for name in categories:
+        key = str(name or "").split(":", 1)[-1].strip().lower()
+        if key in DISAMBIG_CATEGORIES:
+            return True
+    for name in templates:
+        if str(name or "").strip() in DISAMBIG_TEMPLATES:
+            return True
+    return False
+
+
 def render_links(entries: Sequence[str], prefix: str = "|list") -> List[str]:
     """条目 → 每 10 条一组的 ``|groupN`` / ``|listN`` 行。"""
     lines: List[str] = []
@@ -224,19 +254,35 @@ def template_creations(contributions: Iterable[Dict], kind: str) -> List[str]:
 
 
 def merge_songs(existing: Sequence[str], creations: Sequence[str],
-                status: Dict[str, Dict], redirects: Dict[str, str]) -> List[str]:
+                status: Dict[str, Dict], redirects: Dict[str, str],
+                created_at: Optional[Dict[str, str]] = None) -> List[str]:
     """现有条目 + 新建条目 → 新清单（重定向换成目标页，消歧义页丢掉，按标题去重）。
 
-    顺序保持不变：现有条目在前（保留手写的 ``{{!}}显示文字``），新条目按创建顺序接在后面。
+    现有条目保持原有顺序（也保留手写的 ``{{!}}显示文字``）；补进来的条目按**创建时间**
+    插到对应位置 —— 清单本来就是按创建顺序编号的（1-10、11-20…），早先误删的条目
+    重新补回来时不该跑到最末尾（2026-10-21：`涅槃(HotaRu)` 被误判成消歧义页删掉，
+    补回时要回到 171-180 那一组）。没有创建时间的条目接在末尾。
     """
+    created_at = created_at or {}
     result: List[str] = []
     seen: set = set()
 
-    def add(entry: str, title: str) -> None:
+    def remember(entry: str, title: str) -> bool:
         key = title.strip()
         if not key or key in seen:
-            return
+            return False
         seen.add(key)
+        return True
+
+    def place(entry: str, title: str) -> None:
+        """按创建时间插到第一个「比它晚」的条目之前；不知道时间就接在末尾。"""
+        stamp = created_at.get(title)
+        if stamp:
+            for index, current in enumerate(result):
+                other = created_at.get(entry_target(current))
+                if other and other > stamp:
+                    result.insert(index, entry)
+                    return
         result.append(entry)
 
     for entry in existing:
@@ -244,18 +290,23 @@ def merge_songs(existing: Sequence[str], creations: Sequence[str],
         if not title:
             continue
         if ":" in title:                     # vcp: 之类的跨站链接：查不了，原样保留
-            add(entry, title)
+            if remember(entry, title):
+                result.append(entry)
             continue
         info = status.get(title, {})
         if info.get("disambig"):             # 消歧义页不是歌曲条目
             continue
         if info.get("redirect"):
             target = redirects.get(title, "")
-            if not target or status.get(target, {}).get("disambig"):
-                continue
-            add(display_entry(target), target)   # 直接写目标页的名字
-            continue
-        add(entry, title)
+            if target:
+                if status.get(target, {}).get("disambig"):
+                    continue                 # 重定向到消歧义页：同样不是条目
+                if remember(target, target):
+                    result.append(display_entry(target))   # 直接写目标页的名字
+                continue                     # 目标已在清单里：这条重定向不要了
+            # 查不到目标（这一批查询失败）：宁可原样留着，也不要凭空删条目
+        if remember(entry, title):
+            result.append(entry)
 
     for title in creations:
         info = status.get(title, {})
@@ -264,7 +315,9 @@ def merge_songs(existing: Sequence[str], creations: Sequence[str],
         resolution = redirects.get(title, title) if info.get("redirect") else title
         if status.get(resolution, {}).get("disambig"):
             continue
-        add(display_entry(resolution), resolution)
+        entry = display_entry(resolution)
+        if remember(entry, resolution):
+            place(entry, resolution)
     return result
 
 
@@ -331,8 +384,7 @@ def page_status(site, titles: Sequence[str]) -> Dict[str, Dict]:
             status[page.get("title", "")] = {
                 "missing": bool(page.get("missing")),
                 "redirect": bool(page.get("redirect")),
-                "disambig": (any("消歧" in name for name in categories)
-                             or "Template:Disambig" in templates),
+                "disambig": is_disambiguation(categories, templates),
             }
         time.sleep(0.2)
     return status
@@ -390,8 +442,11 @@ def run_once(site, write: bool = False, summary: Optional[str] = None) -> bool:
     existing_templates = parse_templates(original[template_span[0]:template_span[1]])
 
     contributions = fetch_creations(site)
-    new_songs = [row["title"] for row in contributions if is_song_creation(row)]
-    new_songs.reverse()                      # ucshow=new 是倒序，补在清单末尾要按创建顺序
+    song_rows = [row for row in contributions if is_song_creation(row)]
+    new_songs = [row["title"] for row in song_rows]
+    new_songs.reverse()                      # ucshow=new 是倒序，补进来要按创建顺序
+    # 创建时间用来把补回来的条目插到原位置（清单按创建顺序编号）
+    created_at = {row["title"]: str(row.get("timestamp") or "") for row in song_rows}
     new_templates = template_creations(contributions, TEMPLATE_GROUP)
 
     titles = [entry_target(entry) for entry in existing_songs] + new_songs
@@ -401,7 +456,7 @@ def run_once(site, write: bool = False, summary: Optional[str] = None) -> bool:
     # 重定向的目标也要看：目标可能是消歧义页，那样整条都不该留
     status.update(page_status(site, [target for target in redirects.values() if target]))
 
-    songs = merge_songs(existing_songs, new_songs, status, redirects)
+    songs = merge_songs(existing_songs, new_songs, status, redirects, created_at)
     templates = merge_templates(existing_templates, new_templates, status)
     text = rebuild(original, songs, templates)
 

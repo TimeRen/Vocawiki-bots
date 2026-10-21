@@ -94,6 +94,34 @@ class ParseTemplatesTest(TestCase):
         self.assertEqual(["甲姬", "乙姬"], parse_templates("{{tl|甲姬}}{{w}}{{tl|乙姬}}"))
 
 
+class IsDisambiguationTest(TestCase):
+    """消歧义页的判定只认真正的标记（2026-10-21 的误删就是判太宽）。"""
+
+    def test_the_real_category(self):
+        self.assertTrue(navbox.is_disambiguation(["Category:消歧义页"], []))
+
+    def test_the_real_template(self):
+        self.assertTrue(navbox.is_disambiguation([], ["Template:消歧义页"]))
+        self.assertTrue(navbox.is_disambiguation([], ["Template:Disambig"]))
+
+    def test_maintenance_categories_do_not_count(self):
+        """`{{About}}` 指向消歧义页时留下的维护分类，不代表页面是消歧义页。
+
+        2026-10-21：`涅槃(HotaRu)` 挂在 `Category:消歧义模板链入页面错误` 下，
+        旧代码按「分类名含『消歧』」判定，把它当成消歧义页从清单里删掉了。
+        """
+        self.assertFalse(navbox.is_disambiguation(
+            ["Category:消歧义模板链入页面错误"], []))
+        self.assertFalse(navbox.is_disambiguation(
+            ["Category:消歧义模板链入页面不存在"], []))
+        self.assertFalse(navbox.is_disambiguation(
+            ["Category:消歧义分类"], ["Template:About"]))
+
+    def test_ordinary_page(self):
+        self.assertFalse(navbox.is_disambiguation(
+            ["Category:2022年投稿至YouTube的歌曲"], ["Template:VOCALOID Songbox"]))
+
+
 class MergeSongsTest(TestCase):
     def test_redirect_is_replaced_by_its_target(self):
         status = {"Boo! Boo! Etranger": {"redirect": True},
@@ -148,6 +176,41 @@ class MergeSongsTest(TestCase):
     def test_interwiki_entries_are_left_alone(self):
         self.assertEqual(["vcp:丙{{!}}丙"],
                          merge_songs(["vcp:丙{{!}}丙"], [], {}, {}))
+
+    def test_an_unresolved_redirect_is_kept_instead_of_dropped(self):
+        """重定向的目标查不到（这一批查询失败）时保留原条目，不能凭空删。"""
+        status = {"旧名": {"redirect": True}}
+        self.assertEqual(["旧名"], merge_songs(["旧名"], [], status, {}))
+
+    def test_a_misdetected_disambiguation_page_stays_when_it_is_a_real_article(self):
+        """回归：`涅槃(HotaRu)` 只是用了 `{{About}}`，不是消歧义页。
+
+        条目本身带括号消歧后缀，所以按页面上的写法显示成 `涅槃(HotaRu){{!}}涅槃`。
+        """
+        status = {"涅槃(HotaRu)": {"disambig": False, "redirect": False}}
+        self.assertEqual(["涅槃(HotaRu){{!}}涅槃"],
+                         merge_songs([], ["涅槃(HotaRu)"], status, {},
+                                     {"涅槃(HotaRu)": "2026-09-28T21:36:11Z"}))
+
+    def test_a_readded_song_goes_back_to_its_creation_position(self):
+        """补回来的旧条目按创建时间插回原位，而不是排到最末尾。"""
+        existing = ["早1", "早2", "晚1", "晚2"]
+        created_at = {"早1": "2026-09-01T00:00:00Z", "早2": "2026-09-10T00:00:00Z",
+                      "旧条目": "2026-09-20T00:00:00Z",
+                      "晚1": "2026-10-01T00:00:00Z", "晚2": "2026-10-02T00:00:00Z"}
+        status = {title: {} for title in created_at}
+        self.assertEqual(["早1", "早2", "旧条目", "晚1", "晚2"],
+                         merge_songs(existing, ["旧条目"], status, {}, created_at))
+
+    def test_a_brand_new_song_is_appended(self):
+        created_at = {"甲": "2026-09-01T00:00:00Z", "乙": "2026-10-01T00:00:00Z"}
+        status = {title: {} for title in created_at}
+        self.assertEqual(["甲", "乙"],
+                         merge_songs(["甲"], ["乙"], status, {}, created_at))
+
+    def test_without_timestamps_new_entries_are_appended(self):
+        status = {"丙": {}}
+        self.assertEqual(["甲", "丙"], merge_songs(["甲"], ["丙"], status, {}))
 
     def test_redirect_duplicate_is_dropped(self):
         """重定向的目标已经在清单里时，不再重复列一次。"""

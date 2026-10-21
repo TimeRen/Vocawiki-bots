@@ -109,7 +109,7 @@ cat ~/logincheck.out
 > stderr，不合并则 `工具名.out` 是空的、内容全在 `工具名.err`）。还在用旧版脚本
 > 就直接看 `工具名.err`。
 
-## 6. 载入每小时定时任务
+## 6. 载入定时任务
 
 ```bash
 toolforge jobs delete watcher   # 如果之前部署过旧版常驻 watcher

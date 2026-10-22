@@ -39,14 +39,11 @@
 # 抓取很慢（一首几秒到十几秒），所以每轮限 60 首，靠缓存逐日补齐；
 # 与 GitHub Actions（06:43）错开。
 #
-# 2026-10-22 先注释掉：自动写的三次都在 1～3 分钟内被 `人间百态` 整笔回退
-# （274554 / 274591 / 274593）。确认要恢复时去掉下面的注释、重新 jobs load 即可；
-# 只想手动跑一轮的话用：
-#   toolforge jobs run translations --image python3.13 --wait \
-#     --command "./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --dry-run"
-# - name: translations
-#   image: python3.13
-#   command: ./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --limit 60
-#   schedule: "37 6 * * *"
-#   mem: 512Mi
-#   emails: onfailure
+# 2026-10-22 曾暂停过一阵（自动写的三次都被整笔回退，那批来源确实查错了 P主）；
+# 修好「每个来源都核对 P主」「只认自己写过的格子」之后已恢复定时。
+- name: translations
+  image: python3.13
+  command: ./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --limit 60
+  schedule: "37 6 * * *"
+  mem: 512Mi
+  emails: onfailure

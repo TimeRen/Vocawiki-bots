@@ -116,14 +116,14 @@ toolforge jobs delete watcher   # 如果之前部署过旧版常驻 watcher
 toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 ```
 
-会创建或更新 `hourly` / `lyrics-plan` / `contributions` 三个任务（`translations`
-默认被注释掉，见第 12 节）：
+会创建或更新 `hourly` / `lyrics-plan` / `contributions` / `translations` 四个任务：
 
 | job | 类型 | 作用 |
 | --- | --- | --- |
 | `hourly` | schedule（每小时 :17） | 单次完整维护榜单、计数、颜色、报告和统计图；不常驻轮询 |
 | `lyrics-plan` | schedule（每天 04:23 UTC） | 比对 AtWiki 歌词页与 voca.wiki 条目，维护「VOCALOID中文歌词wiki补完计划」清单（见第 9 节） |
 | `contributions` | schedule（每小时 :53） | 维护贡献页 [[User:人间百态/贡献]]：补新条目、去掉重定向 / 消歧义页，歌姬模板只留主模板（见第 10 节） |
+| `translations` | schedule（每天 06:37 UTC） | 填充 [[User:周某不是轴某/VOCALOID collection搜集库]] 的「翻译来源」（只填空格，见第 12 节） |
 
 **四个任务都有 GitHub Actions 兜底**（Toolforge 故障时顶上），详见第 11 节：
 
@@ -338,14 +338,14 @@ cat ~/contributions.out
 
 ## 11. GitHub Actions 兜底（Toolforge 故障时）
 
-每个机器人各有一份 GitHub Actions 工作流，跑的是同一份脚本，只是时间错开
-（`update-collection-translations.yml` 的定时器也暂时关着，见第 12 节）：
+每个机器人各有一份 GitHub Actions 工作流，跑的是同一份脚本，只是时间错开：
 
 | 工作流 | 对应 Toolforge 任务 | 运行时间 |
 | --- | --- | --- |
 | `.github/workflows/update-vocaloid-collection.yml` | `hourly` | 每小时 :47（Toolforge :17） |
 | `.github/workflows/update-contributions.yml` | `contributions` | 每小时 :23（Toolforge :53） |
 | `.github/workflows/update-lyrics-completion.yml` | `lyrics-plan` | 每天 05:13（Toolforge 04:23） |
+| `.github/workflows/update-collection-translations.yml` | `translations` | 每天 06:43（Toolforge 06:37） |
 
 **唯一的前置条件**是本仓库 Settings > Secrets and variables > Actions 里的
 `USER_PASSWORD_PY`（四个工作流共用，写法见工作流文件顶部的注释）；`VOCA_USERNAME`
@@ -372,18 +372,17 @@ Toolforge 挂掉时不用做任何事，他们照常按上表运行。想立刻�
 Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `schedule` 触发器（保留
 `workflow_dispatch`）即可；反之同理。
 
-## 12. VOCALOID collection 搜集库的「翻译来源」（**暂停自动运行**）
+## 12. VOCALOID collection 搜集库的「翻译来源」（每天）
 
-> **状态（2026-10-22）**：脚本、测试、部署文件都已完成，但**定时任务暂时关掉**。
-> 自动写页面的三次（274553 / 274590 / 274592）都在 1～3 分钟内被 `人间百态` 账号
-> 以 `// Rollback` 整笔回退（274554 / 274591 / 274593），先把定时器停掉，避免和
-> 回退操作打编辑战。恢复办法：把 `jobs.yaml` 里 `translations` 那段、以及
-> `.github/workflows/update-collection-translations.yml` 里 `schedule` 的注释去掉
-> （GHA 那边还要把 `push` 触发器一起恢复，改完即可验证）。
+> **状态（2026-10-22）**：定时任务已恢复（Toolforge 06:37、GitHub Actions 06:43）。
+> 中间短暂停过一阵：自动写的前几版都查错了 P主（同名不同曲），页面主人把那些编辑
+> 整笔回退了（274554 / 274591 / 274593）；修好「每个来源都核对 P主」「只认自己写过
+> 的格子」之后重新开起来。
 
 `bots/vocaloid_collection_translations.py` 填
 [[User:周某不是轴某/VOCALOID collection搜集库]] 表格里的「翻译来源」一栏，
 并顺带维护它（每次都是重新读页面、按当前内容算 diff 再保存）。
+
 **只填空白格**：别人已经写过的格子一个字都不动，所以可以和页面主人手工编辑共存。
 每首歌按可靠程度依次查四个来源，最多记 3 条：
 
@@ -415,7 +414,8 @@ Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `sched
   `[链接 说明(by. 译者)]` 写，早先按「格式像机器人写的」认领，把他的
   `巴哈姆特(by. 月勳)`、`B站笔记(by. YUSI雨似)` 覆盖甚至清空了（2026-10-22）。
   缓存丢了就宁可少更新（宁可不认，也不越权）。
-* 判定规则一改，把 `CACHE_VERSION` 加一，旧缓存自动作废重查。* 逐首缓存（`data/vocaloid_collection_translations.pickle`，14 天）与 AtWiki 页面
+* 判定规则一改，把 `CACHE_VERSION` 加一，旧缓存自动作废重查。
+* 逐首缓存（`data/vocaloid_collection_translations.pickle`，14 天）与 AtWiki 页面
   清单缓存（`…_atwiki.pickle`，7 天）。所以第一轮最慢（一百多首歌要逐首抓），
   之后每轮只查新出现的歌；`--refresh` 强制重查全部，`--ttl` 改缓存时长。
 * 每轮限量：`--limit N` 只查 N 首（Toolforge 的 `translations` 任务和 GitHub Actions

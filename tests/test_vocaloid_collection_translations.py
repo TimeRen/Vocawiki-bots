@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """bots/vocaloid_collection_translations.py 的测试（不联网）。"""
 import time
+import urllib.error
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -379,7 +380,7 @@ class BilibiliTest(TestCase):
     def test_desc_credit_is_recorded(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
         fetcher = self.FakeFetcher(payloads=self._view(
-            "BV1", "千本桜 中文", "翻译：某人\n千本樱歌词"))
+            "BV1", "千本桜 中文", "本家：黒うさP\n翻译：某人\n千本樱歌词"))
         sources, _, _ = tr.video_sources(fetcher, "BV1", song, require_mention=True)
         self.assertEqual(["[https://www.bilibili.com/video/BV1 B站视频简介(by. 某人)]"],
                          sources)
@@ -390,6 +391,22 @@ class BilibiliTest(TestCase):
         self.assertEqual(([], "翻译：某人", "别的东西"),
                          tr.video_sources(fetcher, "BV9", song, require_mention=True))
 
+    def test_search_video_without_the_producer_is_skipped(self):
+        """真实案例：``RITA`` 搜到 TED 演讲的翻译视频、``亡灵`` 搜到有声书。"""
+        song = Song(0, 0, "11", "RITA", "RITA", "黑泽まどか")
+        fetcher = self.FakeFetcher(payloads=self._view(
+            "BV1", "私塾翻译 | RITA Pierson TED 中英双语字幕", "翻译：私塾先生lilz"))
+        self.assertEqual([], tr.video_sources(fetcher, "BV1", song, require_mention=True)[0])
+
+    def test_producer_mention(self):
+        song = Song(0, 0, "11", "RITA", "RITA", "Hal")
+        self.assertTrue(tr.producer_mentioned("本家：Hal", song))
+        self.assertTrue(tr.producer_mentioned("作詞作曲：hal", song))
+        self.assertFalse(tr.producer_mentioned("halcyon days", song))
+        cjk = Song(0, 0, "11", "狂信者", "狂信者", "{{lj|umigame}}")
+        self.assertTrue(tr.producer_mentioned("music: umigame", cjk))
+        self.assertFalse(tr.producer_mentioned("黑执事 OP", cjk))
+
     def test_own_upload_needs_no_title_match(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
         fetcher = self.FakeFetcher(payloads=self._view("BV1", "本家", "翻译：甲"))
@@ -399,7 +416,7 @@ class BilibiliTest(TestCase):
 
     def test_comment_with_translated_lyrics(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
-        payloads = self._view("BV2", "千本桜", "")
+        payloads = self._view("BV2", "千本桜 / 黒うさP", "")
         payloads[tr.BILIBILI_REPLY.format(oid="1", pn=1)] = {"code": 0, "data": {
             "replies": [{"rpid": 55, "member": {"uname": "译者"},
                          "content": {"message": "翻译：译者\n千本樱\n怨恨啊怨恨啊"}}]}}
@@ -411,7 +428,7 @@ class BilibiliTest(TestCase):
 
     def test_danmaku_credit(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
-        payloads = self._view("BV3", "千本桜", "")
+        payloads = self._view("BV3", "千本桜 / 黒うさP", "")
         payloads[tr.BILIBILI_REPLY.format(oid="1", pn=1)] = {"code": 0, "data": {"replies": []}}
         fetcher = self.FakeFetcher(payloads=payloads,
                                    texts={tr.BILIBILI_DANMAKU.format(cid="2"):
@@ -431,6 +448,39 @@ class BilibiliTest(TestCase):
                                            song))
         self.assertEqual([], tr.lookup_bahamut(
             fetcher, "https://home.gamer.com.tw/artwork.php?sn=2", song))
+
+
+class FetcherBlockTest(TestCase):
+    """被站点 412 盾掉之后，整轮都不再打这个站（GitHub runner 的机房 IP 就是这样）。"""
+
+    def test_412_blocks_the_whole_site(self):
+        fetcher = tr.Fetcher()
+        calls = []
+
+        def fake_open(url, timeout=None):
+            calls.append(url)
+            raise urllib.error.HTTPError(url, 412, "Precondition Failed", None, None)
+
+        fetcher.opener.open = fake_open
+        self.assertEqual("", fetcher.text("https://api.bilibili.com/x/web-interface/view?bvid=BV1"))
+        self.assertEqual("", fetcher.text("https://www.bilibili.com/video/BV1"))
+        self.assertEqual(1, len(calls), "同一个站第二次就该直接返回空")
+        self.assertTrue(fetcher.is_blocked("https://api.bilibili.com/x/v2/reply?oid=1"))
+        self.assertFalse(fetcher.is_blocked("https://music.163.com/api/search/get?s=x"))
+
+    def test_other_errors_still_retry(self):
+        fetcher = tr.Fetcher()
+        calls = []
+
+        def fake_open(url, timeout=None):
+            calls.append(url)
+            raise urllib.error.URLError("boom")
+
+        fetcher.opener.open = fake_open
+        with patch("time.sleep"):
+            self.assertEqual("", fetcher.text("https://w.atwiki.jp/x", attempts=3))
+        self.assertEqual(3, len(calls))
+        self.assertFalse(fetcher.blocked)
 
 
 class CollectSourcesTest(TestCase):

@@ -13,8 +13,9 @@
   歌手或专辑名里才用（只有标题对上不够：同名不同曲太多）；`/api/song/lyric` 里有
   ``tlyric``（确实有译文）才记，译者取 ``transUser``（其次 ``lyricUser``）。
 * **B站**：先看 voca 条目 Songbox 里的 ``bb_id``（本家投稿），再用站内搜索找
-  「歌名 翻译」的视频；对候选视频读简介、前几页评论、弹幕：
-  简介 / 评论 / 弹幕里出现 `翻译：X` / `翻譯：X` / `译：X` 才记，并记下是谁说的。
+  「歌名 翻译」的视频；**搜来的视频要标题 / 简介里同时出现歌名和 P主**，否则
+  ``RITA`` 会搜到 TED 演讲的翻译视频、``亡灵`` 会搜到有声书。对上以后读简介、
+  前几页评论、弹幕：出现 `翻译：X` / `翻譯：X` / `译：X` 才记，并记下是谁说的。
 * **巴哈姆特**：它的站内搜索是纯前端渲染，抓不到结果，所以改成**顺着链接找**：
   上面那些页面的正文 / 简介里出现的 ``home.gamer.com.tw/artwork.php?sn=…``
   链接，逐个抓下来核对标题与译者署名。
@@ -43,6 +44,7 @@ import pickle
 import re
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
@@ -63,7 +65,7 @@ ATWIKI_CACHE = DATA_DIR / "vocaloid_collection_translations_atwiki.pickle"
 
 CACHE_TTL = 14 * 24 * 3600          # 一首歌多久重新核对一次
 ATWIKI_TTL = 7 * 24 * 3600          # AtWiki 页面清单多久重建一次
-CACHE_VERSION = 2                   # 判定规则变了就 +1，旧缓存自动作废
+CACHE_VERSION = 3                   # 判定规则变了就 +1，旧缓存自动作废
 REQUEST_TIMEOUT = 25
 MAX_SOURCES = 3
 
@@ -407,7 +409,11 @@ def cell_state(existing: str, cached: Optional[Dict]) -> str:
 # ---------------------------------------------------------------- 网络
 
 class Fetcher:
-    """带浏览器 UA、bilibili cookie 与重试的抓取器（标准库，不引新依赖）。"""
+    """带浏览器 UA、bilibili cookie 与重试的抓取器（标准库，不引新依赖）。
+
+    被站点盾掉（HTTP 412）之后整个站就不再访问：GitHub Actions 的机房 IP 会被
+    B站 直接 412，硬重试只是把一轮拖到超时。
+    """
 
     def __init__(self) -> None:
         jar = http.cookiejar.CookieJar()
@@ -419,6 +425,19 @@ class Fetcher:
             ("Referer", "https://www.bilibili.com/"),
         ]
         self._cookies_ready = False
+        self.blocked: set = set()
+
+    @staticmethod
+    def site_of(url: str) -> str:
+        host = urllib.parse.urlsplit(url).netloc.lower()
+        if host.endswith("bilibili.com"):
+            return "bilibili.com"
+        if host.endswith("music.163.com"):
+            return "music.163.com"
+        return host
+
+    def is_blocked(self, url: str) -> bool:
+        return self.site_of(url) in self.blocked
 
     def _warm_up(self) -> None:
         """bilibili 的搜索接口要 ``buvid3`` cookie，先访问一次首页拿下来。"""
@@ -431,10 +450,22 @@ class Fetcher:
             pass
 
     def text(self, url: str, attempts: int = 3) -> str:
+        if self.is_blocked(url):
+            return ""
         for attempt in range(attempts):
             try:
                 with self.opener.open(url, timeout=REQUEST_TIMEOUT) as response:
                     return response.read().decode("utf-8", "replace")
+            except urllib.error.HTTPError as exc:
+                if exc.code == 412:     # 反爬：重试没用
+                    self.blocked.add(self.site_of(url))
+                    pywikibot.warning(f"{self.site_of(url)} 拒绝访问（HTTP 412），"
+                                      f"本轮不再查这个站：{url}")
+                    return ""
+                if attempt == attempts - 1:
+                    pywikibot.warning(f"读取失败：{url}（{exc}）")
+                    return ""
+                time.sleep(1.5 * (attempt + 1))
             except Exception as exc:    # noqa: BLE001 - 单个来源失败不该中断整轮
                 if attempt == attempts - 1:
                     pywikibot.warning(f"读取失败：{url}（{exc}）")
@@ -675,6 +706,22 @@ def song_mentioned(text: str, song: Song) -> bool:
     return False
 
 
+def producer_mentioned(text: str, song: Song) -> bool:
+    """这段文字里有没有 P主 的名字。
+
+    搜来的视频只对上歌名远远不够：``RITA`` 会搜到 TED 演讲的翻译视频，``亡灵`` 会搜到
+    有声书。译文视频一般会在简介里写「本家：某某」，要求同时出现 P主 才敢用。
+    歌名 / P主 是 ASCII 时按词边界比（``Hal`` 不能匹配 ``halcyon``）。
+    """
+    key = person_key(song.producer)
+    haystack = title_key(text)
+    if not key or not haystack:
+        return False
+    if key.isascii():
+        return re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", haystack) is not None
+    return key in haystack
+
+
 def outbound_links(text: str) -> Tuple[List[str], List[str]]:
     """正文里的 ``(巴哈姆特链接, B站笔记/专栏链接)``。"""
     gamer: List[str] = []
@@ -693,7 +740,8 @@ def video_sources_from_view(fetcher: Fetcher, view: dict, song: Song,
                             ) -> Tuple[List[str], str, str]:
     """已经取到 view 的 B站投稿能提供的译文来源 → ``(来源列表, 简介, 标题)``。
 
-    ``require_mention=True``（搜索来的视频）时要求标题或简介提到这首歌；
+    ``require_mention=True``（搜索来的视频）时要求标题或简介**同时**提到这首歌和
+    P主——只对上歌名会把 TED 演讲、有声书之类的翻译视频当成译文来源。
     本家投稿（voca 条目 Songbox 里的 ``bb_id``）不需要。
     ``deep=False`` 只看简介与评论（弹幕要额外一次请求，留给「还没找到」时用）。
     """
@@ -701,9 +749,11 @@ def video_sources_from_view(fetcher: Fetcher, view: dict, song: Song,
     title = str(view.get("title") or "")
     desc = str(view.get("desc") or "")
     owner = clean_name(str((view.get("owner") or {}).get("name") or ""))
-    mentioned = song_mentioned(title, song) or song_mentioned(desc, song)
-    if require_mention and not mentioned:
-        return [], desc, title
+    if require_mention:
+        mentioned = song_mentioned(title, song) or song_mentioned(desc, song)
+        credited = producer_mentioned(title, song) or producer_mentioned(desc, song)
+        if not (mentioned and credited):
+            return [], desc, title
 
     url = BILIBILI_VIDEO.format(bvid=bvid) if bvid else ""
     sources: List[str] = []

@@ -38,10 +38,11 @@
 总榜名次，四种情况都算「已录入」）。同一首歌只录一次：以 ROOKIE 行录入时用
 ``{{注}}`` 标总榜，就不会再补一行 TOP100 的重复条目。
 
-补录前一定核对 P主（``atwiki_song``）：``Colors(kouta)`` 这类带括号注记的曲名，
-AtWiki 页面的作曲必须是括号里那位；日文曲名可以直接认；纯中文 / ASCII 曲名必须
-靠日文原名才对上。只按页面名匹配过的地方踩过雷——2026-10-22 首版补的 10 行里
-6 行是「同名不同曲」（`Libra(mira)` 对上了 Eon 的 Libra 等），已整笔撤回。
+补录前一定过三道关（`atwiki_song` + `navbox_titles`）：这首歌要在**本赛季**的大家族
+模板里；曲名要是日文原名（含假名）或带括号注记；带括号时 AtWiki 的 ``作曲`` 必须是
+括号里那位。2026-10-22 只按页面名匹配过，补的 10 行里 6 行是「同名不同曲」
+（`Libra(mira)` 对上了 Eon 的 Libra 等），随后 4 行里的 2 行也只能靠同名，
+两笔都已整笔撤回——宁可漏，不能错。
 
 **维护自己的写法**：机器人只改两种格子——空的，和自己写过的（内容与缓存里记过的
 ``sources`` / ``written`` 逐字相同）。这些格子会随新结论更新 / 清空；别人写过的
@@ -385,7 +386,6 @@ TRACK_SPLIT_RE = re.compile(r";(TOP\d+|ROOKIE|REMIX)[^\n]*")
 NOTE_OVERALL_RE = re.compile(r"\{\{注\|\s*\d+\s*\|\s*总榜为第?\s*(\d+)")
 COLORLINK_CELL_RE = re.compile(r"\{\{colorlink\|[^|]*\|(?P<title>.+?)\|(?P<rank>\d+)\}\}")
 RANK_LINK_CELL_RE = re.compile(r"\[\[(?P<title>[^\]|]+)\|(?P<rank>\d+)\]\]")
-LJ_LINK_PAIR_RE = re.compile(r"\{\{lj\|\[\[(?P<target>[^\]|]+)(?:\|(?P<alias>[^\]]*))?\]\]\}\}")
 LINK_PAIR_RE = re.compile(r"\[\[(?P<target>[^\]|]+)(?:\|(?P<alias>[^\]]*))?\]\]")
 CREDIT_LINE_RE = re.compile(r"^\s*(?:作\s*[詞词]|作\s*曲)\s*[:：]\s*(?P<name>[^\n]{1,60})$", re.M)
 COMPOSE_LINE_RE = re.compile(r"^\s*作\s*曲\s*[:：]\s*(?P<name>[^\n]{1,60})$", re.M)
@@ -447,20 +447,19 @@ def parse_contrib_seasons(text: str) -> Dict[str, Dict[str, Dict[int, Tuple[str,
     return seasons
 
 
-def navbox_names(text: str) -> Dict[str, str]:
-    """大家族模板 → ``{归一化条目名: 日文原名}``（``{{lj|[[中文名|日文名]]}}``）。"""
-    names: Dict[str, str] = {}
-    for match in LJ_LINK_PAIR_RE.finditer(text):
-        target, alias = match.group("target"), match.group("alias") or ""
-        if alias and title_key(target) and title_key(target) != title_key(alias):
-            names[title_key(target)] = alias.strip()
-        elif alias and not names.get(title_key(alias)):
-            names.setdefault(title_key(alias), target.strip())
+def navbox_titles(text: str) -> Set[str]:
+    """大家族模板里出现过的曲名（条目名与日文原名）→ ``{归一化曲名}``。
+
+    只做「这首歌确实在这个赛季的清单里」这一项核对；模板里的 ``[[条目|显示文字]]``
+    后半段有时只是显示文字，所以不拿它当翻译名用。
+    """
+    titles: Set[str] = set()
     for match in LINK_PAIR_RE.finditer(text):
-        target, alias = match.group("target"), (match.group("alias") or "").strip()
-        if alias and not alias.isdigit() and title_key(target) and alias != target:
-            names.setdefault(title_key(target), alias)
-    return names
+        for name in (match.group("target"), match.group("alias") or ""):
+            key = title_key(name)
+            if key:
+                titles.add(key)
+    return titles
 
 
 def page_season_songs(text: str) -> Dict[str, Dict[str, Set[int]]]:
@@ -1243,13 +1242,13 @@ def season_data(site, fetcher: Fetcher, refresh: bool = False) -> Dict:
     cache = load_cache(SEASONS_CACHE)
     if not refresh and cache.get("data") and is_fresh(cache.get("built"), SEASONS_TTL):
         return cache["data"]
-    data: Dict = {"contrib": {}, "names": {}}
+    data: Dict = {"contrib": {}, "titles": {}}
     try:
         contrib = Page(site, CONTRIB_PAGE).text or ""
         data["contrib"] = parse_contrib_seasons(contrib)
     except Exception as exc:            # noqa: BLE001
         pywikibot.warning(f"读取贡献列表失败：{exc}")
-    names: Dict[str, str] = {}
+    titles: Dict[str, List[str]] = {}
     for season in data["contrib"]:
         template = NAVBOX_TEMPLATE.format(season=season.replace("ボカコレ", ""))
         try:
@@ -1257,8 +1256,8 @@ def season_data(site, fetcher: Fetcher, refresh: bool = False) -> Dict:
         except Exception as exc:        # noqa: BLE001
             pywikibot.warning(f"读取大家族模板失败（{template}）：{exc}")
             continue
-        names.update(navbox_names(markup))
-    data["names"] = names
+        titles[season] = sorted(navbox_titles(markup))
+    data["titles"] = titles
     if data["contrib"]:
         save_cache({"built": time.time(), "data": data}, SEASONS_CACHE)
     return data
@@ -1279,45 +1278,45 @@ def has_kana(text: str) -> bool:
     return bool(re.search(r"[\u3040-\u30ff]", str(text or "")))
 
 
-def atwiki_song(fetcher: Fetcher, index: Dict[str, str], names: Dict[str, str],
+def atwiki_song(fetcher: Fetcher, index: Dict[str, str],
                 title: str) -> Optional[Tuple[str, str, str]]:
     """核实一首「还没录入」的歌在 AtWiki 有没有译文 → ``(页面 id, 译者, P主)``。
 
-    页面名对上不够（同名不同曲太多），还要核对 P主：
-    * 曲名带括号注记时（``Colors(kouta)``、``月光(春风哈娜)``），P主 必须就是括号里那位；
-    * 曲名本身是日文，或用大家族模板里的**日文原名**才对上时，可以认；
-    * 只靠纯中文 / ASCII 曲名对上又没法核对 P主 的，一律不认（宁可漏，不能错）。
+    只靠「页面名对上」不算——同名不同曲在歌词wiki 上到处都是。所以：
+
+    * 曲名必须是**日文原名**（含假名）才查：纯中文 / ASCII 曲名对上的多半是别的歌，
+      而且中文名在 贡献列表 / 模板里的对应关系不可靠（``[[Femme Fatale|femme fatale]]``
+      这种「显示文字」会被当成日文名）；
+    * 曲名带括号注记时（``Colors(kouta)``、``月光(春风哈娜)``），AtWiki 的作曲必须
+      就是括号里那位；
+    * 页面里读不到作曲 / 译者就跳过。
+
+    2026-10-22 首版没这些限制，补的 10 行里 6 行是「同名不同曲」，已整笔撤回。
     """
     hint = title_hint(title)
-    japanese = has_kana(title)
-    alias = names.get(title_key(title)) or ""
-    candidates = [(title, "title")]
-    if alias:
-        candidates.append((alias, "alias"))
-    for name, via in candidates:
-        pid = index.get(title_key(name))
-        if not pid:
-            continue
-        body = atwiki_body(fetcher, pid)
-        if not body:
-            continue
-        producer = atwiki_credits(body)
-        translator = credit_name(body)
-        if hint:
-            if person_key(producer) != person_key(hint):
-                continue
-        elif via == "title" and not japanese:
-            continue
-        if producer or translator:
-            return pid, translator, producer
-    return None
+    if not has_kana(title) and not hint:
+        return None                     # 纯中文 / ASCII 又没法核对 P主：不认
+    pid = index.get(title_key(title))
+    if not pid:
+        return None
+    body = atwiki_body(fetcher, pid)
+    if not body:
+        return None
+    producer = atwiki_credits(body)
+    translator = credit_name(body)
+    if hint and person_key(producer) != person_key(hint):
+        return None                     # 同名不同曲
+    if not producer and not translator:
+        return None
+    return pid, translator, producer
 
 
 def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str],
                         data: Dict, max_add: int, write: bool) -> Tuple[str, int]:
     """把「外站有翻译、搜集库没录入」的歌补进对应赛季的表格 → ``(新文本, 补了几行)``。"""
     contrib = data.get("contrib") or {}
-    names = data.get("names") or {}
+    season_titles = {season: set(titles) for season, titles
+                     in (data.get("titles") or {}).items()}
     if not contrib:
         pywikibot.warning("拿不到活动清单，本轮不补录")
         return text, 0
@@ -1328,7 +1327,9 @@ def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str]
     for song in missing:
         if added >= max_add:
             break
-        found = atwiki_song(fetcher, index, names, song.title)
+        if title_key(song.title) not in season_titles.get(song.season, set()):
+            continue                    # 本赛季大家族模板里没有这首歌：不敢认
+        found = atwiki_song(fetcher, index, song.title)
         if not found:
             continue
         pid, translator, producer = found

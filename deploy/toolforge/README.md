@@ -425,6 +425,30 @@ Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `sched
   查过但没找到的按 `--ttl` 过期后再查。GitHub runner 出口到 AtWiki / B 站都慢，
   不设上限时一轮容易跑到超时（实测冷缓存 55 分钟还没跑完），所以那边也限 60 首。
 
+### 补录「外站有翻译、搜集库没录入」的曲目（`--add-missing`）
+
+搜集库只收「外站已经有译文」的歌，所以每轮还会拿活动清单反查一次：
+
+| 数据 | 来源 | 用途 |
+| --- | --- | --- |
+| 赛季 / 赛道 / 名次 / 曲名 / 是否已有条目 | [[Vocawiki:贡献列表/The VOCALOID Collection]] 的各赛季表格 | `[[曲名\|名次]]` = 还没条目，`{{colorlink\|#色\|曲名\|名次}}` = 已被谁创建 |
+| 条目名 ↔ 日文原名 | `Template:The VOCALOID Collection2023春` 等 12 个大家族模板 | 拿日文原名才能和 AtWiki 页面名对上 |
+| 译文与 P主 | AtWiki 页面（页面名对上才算，`作曲：`→P主，`翻譯：`→译者） | 唯一允许自动补录的证据 |
+
+判定「已录入」有四种情况，任一命中就跳过：同赛道名次已存在、`{{注|N|总榜为第M}}`
+里记过这个总榜名次（同一首歌用 ROOKIE 行录入过，不能再补一行 TOP100）、曲名在页面上、
+贡献列表里已经标成「已创建」（有条目的歌不属于搜集库——2026-10-22 页面上「创建后就
+手工删行」的做法就是这样）。
+
+补进去的行按名次顺序插入对应赛季的表格，只写有内容的那一侧（另一侧留空，和页面上
+空半边的行一致），`条目状态` 一律 `{{color=#FF0000|未创建}}`。每轮最多补 10 行
+（`--max-add`），方便逐条 review。活动清单缓存 7 天（`data/vocaloid_collection_seasons.pickle`）。
+
+```bash
+python bots/vocaloid_collection_translations.py --add-missing            # 干跑，看会补哪些
+python bots/vocaloid_collection_translations.py --write --add-missing --max-add 3
+```
+
 ```bash
 source ~/pyvenv/bin/activate
 cd ~/Vocawiki-bots

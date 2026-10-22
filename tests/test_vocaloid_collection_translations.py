@@ -485,6 +485,25 @@ class FetcherBlockTest(TestCase):
         self.assertTrue(fetcher.is_blocked("https://api.bilibili.com/x/v2/reply?oid=1"))
         self.assertFalse(fetcher.is_blocked("https://music.163.com/api/search/get?s=x"))
 
+    def test_repeated_failures_stop_the_site(self):
+        """连不上的站要整轮放弃：补录扫描上千行，否则会一直卡在重试里。"""
+        fetcher = tr.Fetcher()
+        calls = []
+
+        def fake_open(url, timeout=None):
+            calls.append(url)
+            raise urllib.error.URLError("ssl eof")
+
+        fetcher.opener.open = fake_open
+        with patch("time.sleep"):
+            for _ in range(tr.FAILURE_LIMIT):
+                fetcher.text("https://w.atwiki.jp/x", attempts=1)
+            before = len(calls)
+            fetcher.text("https://w.atwiki.jp/y", attempts=1)
+        self.assertEqual(before, len(calls), "达到上限后不该再发请求")
+        self.assertTrue(fetcher.is_blocked("https://w.atwiki.jp/z"))
+        self.assertFalse(fetcher.is_blocked("https://music.163.com/api/x"))
+
     def test_other_errors_still_retry(self):
         fetcher = tr.Fetcher()
         calls = []
@@ -567,6 +586,127 @@ class RunOnceTest(TestCase):
         self.assertTrue(changed)
         self.assertIn("[https://new.example 网易云音乐]", page.saved[0])
         self.assertNotIn("old.example", page.saved[0])
+
+
+CONTRIB = """== 相关统计 ==
+=== 2022春 ===
+{{multicol}}
+<poem>;TOP100 (75/100)
+{|class="wikitable"
+|-
+| bgcolor=#8DA5B0 | {{colorlink|#000|随之任之|1}} || [[無題 ep.01|5]] || [[ORDER|27]]
+|-
+| {{colorlink|#FFF|maison|46}} || {{colorlink|#FFF|Equivalent|56}} || {{colorlink|#FFF|东京Nighthawk|53}}
+|}
+;ROOKIE (43/100)
+{|class="wikitable"
+|-
+| {{colorlink|#FFF|感情欺诈|1}} || [[無題 ep.01|3]] || [[ORDER|14]]
+|-
+| [[心不在焉|5]] || [[没有心|7]]
+|}
+"""
+
+NAVBOX = """{{Navbox
+| list1 = {{lj|[[無題 ep.01]]}}<!--
+     --> • {{lj|[[心不在焉|こころもとなく]]}}<!--
+     --> • [[ORDER]]<!--
+     --> • [[maison|メゾン]]
+}}
+"""
+
+SEASON_PAGE = """== ボカコレ2022春 ==
+{| class="wikitable " style="text-align:center;"
+|-
+! colspan="6"|TOP100 !! colspan="6"|ROOKIE
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 24 || [[诅咒之吻]] || IZ || {{color|#FF0000|未创建}} || || || {{注|3|总榜为第5}} || [[无题 ep.01]] || {{lj|袖野あらわ}} || {{color|#FF0000|未创建}} || 
+|-
+| 52 || [[日本之夏]] || 平田義久 || {{color|#FF0000|未创建}} || || || 7 || [[没有心]] || saikawa || {{color|#FF0000|未创建}} || 
+|}
+"""
+
+
+class ContribParseTest(TestCase):
+    def test_tracks_and_created_flags(self):
+        seasons = tr.parse_contrib_seasons(CONTRIB)
+        self.assertIn("ボカコレ2022春", seasons)
+        top = seasons["ボカコレ2022春"]["TOP100"]
+        self.assertEqual(("随之任之", True), top[1])
+        self.assertEqual(("無題 ep.01", False), top[5])
+        self.assertEqual(("maison", True), top[46])
+        self.assertEqual(5, len(seasons["ボカコレ2022春"]["ROOKIE"]))
+
+    def test_navbox_names(self):
+        names = tr.navbox_names(NAVBOX)
+        self.assertEqual("こころもとなく", names[tr.title_key("心不在焉")])
+        self.assertEqual("メゾン", names[tr.title_key("maison")])
+        self.assertNotIn(tr.title_key("ORDER"), names)
+
+
+class PageSeasonsTest(TestCase):
+    def test_records_per_track(self):
+        recorded = tr.page_season_songs(SEASON_PAGE)
+        self.assertEqual({24, 52}, recorded["ボカコレ2022春"]["TOP100"])
+        self.assertEqual({3, 7}, recorded["ボカコレ2022春"]["ROOKIE"])
+
+    def test_missing_skips_created_and_recorded(self):
+        seasons = tr.parse_contrib_seasons(CONTRIB)
+        missing = tr.missing_songs(SEASON_PAGE, seasons)
+        pairs = {(item.track, item.rank) for item in missing}
+        self.assertNotIn(("TOP100", 46), pairs)     # maison 已经有条目
+        self.assertNotIn(("TOP100", 56), pairs)     # Equivalent 已经有条目
+        self.assertNotIn(("ROOKIE", 3), pairs)      # 已录入（无题 ep.01）
+        self.assertNotIn(("ROOKIE", 7), pairs)      # 已录入（没有心）
+        self.assertIn(("TOP100", 27), pairs)        # ORDER 未创建、未录入 → 缺
+        self.assertIn(("ROOKIE", 5), pairs)
+        # TOP100 第 5 号（無題 ep.01）已经以 ROOKIE 行 + 总榜注记录入过，不能再补一行
+        self.assertNotIn(("TOP100", 5), pairs)
+        # ROOKIE 第 1 号已有条目
+        self.assertNotIn(("ROOKIE", 1), pairs)
+
+
+class RowBuildTest(TestCase):
+    def test_builds_only_the_target_side(self):
+        row = tr.build_row(2, 1, ["5", "[[曲]]", "P主", "未创建", "[u 源]", ""])
+        self.assertEqual("| || || || || || || 5 || [[曲]] || P主 || 未创建 || [u 源] || ", row)
+        self.assertEqual(12, len(tr.split_row(row)))
+        self.assertEqual("", tr.split_row(row)[0].value)
+
+    def test_inserts_at_the_right_rank(self):
+        text = tr.insert_row(SEASON_PAGE, "ボカコレ2022春", "TOP100", 30,
+                             "| 30 || [[新歌]] || 某人 || {{color|#FF0000|未创建}} || || ")
+        self.assertIn("| 24 || [[诅咒之吻]]", text)
+        lines = text.split("\n")
+        first = [i for i, l in enumerate(lines) if "新歌" in l][0]
+        later = [i for i, l in enumerate(lines) if "日本之夏" in l][0]
+        self.assertLess(first, later, "30 应该插在 52 前面")
+        self.assertTrue(lines[first - 1].startswith("|-"), "新行前面要有分隔符")
+        self.assertEqual("|-", lines[first + 1], "原来的行要留着自己的分隔符")
+        self.assertNotIn("|-\n|-", text)
+
+    def test_appends_at_the_end_when_rank_is_largest(self):
+        text = tr.insert_row(SEASON_PAGE, "ボカコレ2022春", "ROOKIE", 90,
+                             "| 90 || [[最后一首]] || P || {{color|#FF0000|未创建}} || || ")
+        lines = text.split("\n")
+        last_row = [i for i, l in enumerate(lines) if "没有心" in l][0]
+        added = [i for i, l in enumerate(lines) if "最后一首" in l][0]
+        self.assertGreater(added, last_row)
+        self.assertIn("|}", lines[added + 1])
+
+    def test_atwiki_credits_prefer_composer(self):
+        body = "作詞：甲\n作曲：{{lj|乙}}\n編曲：丙\n翻譯：丁"
+        self.assertEqual("{{lj|乙}}", tr.atwiki_credits(body))
+        body2 = "作詞：甲\n翻譯：丁"
+        self.assertEqual("甲", tr.atwiki_credits(body2))
+        self.assertEqual("", tr.atwiki_credits("翻譯：丁"))
+
+    def test_render_song_title(self):
+        self.assertEqual("{{lj|[[ハロー]]}}", tr.render_song_title("ハロー"))
+        self.assertEqual("[[心不在焉]]", tr.render_song_title("心不在焉"))
+        self.assertEqual("[[ハロー(初音ミク)]]", tr.render_song_title("ハロー(初音ミク)"))
 
 
 class CollectSourcesTest(TestCase):

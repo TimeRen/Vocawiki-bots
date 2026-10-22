@@ -26,6 +26,18 @@
 「标题对上」用 ``title_key()``（全半角、大小写、空白、``{{lj|…}}``、括号消歧后缀
 都归一化）。查不到就留空——宁可少填，也不要把别人的翻译安到另一首歌上。
 
+**补录未录入的曲目**（``--add-missing``）：搜集库只收「外站已经有译文」的歌，所以
+拿活动清单反查——[[Vocawiki:贡献列表/The VOCALOID Collection]] 的赛季表列出每个赛季
+每条赛道 100 格的曲名与名次（``[[曲名|名次]]`` 是还没条目、``{{colorlink|…}}`` 是
+已经有条目），大家族模板 ``Template:The VOCALOID Collection2023春`` 给出条目名对应的
+日文原名。某首歌如果还没条目、搜集库也没录入、而 AtWiki 查得到（页面名对上，从
+作詞 / 作曲 里取 P主、从 ``翻譯：`` 里取译者），就按名次插进对应赛季的表格。
+
+2026-10-22 页面上「已创建 ⇒ 手工删行」的差异也据此处理：**已经有条目的歌不会补回来**
+（``created`` 标记 + 曲名在页面上 + 同赛道名次已存在 + ``{{注|N|总榜为第M}}`` 记过的
+总榜名次，四种情况都算「已录入」）。同一首歌只录一次：以 ROOKIE 行录入时用
+``{{注}}`` 标总榜，就不会再补一行 TOP100 的重复条目。
+
 **维护自己的写法**：机器人只改两种格子——空的，和自己写过的（内容与缓存里记过的
 ``sources`` / ``written`` 逐字相同）。这些格子会随新结论更新 / 清空；别人写过的
 格子一个字都不碰，**哪怕格式和机器人一模一样**（页面主人也按
@@ -56,7 +68,7 @@ import urllib.request
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import pywikibot
 from pywikibot import Page
@@ -73,6 +85,7 @@ CACHE_TTL = 14 * 24 * 3600          # 一首歌多久重新核对一次
 ATWIKI_TTL = 7 * 24 * 3600          # AtWiki 页面清单多久重建一次
 CACHE_VERSION = 4                   # 判定规则变了就 +1，旧缓存自动作废
 REQUEST_TIMEOUT = 25
+FAILURE_LIMIT = 5                   # 同一个站连错几次就整轮不再查
 MAX_SOURCES = 3
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -344,6 +357,275 @@ def apply_fills(text: str, fills: Dict[Tuple[int, int], str]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- 赛季清单
+#
+# 搜集库只收「外站已经有译文」的曲目，所以要拿活动清单反查：哪些歌还没条目、
+# 而且外站查得到翻译，却没被录进搜集库。
+#
+# 清单有两处：
+#   * [[Vocawiki:贡献列表/The VOCALOID Collection]]——按赛季分节，每节按赛道
+#     （TOP100 / ROOKIE / TOP30）列出 100 格：``[[曲名|名次]]`` 表示还没条目，
+#     ``{{colorlink|#色|曲名|名次}}`` 表示已被某位用户创建（颜色是创建者）。
+#   * 大家族模板 ``Template:The VOCALOID Collection2023春`` 等——条目名 ↔ 日文原名，
+#     拿日文原名才能和 AtWiki 的页面名对上。
+
+CONTRIB_PAGE = "Vocawiki:贡献列表/The VOCALOID Collection"
+NAVBOX_TEMPLATE = "Template:The VOCALOID Collection{season}"
+SEASONS_CACHE = DATA_DIR / "vocaloid_collection_seasons.pickle"
+SEASONS_TTL = 7 * 24 * 3600         # 活动清单多久重新抓一次
+
+SEASON_HEADING_RE = re.compile(r"^==\s*(ボカコレ[^=\n]+?)\s*==\s*$", re.M)
+CONTRIB_HEADING_RE = re.compile(r"^===\s*([^=\n]+?)\s*===\s*$", re.M)
+TRACK_SPLIT_RE = re.compile(r";(TOP\d+|ROOKIE|REMIX)[^\n]*")
+NOTE_OVERALL_RE = re.compile(r"\{\{注\|\s*\d+\s*\|\s*总榜为第?\s*(\d+)")
+COLORLINK_CELL_RE = re.compile(r"\{\{colorlink\|[^|]*\|(?P<title>.+?)\|(?P<rank>\d+)\}\}")
+RANK_LINK_CELL_RE = re.compile(r"\[\[(?P<title>[^\]|]+)\|(?P<rank>\d+)\]\]")
+LJ_LINK_PAIR_RE = re.compile(r"\{\{lj\|\[\[(?P<target>[^\]|]+)(?:\|(?P<alias>[^\]]*))?\]\]\}\}")
+LINK_PAIR_RE = re.compile(r"\[\[(?P<target>[^\]|]+)(?:\|(?P<alias>[^\]]*))?\]\]")
+CREDIT_LINE_RE = re.compile(r"^\s*(?:作\s*[詞词]|作\s*曲)\s*[:：]\s*(?P<name>[^\n]{1,60})$", re.M)
+COMPOSE_LINE_RE = re.compile(r"^\s*作\s*曲\s*[:：]\s*(?P<name>[^\n]{1,60})$", re.M)
+
+
+@dataclass
+class SeasonSong:
+    """活动清单里的一格：某个赛季、某条赛道、某个名次上的歌。"""
+
+    season: str                 # ``ボカコレ2022春``
+    track: str                  # ``TOP100`` / ``ROOKIE`` / ``TOP30``
+    rank: int
+    title: str                  # 条目名（还没条目时就是日文名或暂定名）
+    created: bool = False
+
+
+def split_sections(text: str, pattern: re.Pattern) -> List[Tuple[str, str]]:
+    """按 ``== 标题 ==`` 切分 → ``[(标题, 正文)]``（正文不含标题行）。"""
+    marks = [(m.group(1), m.start(), m.end()) for m in pattern.finditer(text)]
+    sections: List[Tuple[str, str]] = []
+    for index, (name, _start, end) in enumerate(marks):
+        stop = marks[index + 1][1] if index + 1 < len(marks) else len(text)
+        sections.append((name, text[end:stop]))
+    return sections
+
+
+def section_sides(body: str) -> List[str]:
+    """表头 ``! colspan="6"|TOP100 !! colspan="6"|ROOKIE`` → ``["TOP100", "ROOKIE"]``。"""
+    labels = re.findall(r'! colspan="\d+"\s*\|\s*([^!\n|]+)', body)
+    return [label.strip() for label in labels]
+
+
+def parse_track_cells(body: str) -> Dict[int, Tuple[str, bool]]:
+    """一条赛道的表格正文 → ``{名次: (曲名, 是否已有条目)}``。"""
+    cells: Dict[int, Tuple[str, bool]] = {}
+    for match in COLORLINK_CELL_RE.finditer(body):
+        title = link_target(match.group("title")) or match.group("title").strip()
+        cells[int(match.group("rank"))] = (title, True)
+    for match in RANK_LINK_CELL_RE.finditer(body):
+        rank = int(match.group("rank"))
+        if rank in cells:               # colorlink 里的内层链接已经算过
+            continue
+        cells[rank] = (match.group("title").strip(), False)
+    return cells
+
+
+def parse_contrib_seasons(text: str) -> Dict[str, Dict[str, Dict[int, Tuple[str, bool]]]]:
+    """贡献列表 → ``{赛季: {赛道: {名次: (曲名, 是否已有条目)}}}``。"""
+    seasons: Dict[str, Dict[str, Dict[int, Tuple[str, bool]]]] = {}
+    for name, body in split_sections(text, CONTRIB_HEADING_RE):
+        parts = TRACK_SPLIT_RE.split(body)
+        tracks: Dict[str, Dict[int, Tuple[str, bool]]] = {}
+        for track, chunk in zip(parts[1::2], parts[2::2]):
+            cells = parse_track_cells(chunk)
+            if cells:
+                tracks[track] = cells
+        if tracks:
+            seasons["ボカコレ" + name] = tracks
+    return seasons
+
+
+def navbox_names(text: str) -> Dict[str, str]:
+    """大家族模板 → ``{归一化条目名: 日文原名}``（``{{lj|[[中文名|日文名]]}}``）。"""
+    names: Dict[str, str] = {}
+    for match in LJ_LINK_PAIR_RE.finditer(text):
+        target, alias = match.group("target"), match.group("alias") or ""
+        if alias and title_key(target) and title_key(target) != title_key(alias):
+            names[title_key(target)] = alias.strip()
+        elif alias and not names.get(title_key(alias)):
+            names.setdefault(title_key(alias), target.strip())
+    for match in LINK_PAIR_RE.finditer(text):
+        target, alias = match.group("target"), (match.group("alias") or "").strip()
+        if alias and not alias.isdigit() and title_key(target) and alias != target:
+            names.setdefault(title_key(target), alias)
+    return names
+
+
+def page_season_songs(text: str) -> Dict[str, Dict[str, Set[int]]]:
+    """搜集库页面 → ``{赛季: {赛道: {已录入的名次}}}``。"""
+    result: Dict[str, Dict[str, Set[int]]] = {}
+    for name, body in split_sections(text, SEASON_HEADING_RE):
+        sides = section_sides(body)
+        if not sides:
+            continue
+        rows, _ = parse_rows(body)
+        tracks = {track: set() for track in sides}
+        for row in rows:
+            for side, track in enumerate(sides):
+                if side >= row.sides:
+                    continue
+                found = re.search(r"\d+", row.text(side, COLUMNS.index("rank")))
+                if found and row.text(side, COLUMNS.index("title")).strip():
+                    tracks[track].add(int(found.group(0)))
+        result[name] = tracks
+    return result
+
+
+def page_song_keys(text: str) -> Set[str]:
+    """页面里出现过的所有曲名（比名次更保险，防止同一首歌算两种名次）。"""
+    return {song.key for song in songs_from(text) if song.key}
+
+
+def page_overall_ranks(text: str) -> Dict[str, Set[int]]:
+    """搜集库里 ``{{注|13|总榜为第25}}`` 记下的「总榜名次」→ ``{赛季: {总榜名次}}``。
+
+    同一首歌只录入一次：ROOKIE 的行用「总榜」标出它在 TOP100 里的名次，所以
+    TOP100 的名次已经在页面上时，不该再补一行 TOP100 的重复条目。
+    """
+    result: Dict[str, Set[int]] = {}
+    for name, body in split_sections(text, SEASON_HEADING_RE):
+        found = {int(value) for value in NOTE_OVERALL_RE.findall(body)}
+        if found:
+            result[name] = found
+    return result
+
+
+def missing_songs(page_text: str, contrib: Dict[str, Dict[str, Dict[int, Tuple[str, bool]]]],
+                  limit: int = 0, extra_keys: Optional[Set[str]] = None) -> List[SeasonSong]:
+    """活动清单里「还没条目、搜集库也没录入」的歌。
+
+    只认搜集库里**已经存在的那条赛道**（页面没有 TOP30 侧就不会凭空加一列）。
+    判定「已录入」：同赛道名次在、总榜名次在（``{{注}}``）、或曲名原本就在页面上。
+    ``created=True`` 的歌有条目了，不属于搜集库。
+    """
+    recorded = page_season_songs(page_text)
+    overall = page_overall_ranks(page_text)
+    keys = page_song_keys(page_text)
+    keys |= set(extra_keys or ())
+    missing: List[SeasonSong] = []
+    for season, tracks in contrib.items():
+        sections = recorded.get(season) or {}
+        totals = overall.get(season) or set()
+        for track, cells in tracks.items():
+            if track not in sections:
+                continue
+            for rank, (title, created) in sorted(cells.items()):
+                if created or rank in sections[track]:
+                    continue
+                if track != "ROOKIE" and rank in totals:
+                    continue            # 这首歌以 ROOKIE 行录入过（注里写着总榜名次）
+                if title_key(title) in keys:
+                    continue
+                missing.append(SeasonSong(season, track, rank, title))
+    missing.sort(key=lambda item: (item.season, item.track, item.rank))
+    return missing[:limit] if limit else missing
+
+
+def atwiki_credits(body: str) -> str:
+    """AtWiki 页面正文里的作曲（没有就作詞）——也就是 P主。"""
+    for pattern in (COMPOSE_LINE_RE, CREDIT_LINE_RE):
+        for match in pattern.finditer(body):
+            name = re.split(r"[、,/／]", match.group("name"))[0].strip()
+            name = re.sub(r"\s*(?:feat\.?|ft\.).*$", "", name, flags=re.I).strip()
+            if clean_name(name):
+                return name
+    return ""
+
+
+def render_song_title(title: str) -> str:
+    """纯日文名的曲名包一层 ``{{lj|…}}``（和页面里其他行的写法一致）。"""
+    title = title.strip()
+    if re.search(r"[\u3040-\u30ff]", title) and not re.search(r"[\u4e00-\u9fff]", title):
+        return "{{lj|[[" + title + "]]}}"
+    return "[[" + title + "]]"
+
+
+def render_producer(name: str) -> str:
+    name = name.strip()
+    if not name:
+        return ""
+    if re.search(r"[\u3040-\u30ff]", name) and not re.search(r"[\u4e00-\u9fff]", name):
+        return "{{lj|" + name + "}}"
+    return name
+
+
+def section_uses_note(body: str, side: int) -> bool:
+    """这一侧的名次格是不是统一写成 ``{{注|N|总榜为第M}}``（2022春 的 ROOKIE 就是这样）。"""
+    rows, _ = parse_rows(body)
+    seen = [row.text(side, COLUMNS.index("rank")).strip() for row in rows
+            if side < row.sides and row.text(side, COLUMNS.index("rank")).strip()]
+    return bool(seen) and all("{{注" in value for value in seen)
+
+
+def overall_ranks(contrib: Dict[str, Dict[str, Dict[int, Tuple[str, bool]]]]
+                  ) -> Dict[Tuple[str, str], int]:
+    """``(赛季, 归一化曲名) → 总榜名次``（用 TOP100 / TOP30 那一份算）。"""
+    result: Dict[Tuple[str, str], int] = {}
+    for season, tracks in contrib.items():
+        for track, cells in tracks.items():
+            if track == "ROOKIE":
+                continue
+            for rank, (title, _created) in cells.items():
+                result.setdefault((season, title_key(title)), rank)
+    return result
+
+
+def build_row(sides: int, side: int, values: Sequence[str]) -> str:
+    """造一行表格：只填第 ``side`` 侧，另一侧留空（和页面里空半边的行一致）。"""
+    cells = [Cell(" ", "", "") for _ in range(sides * PER_SIDE)]
+    for offset, value in enumerate(values[:PER_SIDE]):
+        cell = cells[side * PER_SIDE + offset]
+        cell.value = value
+        if value:
+            cell.trail = " "
+    return join_row(cells)
+
+
+def insert_row(text: str, season: str, track: str, rank: int, row: str) -> str:
+    """把一行插进某赛季某赛道，按名次排序；找不到位置就插在表格末尾。"""
+    marks = [(m.start(), m.end()) for m in SEASON_HEADING_RE.finditer(text)]
+    names = [m.group(1) for m in SEASON_HEADING_RE.finditer(text)]
+    if season not in names:
+        return text
+    index = names.index(season)
+    start = marks[index][1]
+    stop = marks[index + 1][0] if index + 1 < len(marks) else len(text)
+    body = text[start:stop]
+    sides = section_sides(body)
+    if track not in sides:
+        return text
+    side = sides.index(track)
+    lines = body.split("\n")
+    rows, _ = parse_rows(body)
+    target = None
+    for item in rows:
+        if side >= item.sides:
+            continue
+        found = re.search(r"\d+", item.text(side, COLUMNS.index("rank")))
+        if found and int(found.group(0)) > rank:
+            target = item.line
+            break
+    if target is None:                  # 没有更大的名次：插在表格最后一行之后
+        for position in range(len(lines) - 1, -1, -1):
+            if lines[position].strip().startswith("|}"):
+                target = position
+                break
+    if target is None:
+        return text
+    # 每行前面都有一行 ``|-``：插在它前面，别把原来那行的分隔符留成两条
+    if target > 0 and lines[target - 1].strip().startswith("|-"):
+        target -= 1
+    new_lines = lines[:target] + ["|-", row] + lines[target:]
+    return text[:start] + "\n".join(new_lines) + text[stop:]
+
+
 # ---------------------------------------------------------------- 署名
 
 def clean_name(name: str) -> str:
@@ -421,6 +703,7 @@ class Fetcher:
         ]
         self._cookies_ready = False
         self.blocked: set = set()
+        self.failures: Dict[str, int] = {}
 
     @staticmethod
     def site_of(url: str) -> str:
@@ -447,14 +730,16 @@ class Fetcher:
     def text(self, url: str, attempts: int = 3) -> str:
         if self.is_blocked(url):
             return ""
+        site = self.site_of(url)
         for attempt in range(attempts):
             try:
                 with self.opener.open(url, timeout=REQUEST_TIMEOUT) as response:
+                    self.failures.pop(site, None)
                     return response.read().decode("utf-8", "replace")
             except urllib.error.HTTPError as exc:
                 if exc.code == 412:     # 反爬：重试没用
-                    self.blocked.add(self.site_of(url))
-                    pywikibot.warning(f"{self.site_of(url)} 拒绝访问（HTTP 412），"
+                    self.blocked.add(site)
+                    pywikibot.warning(f"{site} 拒绝访问（HTTP 412），"
                                       f"本轮不再查这个站：{url}")
                     return ""
                 if attempt == attempts - 1:
@@ -464,6 +749,12 @@ class Fetcher:
             except Exception as exc:    # noqa: BLE001 - 单个来源失败不该中断整轮
                 if attempt == attempts - 1:
                     pywikibot.warning(f"读取失败：{url}（{exc}）")
+                    # 连着几次都连不上就别再试：扫描上千行的补录会一直卡在这里
+                    self.failures[site] = self.failures.get(site, 0) + 1
+                    if self.failures[site] >= FAILURE_LIMIT:
+                        self.blocked.add(site)
+                        pywikibot.warning(f"{site} 连续 {FAILURE_LIMIT} 次读取失败，"
+                                          f"本轮不再查这个站")
                     return ""
                 time.sleep(1.5 * (attempt + 1))
         return ""
@@ -942,9 +1233,100 @@ def collect_sources(fetcher: Fetcher, song: Song, index: Dict[str, str],
     return unique[:MAX_SOURCES]
 
 
+def season_data(site, fetcher: Fetcher, refresh: bool = False) -> Dict:
+    """活动清单（贡献列表 + 12 个大家族模板）缓存 7 天。"""
+    cache = load_cache(SEASONS_CACHE)
+    if not refresh and cache.get("data") and is_fresh(cache.get("built"), SEASONS_TTL):
+        return cache["data"]
+    data: Dict = {"contrib": {}, "names": {}}
+    try:
+        contrib = Page(site, CONTRIB_PAGE).text or ""
+        data["contrib"] = parse_contrib_seasons(contrib)
+    except Exception as exc:            # noqa: BLE001
+        pywikibot.warning(f"读取贡献列表失败：{exc}")
+    names: Dict[str, str] = {}
+    for season in data["contrib"]:
+        template = NAVBOX_TEMPLATE.format(season=season.replace("ボカコレ", ""))
+        try:
+            markup = Page(site, template).text or ""
+        except Exception as exc:        # noqa: BLE001
+            pywikibot.warning(f"读取大家族模板失败（{template}）：{exc}")
+            continue
+        names.update(navbox_names(markup))
+    data["names"] = names
+    if data["contrib"]:
+        save_cache({"built": time.time(), "data": data}, SEASONS_CACHE)
+    return data
+
+
+def atwiki_song(fetcher: Fetcher, index: Dict[str, str], names: Dict[str, str],
+                title: str) -> Optional[Tuple[str, str, str]]:
+    """按条目名 / 日文原名找 AtWiki → ``(页面 id, 译者, P主)``；对不上就不认。"""
+    candidates = [title]
+    alias = names.get(title_key(title))
+    if alias:
+        candidates.append(alias)
+    for name in candidates:
+        pid = index.get(title_key(name))
+        if not pid:
+            continue
+        body = atwiki_body(fetcher, pid)
+        if not body:
+            continue
+        producer = atwiki_credits(body)
+        translator = credit_name(body)
+        if producer or translator:
+            return pid, translator, producer
+    return None
+
+
+def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str],
+                        data: Dict, max_add: int, write: bool) -> Tuple[str, int]:
+    """把「外站有翻译、搜集库没录入」的歌补进对应赛季的表格 → ``(新文本, 补了几行)``。"""
+    contrib = data.get("contrib") or {}
+    names = data.get("names") or {}
+    if not contrib:
+        pywikibot.warning("拿不到活动清单，本轮不补录")
+        return text, 0
+    missing = missing_songs(text, contrib)
+    totals = overall_ranks(contrib)
+    pywikibot.output(f"活动清单里有 {len(missing)} 首未录入搜集库（有条目 / 已录入的不算）")
+    added = 0
+    for song in missing:
+        if added >= max_add:
+            break
+        found = atwiki_song(fetcher, index, names, song.title)
+        if not found:
+            continue
+        pid, translator, producer = found
+        if not producer:
+            continue                    # 没 P主 就没法补行（P主 那一列是必要的）
+        sides = section_sides(dict(split_sections(text, SEASON_HEADING_RE))[song.season])
+        if song.track not in sides:
+            continue
+        side = sides.index(song.track)
+        body = dict(split_sections(text, SEASON_HEADING_RE))[song.season]
+        rank = str(song.rank)
+        overall = totals.get((song.season, title_key(song.title)))
+        if song.track == "ROOKIE" and overall and section_uses_note(body, side):
+            rank = "{{注|%d|总榜为第%d}}" % (song.rank, overall)
+        values = [rank, render_song_title(song.title), render_producer(producer),
+                  "{{color|#FF0000|未创建}}",
+                  render_source(ATWIKI_PAGE.format(pid=pid), "VOCALOID中文歌词wiki",
+                                translator),
+                  ""]
+        row = build_row(len(sides), side, values)
+        text = insert_row(text, song.season, song.track, song.rank, row)
+        added += 1
+        pywikibot.output(f"  + {song.season} {song.track} {song.rank} {song.title}"
+                         f"（{producer}，译文 {translator or '未署名'}）")
+    return text, added
+
+
 def run_once(site, write: bool = False, summary: Optional[str] = None,
              ttl: float = CACHE_TTL, limit: int = 0, refresh: bool = False,
-             fetcher: Optional[Fetcher] = None) -> bool:
+             fetcher: Optional[Fetcher] = None, add_missing: bool = False,
+             max_add: int = 10) -> bool:
     """跑一轮。返回页面是否需要（或已经）改动。"""
     fetcher = fetcher or Fetcher()
     if write:
@@ -1004,6 +1386,14 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     pywikibot.output(f"待查 {len(current)} 行、本轮查了 {queried} 首、"
                      f"改动 {len(fills)} 行")
     text = apply_fills(original, fills)
+    added = 0
+    if add_missing:
+        try:
+            text, added = add_missing_entries(site, fetcher, text, index,
+                                              season_data(site, fetcher, refresh),
+                                              max_add, write)
+        except Exception as exc:        # noqa: BLE001 - 补录失败不影响填来源
+            pywikibot.warning(f"补录未录入的曲目失败：{exc}")
     if text == original:
         pywikibot.output("页面无需更新。")
         return False
@@ -1012,6 +1402,8 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         return True
     page.text = text
     note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行"
+    if added:
+        note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行、补录 {added} 首"
     try:
         page.save(summary=note, minor=True, bot=True, tags="Bot")
     except EditConflictError as exc:
@@ -1034,8 +1426,14 @@ def main() -> None:
                         help="本轮最多查多少首（0 = 不限制）")
     parser.add_argument("--refresh", action="store_true",
                         help="忽略缓存的有效期，重新核对（缓存本身保留，用于认出自己写过的格子）")
+    parser.add_argument("--add-missing", action="store_true",
+                        help="把「外站有翻译、搜集库没录入」的曲目补进对应赛季的表格")
+    parser.add_argument("--max-add", type=int, default=10,
+                        help="本轮最多补录几首（默认 10，0 = 不限制）")
     args = parser.parse_args()
-    run_once(pywikibot.Site(), args.write, args.summary, args.ttl, args.limit, args.refresh)
+    run_once(pywikibot.Site(), args.write, args.summary, args.ttl, args.limit,
+             args.refresh, add_missing=args.add_missing,
+             max_add=args.max_add or 10 ** 6)
 
 
 if __name__ == "__main__":

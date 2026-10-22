@@ -15,6 +15,10 @@
 #
 #   toolforge jobs run translations --image python3.13 --wait \
 #     --command "./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --dry-run"
+#
+# 除了填「翻译来源」，它还会拿活动清单（[[Vocawiki:贡献列表/The VOCALOID Collection]]
+# 的赛季表 + 大家族模板里的日文原名）反查：哪些歌还没有条目、外站查得到翻译、
+# 搜集库却没录入 —— 每轮最多补录 10 行（--max-add）。
 source "$(dirname "$0")/common.sh"
 
 write=(--write)
@@ -27,4 +31,5 @@ for arg in "$@"; do
 done
 
 exec "$VOCA_PYTHON" bots/vocaloid_collection_translations.py \
-    ${write[@]+"${write[@]}"} ${extra[@]+"${extra[@]}"} 2>&1
+    ${write[@]+"${write[@]}"} --add-missing --max-add 10 \
+    ${extra[@]+"${extra[@]}"} 2>&1

@@ -8,7 +8,9 @@
 一首歌去哪里找译文（按可靠程度排序，最多记三条）：
 
 * **VOCALOID中文歌词wiki（AtWiki）**：拿页面名去比「全ページ一覧」的 8553 个页面名
-  （名字完全一致才算），再读页面里的 ``翻譯：某人``。这是最可靠的来源。
+  （名字完全一致才算），**并且页面正文的作詞 / 作曲里要有这首歌的 P主**——同名的
+  不同曲太多（`Linaria` 那一页是 Mysteka 的、`EDEN` 是 真尋P 的）。再读页面里的
+  ``翻譯：某人`` 作署名。这是最可靠的来源。
 * **网易云音乐**：`/api/search/get` 搜日文名 / 中文名，标题对上**且** P主 出现在
   歌手或专辑名里才用（只有标题对上不够：同名不同曲太多）；`/api/song/lyric` 里有
   ``tlyric``（确实有译文）才记，译者取 ``transUser``（其次 ``lyricUser``）。
@@ -24,10 +26,14 @@
 「标题对上」用 ``title_key()``（全半角、大小写、空白、``{{lj|…}}``、括号消歧后缀
 都归一化）。查不到就留空——宁可少填，也不要把别人的翻译安到另一首歌上。
 
-**维护自己的写法**：机器人只改两种格子——空的，和自己上轮写的（内容与缓存里的
-结论一致，或整格都是 ``[链接 说明(by. 译者)]`` 这种它自己的格式）。这些格子会随
-新结论更新 / 清空；别人写过的格子一个字都不碰。判定规则变化时把 ``CACHE_VERSION``
-加一，旧结论自动作废、重查。
+**维护自己的写法**：机器人只改两种格子——空的，和自己写过的（内容与缓存里记过的
+``sources`` / ``written`` 逐字相同）。这些格子会随新结论更新 / 清空；别人写过的
+格子一个字都不碰，**哪怕格式和机器人一模一样**（页面主人也按
+``[链接 说明(by. 译者)]`` 写）。判定规则变化时把 ``CACHE_VERSION`` 加一。
+
+缓存丢了（换了运行环境）就认不出自己写过的格子，那些格子会被当成「别人的」不动
+——这是有意的：宁可少更新，也不能覆盖别人的来源。``--refresh`` 只跳过「缓存还有效
+就不再查」，不会丢缓存。
 
 结果（含「查过、没有」）缓存在 ``data/vocaloid_collection_translations.pickle``，
 默认 14 天后重新核对；AtWiki 页面清单缓存 7 天。
@@ -65,7 +71,7 @@ ATWIKI_CACHE = DATA_DIR / "vocaloid_collection_translations_atwiki.pickle"
 
 CACHE_TTL = 14 * 24 * 3600          # 一首歌多久重新核对一次
 ATWIKI_TTL = 7 * 24 * 3600          # AtWiki 页面清单多久重建一次
-CACHE_VERSION = 3                   # 判定规则变了就 +1，旧缓存自动作废
+CACHE_VERSION = 4                   # 判定规则变了就 +1，旧缓存自动作废
 REQUEST_TIMEOUT = 25
 MAX_SOURCES = 3
 
@@ -366,20 +372,6 @@ def render_source(url: str, label: str, translator: str = "") -> str:
     return text + "]"
 
 
-# 机器人写进格子的来源就是这些写法；用它来认出「这格是自己上轮填的」
-SOURCE_LABELS = ("网易云音乐", "VOCALOID中文歌词wiki", "B站视频简介", "B站评论区",
-                 "B站弹幕", "B站笔记", "巴哈姆特")
-BOT_SOURCE_RE = re.compile(
-    r"^\[https?://\S+ (?:%s)(?:\(by\. [^\]]{1,40}\))?\]$"
-    % "|".join(re.escape(label) for label in SOURCE_LABELS))
-
-
-def is_bot_source(value: str) -> bool:
-    """这一格是不是机器人写的（每一条都是 ``[链接 说明(by. 译者)]`` 这种格式）。"""
-    items = [item.strip() for item in str(value or "").split("<br/>") if item.strip()]
-    return bool(items) and all(BOT_SOURCE_RE.match(item) for item in items)
-
-
 def source_count(value: str) -> int:
     """格子里有几条来源（``<br/>`` 分隔）。"""
     return len([item for item in str(value or "").split("<br/>") if item.strip()])
@@ -390,20 +382,23 @@ def join_sources(sources: Sequence[str]) -> str:
 
 
 def cell_state(existing: str, cached: Optional[Dict]) -> str:
-    """这一格归谁：``empty``（还没填）/ ``ours``（机器人填的）/ ``skip``（别人写的）。
+    """这一格归谁：``empty``（还没填）/ ``ours``（机器人自己填的）/ ``skip``（别人写的）。
 
-    判据：内容与缓存里的结论一致，或者整格都是机器人那套 ``[链接 说明(by. 译者)]``
-    格式。后者让机器人在缓存丢失（换了运行环境）时也认得出自己写过的格子，
-    这样才能把查错的来源改掉 —— 只写不认的机器人会把错数据永久留在页面上。
-    别人写的内容一律不动。
+    **只有内容与缓存里记过的内容逐字相同**才算自己的：``sources`` 是这一轮的结论，
+    ``written`` 是上一轮真正写进页面的内容（结论变了以后仍然认得出自己的格子）。
+
+    不要用「格式像机器人写的」来判断：页面主人自己也是按 ``[链接 说明(by. 译者)]``
+    写的（``巴哈姆特(by. 月勳)``、``B站笔记(by. YUSI雨似)`` 这些都是他写的），
+    早先按格式认领会把他的来源覆盖成新结论、甚至清空（2026-10-22）。
+    缓存丢失时宁可当「别人的」不动。
     """
     text = str(existing or "").strip()
     if not text:
         return "empty"
-    previous = join_sources((cached or {}).get("sources") or [])
-    if previous and text == previous:
-        return "ours"
-    return "ours" if is_bot_source(text) else "skip"
+    cached = cached or {}
+    known = {join_sources(cached.get("sources") or []),
+             str(cached.get("written") or "").strip()}
+    return "ours" if text in known - {""} else "skip"
 
 
 # ---------------------------------------------------------------- 网络
@@ -546,21 +541,30 @@ def atwiki_page_index(fetcher: Fetcher, cache: Optional[Dict] = None,
     return pages
 
 
-def atwiki_translator(fetcher: Fetcher, pid: str) -> str:
-    """AtWiki 页面正文里的 ``翻譯：某人``；没有就返回空串。"""
+def atwiki_body(fetcher: Fetcher, pid: str) -> str:
+    """AtWiki 页面正文（纯文本）。"""
     markup = fetcher.text(ATWIKI_PAGE.format(pid=pid))
     if not markup:
         return ""
     body = ATWIKI_BODY_RE.search(markup)
     if not body:
         return ""
-    text = TAG_RE.sub("\n", body.group(1))
-    text = urllib.parse.unquote(text)
-    return credit_name(text)
+    return urllib.parse.unquote(TAG_RE.sub("\n", body.group(1)))
+
+
+def atwiki_translator(fetcher: Fetcher, pid: str) -> str:
+    """AtWiki 页面正文里的 ``翻譯：某人``；没有就返回空串。"""
+    return credit_name(atwiki_body(fetcher, pid))
 
 
 def lookup_atwiki(fetcher: Fetcher, song: Song, index: Dict[str, str]) -> List[str]:
-    """按页面名精确匹配（``Meromu`` / ``月之花`` 都对得上就是同一页）。"""
+    """页面名精确匹配**且**正文里出现这首歌的 P主，才认。
+
+    同名不同曲在歌词wiki 上很常见：``Linaria`` 那一页是 Mysteka 的（翻译 kyroslee），
+    不是子牛的；``EDEN`` 那一页是真尋P 的，不是酔シグレ 的；``Redis``/``Redial``、
+    ``Reboot`` 同理（2026-10-22 实测四条全错）。页面开头的「作詞：/作曲：」就是
+    判据，对不上就不记。
+    """
     tried = set()
     for name in (song.title_target, song.title_display):
         key = title_key(name)
@@ -570,8 +574,11 @@ def lookup_atwiki(fetcher: Fetcher, song: Song, index: Dict[str, str]) -> List[s
         pid = index.get(key)
         if not pid:
             continue
-        translator = atwiki_translator(fetcher, pid)
-        return [render_source(ATWIKI_PAGE.format(pid=pid), "VOCALOID中文歌词wiki", translator)]
+        body = atwiki_body(fetcher, pid)
+        if not body or not producer_mentioned(body, song):
+            continue
+        return [render_source(ATWIKI_PAGE.format(pid=pid), "VOCALOID中文歌词wiki",
+                              credit_name(body))]
     return []
 
 
@@ -956,7 +963,8 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
             if row.text(side, COLUMNS.index("title")).strip():
                 cell = (row.line, side)
                 current[cell] = row.text(side, COLUMNS.index("source")).strip()
-    cache = {} if refresh else load_cache()
+    # --refresh 只跳过「缓存还有效就不再查」，不丢缓存：要靠 written 认出自己写过的格子
+    cache = load_cache()
     index = atwiki_page_index(fetcher)
 
     fills: Dict[Tuple[int, int], str] = {}
@@ -973,16 +981,19 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
             value = join_sources(cached.get("sources") or [])
             if value and source_count(value) > source_count(existing):
                 fills[cell] = value
+                cached["written"] = value
             continue
         if limit and queried >= limit:
             break
         queried += 1
         sources = collect_sources(fetcher, song, index, site)
-        cache[song.key] = {"at": time.time(), "v": CACHE_VERSION,
-                           "sources": sources, "title": song.title_display}
         value = join_sources(sources)
+        entry = {"at": time.time(), "v": CACHE_VERSION, "sources": sources,
+                 "title": song.title_display, "written": existing}
         if value != existing:
             fills[cell] = value         # 新内容 / 更新 / 清掉自己以前写的
+            entry["written"] = value
+        cache[song.key] = entry
         if sources:
             pywikibot.output(f"  {song.rank or '-'} {song.title_display}："
                              f"{len(sources)} 个来源")
@@ -1021,7 +1032,8 @@ def main() -> None:
                         help="一首歌多久重新核对一次（秒，默认 14 天）")
     parser.add_argument("--limit", type=int, default=0,
                         help="本轮最多查多少首（0 = 不限制）")
-    parser.add_argument("--refresh", action="store_true", help="忽略缓存重新核对")
+    parser.add_argument("--refresh", action="store_true",
+                        help="忽略缓存的有效期，重新核对（缓存本身保留，用于认出自己写过的格子）")
     args = parser.parse_args()
     run_once(pywikibot.Site(), args.write, args.summary, args.ttl, args.limit, args.refresh)
 

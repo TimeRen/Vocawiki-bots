@@ -211,22 +211,29 @@ class CellStateTest(TestCase):
         self.assertEqual("skip", tr.cell_state("网易云", {"sources": ["[u 甲]"]}))
         self.assertEqual("skip", tr.cell_state("网易云", None))
 
-    def test_bot_format_is_recognized_without_a_cache(self):
-        """缓存丢了（换了运行环境）也要认得出自己写的格子，否则错数据永远改不掉。"""
-        value = ("[https://music.163.com/#/song?id=1 网易云音乐(by. 甲)]<br/>"
-                 "[https://www.bilibili.com/video/BV1 B站视频简介]")
-        self.assertEqual("ours", tr.cell_state(value, None))
-        self.assertEqual("ours", tr.cell_state("[https://a.example 巴哈姆特]", {}))
-        self.assertTrue(tr.is_bot_source(value))
+    def test_human_cells_in_the_same_format_are_not_ours(self):
+        """页面主人也按 ``[链接 说明(by. 译者)]`` 写；格式像不等于就是机器人写的。
 
-    def test_other_formats_are_not_ours(self):
-        self.assertFalse(tr.is_bot_source("[[月之花]]"))
-        self.assertFalse(tr.is_bot_source("[https://music.163.com/#/song?id=1]"))
-        self.assertFalse(tr.is_bot_source("[https://a.example 我自己写的]"))
-        self.assertFalse(tr.is_bot_source(""))
+        2026-10-22 早先按格式认领，把 ``巴哈姆特(by. 月勳)``、``B站笔记(by. YUSI雨似)``
+        这些他写的来源覆盖甚至清空了。
+        """
+        value = "[https://home.gamer.com.tw/artwork.php?sn=6097695 巴哈姆特(by. 月勳)]"
+        self.assertEqual("skip", tr.cell_state(value, None))
+        self.assertEqual("skip", tr.cell_state(value, {"sources": ["[u 甲]"]}))
+        self.assertEqual("skip", tr.cell_state(
+            "[https://www.bilibili.com/opus/1054280382312087569 B站笔记(by. YUSI雨似)]", {}))
+        self.assertEqual("skip", tr.cell_state("[https://a.example 巴哈姆特]", {}))
+
+    def test_previous_written_value_still_counts_as_ours(self):
+        """结论变了以后，页面上那份旧内容仍然是机器人写的，要能跟着更新。"""
+        entry = {"sources": ["[u 新]"], "written": "[u 旧]"}
+        self.assertEqual("ours", tr.cell_state("[u 旧]", entry))
+        self.assertEqual("ours", tr.cell_state("[u 新]", entry))
+        self.assertEqual("skip", tr.cell_state("[u 别人]", entry))
+        self.assertEqual("skip", tr.cell_state("[u 旧]", {"sources": [], "written": ""}))
 
     def test_our_sources_were_dropped(self):
-        """机器人上轮查出过来源、这轮结论变成空 —— 那格仍是自己的，可以清空。"""
+        """结论变成空时那格不再是「自己的」，下次也不会去清别人写的同类内容。"""
         self.assertEqual("skip", tr.cell_state("[u 甲]", {"sources": []}))
         self.assertEqual("ours", tr.cell_state("[u 甲]", {"sources": ["[u 甲]"]}))
 
@@ -300,12 +307,22 @@ class LookupTest(TestCase):
     def test_atwiki_needs_an_exact_page_name(self):
         song = Song(0, 0, "11", "月之花", "月之花", "R Sound Design")
         fetcher = self.FakeFetcher(texts={"https://w.atwiki.jp/vocaloidchly/pages/9.html":
-                                         "<div id=\"wikibody\">翻譯：甲<br/>歌詞…</div>"
+                                         "<div id=\"wikibody\">作曲：R Sound Design<br/>"
+                                         "翻譯：甲<br/>歌詞…</div>"
                                          "<div class=\"atwiki-page-keyword\">x</div>"})
         self.assertEqual([], tr.lookup_atwiki(fetcher, song, {}))
         self.assertEqual(["[https://w.atwiki.jp/vocaloidchly/pages/9.html "
                           "VOCALOID中文歌词wiki(by. 甲)]"],
                          tr.lookup_atwiki(fetcher, song, {title_key("月之花"): "9"}))
+
+    def test_atwiki_rejects_a_page_for_another_song_with_the_same_name(self):
+        """真实案例：``Linaria`` 那一页（p/7861）是 Mysteka 的，不是子牛的。"""
+        song = Song(0, 0, "11", "Linaria", "Linaria", "子牛")
+        page = ("<div id=\"wikibody\">作詞：Mysteka<br/>作曲：Mysteka<br/>"
+                "翻譯：kyroslee<br/>Linaria<br/>歌詞</div>"
+                "<div class=\"atwiki-page-keyword\">x</div>")
+        fetcher = self.FakeFetcher(texts={"https://w.atwiki.jp/vocaloidchly/pages/7861.html": page})
+        self.assertEqual([], tr.lookup_atwiki(fetcher, song, {title_key("Linaria"): "7861"}))
 
     def test_netease_requires_a_translation_and_a_title_match(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
@@ -481,6 +498,75 @@ class FetcherBlockTest(TestCase):
             self.assertEqual("", fetcher.text("https://w.atwiki.jp/x", attempts=3))
         self.assertEqual(3, len(calls))
         self.assertFalse(fetcher.blocked)
+
+
+class RunOnceTest(TestCase):
+    """整轮跑下来也不能碰别人写的格子（哪怕格式和机器人一样）。"""
+
+    class FakePage:
+        def __init__(self, site, title):
+            self.text = ""
+            self.saved = []
+
+        def save(self, **kwargs):
+            self.saved.append(self.text)
+
+    class FakeSite:
+        def logged_in(self):
+            return True
+
+    def _run(self, page_text, cache=None, sources=()):
+        page = self.FakePage(None, None)
+        page.text = page_text
+        with patch.object(tr, "Page", return_value=page), \
+                patch.object(tr, "load_cache", return_value=cache or {}), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "collect_sources", return_value=list(sources)):
+            changed = tr.run_once(self.FakeSite(), write=True, refresh=True,
+                                  fetcher=object())
+        return changed, page
+
+    def test_human_cells_are_never_overwritten(self):
+        human = ("{|\n"
+                 "! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注\n"
+                 "|-\n"
+                 "| 41 || [[鸟笼(椿)|鸟笼]] || 椿 || {{color|#FF0000|未创建}} || "
+                 "[https://home.gamer.com.tw/artwork.php?sn=6097695 巴哈姆特(by. 月勳)] || \n"
+                 "|-\n"
+                 "| 75 || [[十月，夏末残花之追忆]] || 奈良瀬 || {{color|#FF0000|未创建}} || "
+                 "[https://www.bilibili.com/opus/1054280382312087569 B站笔记(by. YUSI雨似)] || \n"
+                 "|}")
+        changed, page = self._run(human, sources=["[https://a.example 网易云音乐(by. 甲)]"])
+        self.assertFalse(changed)
+        self.assertEqual(human, page.text, "别人写过的格子一个字节都不该动")
+        self.assertEqual([], page.saved)
+
+    def test_empty_cells_get_filled(self):
+        page_text = ("{|\n"
+                     "! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注\n"
+                     "|-\n"
+                     "| 18 || [[月之花]] || R Sound Design || 未创建 || || \n"
+                     "|}")
+        changed, page = self._run(page_text, sources=["[https://a.example 网易云音乐]"])
+        self.assertTrue(changed)
+        self.assertIn("未创建 || [https://a.example 网易云音乐] || ",
+                      page.saved[0])
+
+    def test_own_cell_from_the_cache_is_updated(self):
+        page_text = ("{|\n"
+                     "! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注\n"
+                     "|-\n"
+                     "| 18 || [[月之花]] || R Sound Design || 未创建 || [https://old.example 网易云音乐] || \n"
+                     "|}")
+        cache = {tr.title_key("月之花"): {"at": time.time(), "v": tr.CACHE_VERSION,
+                                          "sources": ["[https://old.example 网易云音乐]"],
+                                          "written": "[https://old.example 网易云音乐]"}}
+        changed, page = self._run(page_text, cache=cache,
+                                  sources=["[https://new.example 网易云音乐]"])
+        self.assertTrue(changed)
+        self.assertIn("[https://new.example 网易云音乐]", page.saved[0])
+        self.assertNotIn("old.example", page.saved[0])
 
 
 class CollectSourcesTest(TestCase):

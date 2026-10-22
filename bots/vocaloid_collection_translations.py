@@ -7,7 +7,11 @@
 
 一首歌去哪里找译文（按可靠程度排序，最多记三条）：
 
-* **VOCALOID中文歌词wiki（AtWiki）**：拿页面名去比「全ページ一覧」的 8553 个页面名
+* **VOCALOID中文歌词wiki（AtWiki）** —— **目前停用**（``USE_ATWIKI = False``）。
+  页面主人 2026-10-22 看到 4 笔同名不同曲的补录后说「暂时不收录中文歌词wiki」，
+  所以不拿它填「翻译来源」、也不拿它补录新行；**但配错的旧行照样按投稿年核对删掉**
+  （删错不是收录，见下）。改 ``USE_ATWIKI = True`` 即可全部恢复。原来的规则：
+  拿页面名去比「全ページ一覧」的 8553 个页面名
   （名字完全一致才算），**并且页面正文的作詞 / 作曲里要有这首歌的 P主**——同名的
   不同曲太多（`Linaria` 那一页是 Mysteka 的、`EDEN` 是 真尋P 的）。再读页面里的
   ``翻譯：某人`` 作署名。这是最可靠的来源。
@@ -38,11 +42,25 @@
 总榜名次，四种情况都算「已录入」）。同一首歌只录一次：以 ROOKIE 行录入时用
 ``{{注}}`` 标总榜，就不会再补一行 TOP100 的重复条目。
 
-补录前一定过三道关（`atwiki_song` + `navbox_titles`）：这首歌要在**本赛季**的大家族
+补录前一定过四道关（`atwiki_song` + `navbox_titles`）：这首歌要在**本赛季**的大家族
 模板里；曲名要是日文原名（含假名）或带括号注记；带括号时 AtWiki 的 ``作曲`` 必须是
-括号里那位。2026-10-22 只按页面名匹配过，补的 10 行里 6 行是「同名不同曲」
+括号里那位；**AtWiki 页面里那支 niconico 视频的投稿年必须等于赛季年份**（`atwiki_year_ok`）。
+2026-10-22 只按页面名匹配过，补的 10 行里 6 行是「同名不同曲」
 （`Libra(mira)` 对上了 Eon 的 Libra 等），随后 4 行里的 2 行也只能靠同名，
 两笔都已整笔撤回——宁可漏，不能错。
+
+**投稿年是最后一道关**（启用 AtWiki 时）：日文曲名不加核对，等于把「同名」当「同一首」。2026-10-22
+补进 2022秋的 `死亡フラグ` 就是这样错的——AtWiki 的 p/3460 是 コーチP 2011-05-14
+投稿（sm14446365）的老曲，和 2022 年的榜单（`PANDORA`、`リフレイン`、`Femme Fatale`
+同样中招）毫无关系。所以补录前读页面里的 niconico 链接，用 ``getthumbinfo`` 取
+``first_retrieve``，年份对不上就不补；查不到投稿日也不补（宁缺毋滥）。
+标题里带 ``Remix`` / ``Cover`` / ``再解釈`` 的不做这一项——那类条目的译文本来就
+挂在原曲页面上。
+
+同一项核对也用来**收拾已经配错的行**（`drop_wrong_rows`；这一项不随 ``USE_ATWIKI``
+停用，因为它只删不加）：页面上某行引的 AtWiki 页面投稿年是别的年份、而这一行的 P主
+又恰好是那一页的作曲时，整行都是那次错配的产物，删掉；P主 对不上的只清「翻译来源」
+一格。别人手写的行（P主 不是那一页的作曲）不会被删，查不到投稿日的行也不动。
 
 **维护自己的写法**：机器人只改两种格子——空的，和自己写过的（内容与缓存里记过的
 ``sources`` / ``written`` 逐字相同）。这些格子会随新结论更新 / 清空；别人写过的
@@ -89,10 +107,17 @@ ATWIKI_CACHE = DATA_DIR / "vocaloid_collection_translations_atwiki.pickle"
 
 CACHE_TTL = 14 * 24 * 3600          # 一首歌多久重新核对一次
 ATWIKI_TTL = 7 * 24 * 3600          # AtWiki 页面清单多久重建一次
-CACHE_VERSION = 4                   # 判定规则变了就 +1，旧缓存自动作废
+CACHE_VERSION = 5                   # 判定规则变了就 +1，旧缓存自动作废
 REQUEST_TIMEOUT = 25
 FAILURE_LIMIT = 5                   # 同一个站连错几次就整轮不再查
 MAX_SOURCES = 3
+
+# 2026-10-22 页面主人：「这四个都不对，暂时不收录中文歌词wiki」。
+# 歌词wiki 的页面名太容易和同名的老曲撞上（`Linaria`→Mysteka、`死亡フラグ`→コーチP
+# 2011 年的投稿……），所以暂时既不用它填「翻译来源」，也不拿它补录新行。
+# 配错的旧行仍按投稿年核对删掉（`drop_wrong_rows`：只删不加，不算「收录」）。
+# 要恢复收录的话把这里改成 True。
+USE_ATWIKI = False
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -106,6 +131,13 @@ ATWIKI_BASE = "https://w.atwiki.jp/vocaloidchly"
 ATWIKI_LIST = ATWIKI_BASE + "/list?sort=pagename"
 ATWIKI_PAGE = ATWIKI_BASE + "/pages/{pid}.html"
 ATWIKI_MAX_PAGES = 500
+ATWIKI_LINK_RE = re.compile(r"atwiki\.jp/vocaloidchly/pages/(\d+)\.html")
+
+# niconico 的缩略图 API 还在，能给出投稿日（``first_retrieve``）——判断「这一页是不是
+# 那一季那首歌」就看它：VCCL 只收新曲，投稿年和赛季年份必须一致。
+NICO_INFO = "https://ext.nicovideo.jp/api/getthumbinfo/{vid}"
+NICO_ID_RE = re.compile(r"nicovideo\.jp/watch/(sm\d+)")
+NICO_UPLOAD_RE = re.compile(r"<first_retrieve>(\d{4})-\d{2}-\d{2}")
 
 NETEASE_SEARCH = "https://music.163.com/api/search/get?s={kw}&type=1&limit=10"
 NETEASE_LYRIC = "https://music.163.com/api/song/lyric?os=pc&id={id}&lv=-1&kv=-1&tv=-1"
@@ -379,8 +411,12 @@ CONTRIB_PAGE = "Vocawiki:贡献列表/The VOCALOID Collection"
 NAVBOX_TEMPLATE = "Template:The VOCALOID Collection{season}"
 SEASONS_CACHE = DATA_DIR / "vocaloid_collection_seasons.pickle"
 SEASONS_TTL = 7 * 24 * 3600         # 活动清单多久重新抓一次
+SEASONS_VERSION = 2                 # 缓存结构变了就 +1（旧格式会自动重建）
 
 SEASON_HEADING_RE = re.compile(r"^==\s*(ボカコレ[^=\n]+?)\s*==\s*$", re.M)
+SEASON_YEAR_RE = re.compile(r"(20\d{2})")
+# 「原曲页面上挂着译文」的改曲条目：不做投稿年核对
+VARIANT_RE = re.compile(r"remix|リミックス|cover|カバー|再解釈|アレンジ", re.I)
 CONTRIB_HEADING_RE = re.compile(r"^===\s*([^=\n]+?)\s*===\s*$", re.M)
 TRACK_SPLIT_RE = re.compile(r";(TOP\d+|ROOKIE|REMIX)[^\n]*")
 NOTE_OVERALL_RE = re.compile(r"\{\{注\|\s*\d+\s*\|\s*总榜为第?\s*(\d+)")
@@ -838,7 +874,7 @@ def atwiki_page_index(fetcher: Fetcher, cache: Optional[Dict] = None,
 
 def atwiki_body(fetcher: Fetcher, pid: str) -> str:
     """AtWiki 页面正文（纯文本）。"""
-    markup = fetcher.text(ATWIKI_PAGE.format(pid=pid))
+    markup = _atwiki_markup(fetcher, pid)
     if not markup:
         return ""
     body = ATWIKI_BODY_RE.search(markup)
@@ -847,20 +883,61 @@ def atwiki_body(fetcher: Fetcher, pid: str) -> str:
     return urllib.parse.unquote(TAG_RE.sub("\n", body.group(1)))
 
 
+def _atwiki_markup(fetcher: Fetcher, pid: str) -> str:
+    """AtWiki 页面 HTML（同一次运行里同一页只抓一次：正文、投稿年都要看它）。"""
+    cache = getattr(fetcher, "atwiki_markup", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        try:
+            fetcher.atwiki_markup = cache       # type: ignore[attr-defined]
+        except AttributeError:                  # 只读的假 fetcher：不缓存也行
+            cache = {}
+    if pid not in cache:
+        cache[pid] = fetcher.text(ATWIKI_PAGE.format(pid=pid))
+    return cache[pid]
+
+
+def atwiki_upload_year(fetcher: Fetcher, pid: str) -> Optional[int]:
+    """页面里那支 niconico 视频的投稿年；页面没有链接、或查不到就返回 ``None``。"""
+    video = NICO_ID_RE.search(_atwiki_markup(fetcher, pid))
+    if not video:
+        return None
+    found = NICO_UPLOAD_RE.search(fetcher.text(NICO_INFO.format(vid=video.group(1))))
+    return int(found.group(1)) if found else None
+
+
+def atwiki_year_ok(fetcher: Fetcher, pid: str, year: int, title: str = "") -> bool:
+    """AtWiki 这一页的歌是不是 ``year`` 年那一届的作品。
+
+    VCCL 只收新曲，所以投稿年和赛季年份必须一致：``死亡フラグ`` 的 p/3460 是
+    2011-05-14 的投稿，却被 2022秋 的同名行引用了——年份就是判据。查不到投稿日
+    一律不认（宁缺毋滥）；``Remix`` / ``Cover`` / ``再解釈`` 之类标题跳过这项，
+    因为它们的译文本来就挂在原曲页面上。
+    """
+    if is_variant_title(title):
+        return True
+    return atwiki_upload_year(fetcher, pid) == year
+
+
 def atwiki_translator(fetcher: Fetcher, pid: str) -> str:
     """AtWiki 页面正文里的 ``翻譯：某人``；没有就返回空串。"""
     return credit_name(atwiki_body(fetcher, pid))
 
 
-def lookup_atwiki(fetcher: Fetcher, song: Song, index: Dict[str, str]) -> List[str]:
+def lookup_atwiki(fetcher: Fetcher, song: Song, index: Dict[str, str],
+                  season: str = "") -> List[str]:
     """页面名精确匹配**且**正文里出现这首歌的 P主，才认。
 
     同名不同曲在歌词wiki 上很常见：``Linaria`` 那一页是 Mysteka 的（翻译 kyroslee），
     不是子牛的；``EDEN`` 那一页是真尋P 的，不是酔シグレ 的；``Redis``/``Redial``、
     ``Reboot`` 同理（2026-10-22 实测四条全错）。页面开头的「作詞：/作曲：」就是
-    判据，对不上就不记。
+    判据，对不上就不记；知道赛季时再核对投稿年（``atwiki_year_ok``）。
+
+    ``USE_ATWIKI`` 现在是 ``False``（页面主人要求暂时不收录中文歌词wiki），
+    这个函数留给以后恢复时用。
     """
     tried = set()
+    year = season_year(season)
     for name in (song.title_target, song.title_display):
         key = title_key(name)
         if not key or key in tried:
@@ -871,6 +948,8 @@ def lookup_atwiki(fetcher: Fetcher, song: Song, index: Dict[str, str]) -> List[s
             continue
         body = atwiki_body(fetcher, pid)
         if not body or not producer_mentioned(body, song):
+            continue
+        if year is not None and not atwiki_year_ok(fetcher, pid, year, name):
             continue
         return [render_source(ATWIKI_PAGE.format(pid=pid), "VOCALOID中文歌词wiki",
                               credit_name(body))]
@@ -1197,13 +1276,14 @@ def article_video(site, song: Song) -> str:
 # ---------------------------------------------------------------- 汇总
 
 def collect_sources(fetcher: Fetcher, song: Song, index: Dict[str, str],
-                    site=None) -> List[str]:
+                    site=None, season: str = "") -> List[str]:
     """一首歌全部能查到的来源（最多 ``MAX_SOURCES`` 条，按可靠程度排序）。"""
     sources: List[str] = []
-    try:
-        sources.extend(lookup_atwiki(fetcher, song, index))
-    except Exception as exc:            # noqa: BLE001 - 单个来源出错不影响其他来源
-        pywikibot.warning(f"AtWiki 查询失败（{song.title_display}）：{exc}")
+    if USE_ATWIKI:
+        try:
+            sources.extend(lookup_atwiki(fetcher, song, index, season))
+        except Exception as exc:        # noqa: BLE001 - 单个来源出错不影响其他来源
+            pywikibot.warning(f"AtWiki 查询失败（{song.title_display}）：{exc}")
     try:
         sources.extend(lookup_netease(fetcher, song))
     except Exception as exc:            # noqa: BLE001
@@ -1240,7 +1320,9 @@ def collect_sources(fetcher: Fetcher, song: Song, index: Dict[str, str],
 def season_data(site, fetcher: Fetcher, refresh: bool = False) -> Dict:
     """活动清单（贡献列表 + 12 个大家族模板）缓存 7 天。"""
     cache = load_cache(SEASONS_CACHE)
-    if not refresh and cache.get("data") and is_fresh(cache.get("built"), SEASONS_TTL):
+    if (not refresh and cache.get("v") == SEASONS_VERSION and cache.get("data")
+            and is_fresh(cache.get("built"), SEASONS_TTL)
+            and (cache["data"].get("titles") or not cache["data"].get("contrib"))):
         return cache["data"]
     data: Dict = {"contrib": {}, "titles": {}}
     try:
@@ -1259,7 +1341,8 @@ def season_data(site, fetcher: Fetcher, refresh: bool = False) -> Dict:
         titles[season] = sorted(navbox_titles(markup))
     data["titles"] = titles
     if data["contrib"]:
-        save_cache({"built": time.time(), "data": data}, SEASONS_CACHE)
+        save_cache({"v": SEASONS_VERSION, "built": time.time(), "data": data},
+                   SEASONS_CACHE)
     return data
 
 
@@ -1278,8 +1361,31 @@ def has_kana(text: str) -> bool:
     return bool(re.search(r"[\u3040-\u30ff]", str(text or "")))
 
 
+def season_year(season: str) -> Optional[int]:
+    """``ボカコレ2022秋`` → ``2022``；标题里没有年份就返回 ``None``。"""
+    match = SEASON_YEAR_RE.search(str(season or ""))
+    return int(match.group(1)) if match else None
+
+
+def is_variant_title(title: str) -> bool:
+    """``… (XX Remix)`` / ``… COVER`` / ``… 再解釈`` —— 译文本就挂在原曲页面上的改曲。"""
+    return bool(VARIANT_RE.search(str(title or "")))
+
+
+def season_of_lines(text: str) -> Dict[int, str]:
+    """每一行属于哪个赛季（按它上方最近的 ``== ボカコレ… ==`` 标题）。"""
+    result: Dict[int, str] = {}
+    season = ""
+    for index, line in enumerate(text.split("\n")):
+        heading = SEASON_HEADING_RE.search(line)
+        if heading:
+            season = heading.group(1)
+        result[index] = season
+    return result
+
+
 def atwiki_song(fetcher: Fetcher, index: Dict[str, str],
-                title: str) -> Optional[Tuple[str, str, str]]:
+                title: str, season: str = "") -> Optional[Tuple[str, str, str]]:
     """核实一首「还没录入」的歌在 AtWiki 有没有译文 → ``(页面 id, 译者, P主)``。
 
     只靠「页面名对上」不算——同名不同曲在歌词wiki 上到处都是。所以：
@@ -1289,6 +1395,8 @@ def atwiki_song(fetcher: Fetcher, index: Dict[str, str],
       这种「显示文字」会被当成日文名）；
     * 曲名带括号注记时（``Colors(kouta)``、``月光(春风哈娜)``），AtWiki 的作曲必须
       就是括号里那位；
+    * 给了赛季就核对**投稿年**（``atwiki_year_ok``）：``死亡フラグ`` 那一页是 2011 年
+      的老曲，2022秋 的同名行不该引它——日文曲名不加这一关，等于把「同名」当「同一首」；
     * 页面里读不到作曲 / 译者就跳过。
 
     2026-10-22 首版没这些限制，补的 10 行里 6 行是「同名不同曲」，已整笔撤回。
@@ -1307,6 +1415,11 @@ def atwiki_song(fetcher: Fetcher, index: Dict[str, str],
     if hint and person_key(producer) != person_key(hint):
         return None                     # 同名不同曲
     if not producer and not translator:
+        return None
+    year = season_year(season)
+    if year is not None and not atwiki_year_ok(fetcher, pid, year, title):
+        pywikibot.output(f"  - {title}：AtWiki p/{pid} 不是 {season} 的歌"
+                         f"（投稿年 {atwiki_upload_year(fetcher, pid)}），跳过")
         return None
     return pid, translator, producer
 
@@ -1329,7 +1442,7 @@ def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str]
             break
         if title_key(song.title) not in season_titles.get(song.season, set()):
             continue                    # 本赛季大家族模板里没有这首歌：不敢认
-        found = atwiki_song(fetcher, index, song.title)
+        found = atwiki_song(fetcher, index, song.title, song.season)
         if not found:
             continue
         pid, translator, producer = found
@@ -1357,6 +1470,67 @@ def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str]
     return text, added
 
 
+def drop_row(text: str, row: Row, side: int) -> str:
+    """删掉一行；另一侧还有内容时只清这一侧，别把别人的半边也删了。"""
+    lines = text.split("\n")
+    others = [other for other in range(row.sides)
+              if other != side and row.text(other, COLUMNS.index("title")).strip()]
+    if others:
+        cells = split_row(lines[row.line])
+        for column in range(PER_SIDE):
+            index = side * PER_SIDE + column
+            if index < len(cells):
+                cells[index].value = ""
+        lines[row.line] = join_row(cells)
+        return "\n".join(lines)
+    del lines[row.line]
+    if row.line > 0 and lines[row.line - 1].strip() == "|-":
+        del lines[row.line - 1]
+    return "\n".join(lines)
+
+
+def drop_wrong_rows(text: str, fetcher: Fetcher) -> Tuple[str, List[str]]:
+    """删掉「引的 AtWiki 页面根本不是这一季那首歌」的行 → ``(新文本, 说明列表)``。
+
+    判据只有一条：页面里那支 niconico 视频的投稿年和这一行的赛季年份对不上
+    （``死亡フラグ`` 的行引了 2011 年的 p/3460）。这种引用本身就是错的，所以：
+
+    * 这一行的 P主 又是那一页的 ``作曲`` —— 整行都是那次错配的产物（暂名、P主、
+      来源一起编出来的），删掉；
+    * P主 对不上 —— 只清「翻译来源」一格，别人填的 P主 不动。
+
+    查不到投稿日的行一律不动（没法证明它错）。投稿年本来就该和赛季不同
+    （``Remix`` / ``Cover`` / ``再解釈``：译文本就挂在原曲页面上）的也跳过。
+    """
+    seasons = season_of_lines(text)
+    rows, _ = parse_rows(text)
+    notes: List[str] = []
+    for row in sorted(rows, key=lambda item: item.line, reverse=True):
+        season = seasons.get(row.line, "")
+        year = season_year(season)
+        if year is None:
+            continue
+        for side in range(row.sides):
+            title = row.text(side, COLUMNS.index("title")).strip()
+            link = ATWIKI_LINK_RE.search(row.text(side, COLUMNS.index("source")))
+            if not title or not link or is_variant_title(title):
+                continue
+            pid = link.group(1)
+            upload = atwiki_upload_year(fetcher, pid)
+            if upload is None or upload == year:
+                continue
+            producer = row.text(side, COLUMNS.index("producer")).strip()
+            credits = atwiki_credits(atwiki_body(fetcher, pid))
+            if person_key(producer) and person_key(producer) == person_key(credits):
+                text = drop_row(text, row, side)
+                notes.append(f"{season} {link_display(title)}（AtWiki p/{pid} 是 {upload} 年的另一首，整行删除）")
+            else:
+                text = apply_fills(text, {(row.line, side): ""})
+                notes.append(f"{season} {link_display(title)}（AtWiki p/{pid} 是 {upload} 年的另一首，只清来源）")
+            break
+    return text, notes
+
+
 def run_once(site, write: bool = False, summary: Optional[str] = None,
              ttl: float = CACHE_TTL, limit: int = 0, refresh: bool = False,
              fetcher: Optional[Fetcher] = None, add_missing: bool = False,
@@ -1371,6 +1545,7 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     page = Page(site, PAGE_TITLE)
     original = page.text or ""
     songs = songs_from(original)
+    seasons = season_of_lines(original)
 
     rows, _ = parse_rows(original)
     current: Dict[Tuple[int, int], str] = {}
@@ -1402,7 +1577,8 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         if limit and queried >= limit:
             break
         queried += 1
-        sources = collect_sources(fetcher, song, index, site)
+        sources = collect_sources(fetcher, song, index, site,
+                                  seasons.get(song.line, ""))
         value = join_sources(sources)
         entry = {"at": time.time(), "v": CACHE_VERSION, "sources": sources,
                  "title": song.title_display, "written": existing}
@@ -1421,13 +1597,22 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
                      f"改动 {len(fills)} 行")
     text = apply_fills(original, fills)
     added = 0
+    dropped: List[str] = []
     if add_missing:
-        try:
-            text, added = add_missing_entries(site, fetcher, text, index,
-                                              season_data(site, fetcher, refresh),
-                                              max_add, write)
-        except Exception as exc:        # noqa: BLE001 - 补录失败不影响填来源
-            pywikibot.warning(f"补录未录入的曲目失败：{exc}")
+        # 清理配错的旧行只做「证明它错」的核对（投稿年对不上），不新增任何内容，
+        # 所以 ``USE_ATWIKI = False`` 时也照跑——那是删错，不是收录。
+        text, dropped = drop_wrong_rows(text, fetcher)
+        for note in dropped:
+            pywikibot.output(f"  - 配错的行：{note}")
+        if not USE_ATWIKI:
+            pywikibot.output("中文歌词wiki 已暂停收录：本轮不补录新行")
+        else:
+            try:
+                text, added = add_missing_entries(site, fetcher, text, index,
+                                                  season_data(site, fetcher, refresh),
+                                                  max_add, write)
+            except Exception as exc:    # noqa: BLE001 - 补录失败不影响填来源
+                pywikibot.warning(f"补录未录入的曲目失败：{exc}")
     if text == original:
         pywikibot.output("页面无需更新。")
         return False
@@ -1438,6 +1623,9 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行"
     if added:
         note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行、补录 {added} 首"
+    if dropped:
+        note = summary or (f"{DEFAULT_SUMMARY}，补 {len(fills)} 行，"
+                           f"删掉 {len(dropped)} 行配错的补录")
     try:
         page.save(summary=note, minor=True, bot=True, tags="Bot")
     except EditConflictError as exc:

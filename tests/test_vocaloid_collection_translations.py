@@ -526,15 +526,17 @@ class RunOnceTest(TestCase):
         def __init__(self, site, title):
             self.text = ""
             self.saved = []
+            self.summaries = []
 
         def save(self, **kwargs):
             self.saved.append(self.text)
+            self.summaries.append(kwargs.get("summary", ""))
 
     class FakeSite:
         def logged_in(self):
             return True
 
-    def _run(self, page_text, cache=None, sources=()):
+    def _run(self, page_text, cache=None, sources=(), fetcher=None):
         page = self.FakePage(None, None)
         page.text = page_text
         with patch.object(tr, "Page", return_value=page), \
@@ -543,8 +545,34 @@ class RunOnceTest(TestCase):
                 patch.object(tr, "atwiki_page_index", return_value={}), \
                 patch.object(tr, "collect_sources", return_value=list(sources)):
             changed = tr.run_once(self.FakeSite(), write=True, refresh=True,
-                                  fetcher=object())
+                                  fetcher=fetcher or object(), add_missing=True)
         return changed, page
+
+    def test_wrong_rows_are_dropped_even_when_atwiki_is_paused(self):
+        """AtWiki 停用只停「收录」，配错的旧行还是要删（``USE_ATWIKI`` 不能挡住清理）。"""
+        page_text = "\n".join([
+            "== ボカコレ2022秋 ==",
+            "{|",
+            "|-",
+            "! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注",
+            "|-",
+            "| 60 || [[死亡フラグ]] || {{lj|コーチP}} || {{color|#FF0000|未创建}} || "
+            "[https://w.atwiki.jp/vocaloidchly/pages/3460.html VOCALOID中文歌词wiki(by. MIU)] || ",
+            "|}",
+            "",
+        ])
+        fetcher = AtwikiSongTest.FakeFetcher({
+            tr.ATWIKI_PAGE.format(pid="3460"):
+                '<div id="wikibody">作曲：コーチP<br/>翻譯：MIU<br/>歌詞</div>'
+                '<div class="atwiki-page-keyword">x</div>'
+                '<a href="https://www.nicovideo.jp/watch/sm14446365">原曲</a>',
+            tr.NICO_INFO.format(vid="sm14446365"):
+                "<first_retrieve>2011-05-14T05:06:05+09:00</first_retrieve>",
+        })
+        changed, page = self._run(page_text, fetcher=fetcher)
+        self.assertTrue(changed)
+        self.assertNotIn("死亡フラグ", page.saved[0])
+        self.assertIn("删掉 1 行配错的补录", page.summaries[0])
 
     def test_human_cells_are_never_overwritten(self):
         human = ("{|\n"
@@ -711,7 +739,7 @@ class RowBuildTest(TestCase):
 
 
 class AtwikiSongTest(TestCase):
-    """补录前必须核实：曲名是日文原名 + P主 对得上同名不同曲。"""
+    """补录前必须核实：曲名是日文原名 + P主 对得上同名不同曲 + 投稿年对得上赛季。"""
 
     class FakeFetcher:
         def __init__(self, bodies):
@@ -720,9 +748,15 @@ class AtwikiSongTest(TestCase):
         def text(self, url, attempts=3):
             return self.bodies.get(url, "")
 
-    def _page(self, pid, body):
-        return {tr.ATWIKI_PAGE.format(pid=pid):
-                f'<div id="wikibody">{body}</div><div class="atwiki-page-keyword">x</div>'}
+    def _page(self, pid, body, video="sm14446365", upload="2011-05-14"):
+        pages = {tr.ATWIKI_PAGE.format(pid=pid):
+                 f'<div id="wikibody">{body}</div><div class="atwiki-page-keyword">x</div>'}
+        if video:
+            pages[tr.ATWIKI_PAGE.format(pid=pid)] += (
+                f'<a href="https://www.nicovideo.jp/watch/{video}">原曲</a>')
+            pages[tr.NICO_INFO.format(vid=video)] = (
+                f"<thumb><first_retrieve>{upload}T05:06:05+09:00</first_retrieve></thumb>")
+        return pages
 
     def test_parenthetical_hint_must_match_the_composer(self):
         fetcher = self.FakeFetcher(self._page("3414", "作曲：骨盤P<br/>翻譯：某人<br/>歌詞"))
@@ -735,11 +769,32 @@ class AtwikiSongTest(TestCase):
         self.assertEqual(("3414", "某人", "kouta"),
                          tr.atwiki_song(fetcher, index, "Colors(kouta)"))
 
-    def test_japanese_title_needs_no_hint(self):
-        fetcher = self.FakeFetcher(self._page("3460", "作曲：コーチP<br/>翻譯：MIU<br/>歌詞"))
+    def test_japanese_title_is_accepted_when_the_year_matches(self):
+        fetcher = self.FakeFetcher(self._page("3460", "作曲：コーチP<br/>翻譯：MIU<br/>歌詞",
+                                              upload="2022-10-14"))
         index = {tr.title_key("死亡フラグ"): "3460"}
         self.assertEqual(("3460", "MIU", "コーチP"),
-                         tr.atwiki_song(fetcher, index, "死亡フラグ"))
+                         tr.atwiki_song(fetcher, index, "死亡フラグ", "ボカコレ2022秋"))
+
+    def test_japanese_title_from_another_year_is_rejected(self):
+        """真实案例：``死亡フラグ`` 的 p/3460 是 2011 年的老曲，却补进了 2022秋。"""
+        fetcher = self.FakeFetcher(self._page("3460", "作曲：コーチP<br/>翻譯：MIU<br/>歌詞"))
+        index = {tr.title_key("死亡フラグ"): "3460"}
+        self.assertIsNone(tr.atwiki_song(fetcher, index, "死亡フラグ", "ボカコレ2022秋"))
+
+    def test_page_without_an_upload_date_is_rejected(self):
+        fetcher = self.FakeFetcher(self._page("3460", "作曲：コーチP<br/>翻譯：MIU<br/>歌詞",
+                                              video=""))
+        index = {tr.title_key("死亡フラグ"): "3460"}
+        self.assertIsNone(tr.atwiki_song(fetcher, index, "死亡フラグ", "ボカコレ2022秋"))
+
+    def test_remix_titles_skip_the_year_check(self):
+        """改曲的译文本就挂在原曲页面上：投稿年是原曲那一年，不能当错配。"""
+        fetcher = self.FakeFetcher(self._page("7835", "作曲：yuigot<br/>翻譯：某人<br/>歌詞",
+                                              upload="2018-02-16"))
+        self.assertTrue(tr.atwiki_year_ok(
+            fetcher, "7835", 2020, "メルティランドナイトメア (yuigot Remix)"))
+        self.assertFalse(tr.atwiki_year_ok(fetcher, "7835", 2020, "メルティランドナイトメア"))
 
     def test_plain_chinese_or_ascii_titles_are_rejected(self):
         """``PANDORA`` / ``Femme Fatale`` 这种对上同名的别国歌曲：一律不认。"""
@@ -752,24 +807,123 @@ class AtwikiSongTest(TestCase):
         fetcher = self.FakeFetcher(self._page("9", "歌詞だけ<br/>ラララ"))
         self.assertIsNone(tr.atwiki_song(fetcher, {tr.title_key("ハロー"): "9"}, "ハロー"))
 
+    def test_season_year(self):
+        self.assertEqual(2022, tr.season_year("ボカコレ2022秋"))
+        self.assertEqual(2020, tr.season_year("ボカコレ2020冬"))
+        self.assertIsNone(tr.season_year(""))
+
     def test_title_hint(self):
         self.assertEqual("kouta", tr.title_hint("Colors(kouta)"))
         self.assertEqual("", tr.title_hint("ORDER"))
         self.assertEqual("", tr.title_hint("无题(2005)"))
 
 
+class DropWrongRowsTest(TestCase):
+    """页面里引错 AtWiki 页面的行：整行是错配产物就删，只有来源是错的就清那一格。"""
+
+    class FakeFetcher:
+        def __init__(self, pages):
+            self.pages = pages
+
+        def text(self, url, attempts=3):
+            return self.pages.get(url, "")
+
+    PAGE = "\n".join([
+        "== ボカコレ2022秋 ==",
+        '{| class="wikitable " style="text-align:center;"',
+        "|-",
+        '! colspan="6"|TOP100 !! colspan="6"|ROOKIE',
+        "|-",
+        "! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注 "
+        "!! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注",
+        "|-",
+        "| || || || || || || 32 || [[PANDORA]] || {{lj|やしきん}} || "
+        "{{color|#FF0000|未创建}} || "
+        "[https://w.atwiki.jp/vocaloidchly/pages/2231.html VOCALOID中文歌词wiki(by. cyataku)] ||",
+        "|-",
+        "| || || || || || || 60 || [[死亡フラグ]] || {{lj|コーチP}} || "
+        "{{color|#FF0000|未创建}} || "
+        "[https://w.atwiki.jp/vocaloidchly/pages/3460.html VOCALOID中文歌词wiki(by. MIU)] ||",
+        "|}",
+        "",
+    ])
+
+    def _fetcher(self, years):
+        pages = {}
+        for pid, (producer, translator, upload) in years.items():
+            pages[tr.ATWIKI_PAGE.format(pid=pid)] = (
+                f'<div id="wikibody">作曲：{producer}<br/>翻譯：{translator}<br/>歌詞</div>'
+                f'<div class="atwiki-page-keyword">x</div>'
+                f'<a href="https://www.nicovideo.jp/watch/sm{pid}">原曲</a>')
+            pages[tr.NICO_INFO.format(vid="sm" + pid)] = (
+                f"<first_retrieve>{upload}T00:00:00+09:00</first_retrieve>")
+        return self.FakeFetcher(pages)
+
+    def test_rows_whose_producer_came_from_the_wrong_page_are_removed(self):
+        fetcher = self._fetcher({
+            "2231": ("やしきん", "cyataku", "2010-04-10"),
+            "3460": ("コーチP", "MIU", "2011-05-14"),
+        })
+        text, notes = tr.drop_wrong_rows(self.PAGE, fetcher)
+        self.assertNotIn("PANDORA", text)
+        self.assertNotIn("死亡フラグ", text)
+        self.assertEqual(2, len(notes))
+        self.assertIn("== ボカコレ2022秋 ==", text)
+        self.assertEqual(text.count("|-"), 2)   # 只剩表头那两条分隔符
+
+    def test_only_the_source_cell_is_cleared_when_the_producer_is_someone_elses(self):
+        page = self.PAGE.replace("{{lj|コーチP}}", "别人写的P主")
+        fetcher = self._fetcher({"3460": ("コーチP", "MIU", "2011-05-14")})
+        text, notes = tr.drop_wrong_rows(page, fetcher)
+        self.assertIn("[[死亡フラグ]]", text)
+        self.assertIn("别人写的P主", text)
+        self.assertNotIn("pages/3460.html", text)
+        self.assertEqual(1, len(notes))
+
+    def test_rows_from_the_right_year_are_untouched(self):
+        fetcher = self._fetcher({
+            "2231": ("やしきん", "cyataku", "2022-09-24"),
+            "3460": ("コーチP", "MIU", "2022-10-08"),
+        })
+        text, notes = tr.drop_wrong_rows(self.PAGE, fetcher)
+        self.assertEqual(self.PAGE, text)
+        self.assertEqual([], notes)
+
+    def test_rows_without_a_known_upload_date_are_untouched(self):
+        fetcher = self.FakeFetcher({
+            tr.ATWIKI_PAGE.format(pid="3460"):
+                '<div id="wikibody">作曲：コーチP<br/>翻譯：MIU<br/>歌詞</div>'
+                '<div class="atwiki-page-keyword">x</div>',
+        })
+        text, notes = tr.drop_wrong_rows(self.PAGE, fetcher)
+        self.assertEqual(self.PAGE, text)
+        self.assertEqual([], notes)
+
+
 class CollectSourcesTest(TestCase):
     def test_caps_at_three_and_dedups(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
-        with patch.object(tr, "lookup_atwiki", return_value=["[a 甲]"]), \
+        with patch.object(tr, "USE_ATWIKI", True), \
+             patch.object(tr, "lookup_atwiki", return_value=["[a 甲]"]), \
              patch.object(tr, "lookup_netease", return_value=["[b 乙]", "[a 甲]"]), \
              patch.object(tr, "lookup_bilibili", return_value=(["[c 丙]", "[d 丁]"], [], [])):
             sources = tr.collect_sources(object(), song, {})
         self.assertEqual(["[a 甲]", "[b 乙]", "[c 丙]"], sources)
 
+    def test_atwiki_is_off_by_default(self):
+        """页面主人 2026-10-22：「暂时不收录中文歌词wiki」。"""
+        self.assertFalse(tr.USE_ATWIKI)
+        song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
+        with patch.object(tr, "lookup_atwiki", return_value=["[a 甲]"]) as wiki, \
+             patch.object(tr, "lookup_netease", return_value=["[b 乙]"]), \
+             patch.object(tr, "lookup_bilibili", return_value=([], [], [])):
+            self.assertEqual(["[b 乙]"], tr.collect_sources(object(), song, {}))
+        wiki.assert_not_called()
+
     def test_a_failing_source_does_not_break_the_others(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
-        with patch.object(tr, "lookup_atwiki", side_effect=RuntimeError("boom")), \
+        with patch.object(tr, "USE_ATWIKI", True), \
+             patch.object(tr, "lookup_atwiki", side_effect=RuntimeError("boom")), \
              patch.object(tr, "lookup_netease", return_value=["[b 乙]"]), \
              patch.object(tr, "lookup_bilibili", return_value=([], [], [])):
             self.assertEqual(["[b 乙]"], tr.collect_sources(object(), song, {}))

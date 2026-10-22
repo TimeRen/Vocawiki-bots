@@ -11,8 +11,9 @@ name: Fill the VOCALOID collection translation sources
 # VOCA_USERNAME（可选）。缓存必须跨运行保留，否则每轮都会把整页重查一遍。
 #
 # 触发方式：
-#   · schedule 每天 06:43 UTC；Toolforge 的 translations 在 06:37 UTC，两处错开
-#   · push 到 main 且改动到脚本或本工作流 -> 立即运行（改完即可验证）
+#   · 目前**只保留手动触发**：2026-10-22 三次自动写页面后 1～3 分钟内都被
+#     `人间百态` 账号整笔回退（274554 / 274591 / 274593），先把定时器关掉，
+#     免得和回退操作打编辑战。要恢复每天自动跑，把下面 schedule 的注释去掉即可。
 #   · workflow_dispatch -> Actions 页面手动 Run workflow（可填额外参数，如 --limit 30）
 #   · repository_dispatch -> 外部心跳即时触发：
 #       curl -X POST -H "Authorization: ******" \
@@ -21,13 +22,8 @@ name: Fill the VOCALOID collection translation sources
 #            -d '{"event_type":"update-collection-translations"}'
 
 on:
-  schedule:
-    - cron: '43 6 * * *'
-  push:
-    branches: [main]
-    paths:
-      - 'bots/vocaloid_collection_translations.py'
-      - '.github/workflows/update-collection-translations.yml'
+  # schedule:
+  #   - cron: '43 6 * * *'          # 每天 06:43 UTC（Toolforge 的 translations 在 06:37）
   workflow_dispatch:
     inputs:
       args:

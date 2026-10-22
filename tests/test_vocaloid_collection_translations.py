@@ -709,6 +709,53 @@ class RowBuildTest(TestCase):
         self.assertEqual("[[ハロー(初音ミク)]]", tr.render_song_title("ハロー(初音ミク)"))
 
 
+class AtwikiSongTest(TestCase):
+    """补录前必须核实 P主：同名不同曲在歌词wiki 上到处都是。"""
+
+    class FakeFetcher:
+        def __init__(self, bodies):
+            self.bodies = bodies
+
+        def text(self, url, attempts=3):
+            return self.bodies.get(url, "")
+
+    def _page(self, pid, body):
+        return {tr.ATWIKI_PAGE.format(pid=pid):
+                f'<div id="wikibody">{body}</div><div class="atwiki-page-keyword">x</div>'}
+
+    def test_parenthetical_hint_must_match_the_composer(self):
+        bodies = self._page("3414", "作詞：骨盤P<br/>作曲：骨盤P<br/>翻譯：某人<br/>歌詞")
+        fetcher = self.FakeFetcher(bodies)
+        self.assertIsNone(tr.atwiki_song(fetcher, {tr.title_key("Colors(kouta)"): "3414"},
+                                        {}, "Colors(kouta)"))
+        bodies = self._page("3414", "作曲：kouta<br/>翻譯：某人<br/>歌詞")
+        fetcher = self.FakeFetcher(bodies)
+        self.assertEqual(("3414", "某人", "kouta"),
+                         tr.atwiki_song(fetcher, {tr.title_key("Colors(kouta)"): "3414"},
+                                        {}, "Colors(kouta)"))
+
+    def test_japanese_title_needs_no_hint(self):
+        bodies = self._page("3460", "作曲：コーチP<br/>翻譯：MIU<br/>歌詞")
+        fetcher = self.FakeFetcher(bodies)
+        self.assertEqual(("3460", "MIU", "コーチP"),
+                         tr.atwiki_song(fetcher, {tr.title_key("死亡フラグ"): "3460"},
+                                        {}, "死亡フラグ"))
+
+    def test_plain_chinese_title_without_alias_is_rejected(self):
+        bodies = self._page("2231", "作曲：やしきん<br/>翻譯：cyataku<br/>歌詞")
+        fetcher = self.FakeFetcher(bodies)
+        index = {tr.title_key("PANDORA"): "2231", tr.title_key("パンドラ"): "2231"}
+        self.assertIsNone(tr.atwiki_song(fetcher, index, {}, "PANDORA"))
+        # 有大家族模板的日文原名时才认
+        self.assertEqual(("2231", "cyataku", "やしきん"),
+                         tr.atwiki_song(fetcher, index, {tr.title_key("PANDORA"): "パンドラ"},
+                                        "PANDORA"))
+
+    def test_title_hint(self):
+        self.assertEqual("kouta", tr.title_hint("Colors(kouta)"))
+        self.assertEqual("", tr.title_hint("ORDER"))
+        self.assertEqual("", tr.title_hint("无题(2005)"))
+
 class CollectSourcesTest(TestCase):
     def test_caps_at_three_and_dedups(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")

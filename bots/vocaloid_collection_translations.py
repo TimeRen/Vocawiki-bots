@@ -38,6 +38,11 @@
 总榜名次，四种情况都算「已录入」）。同一首歌只录一次：以 ROOKIE 行录入时用
 ``{{注}}`` 标总榜，就不会再补一行 TOP100 的重复条目。
 
+补录前一定核对 P主（``atwiki_song``）：``Colors(kouta)`` 这类带括号注记的曲名，
+AtWiki 页面的作曲必须是括号里那位；日文曲名可以直接认；纯中文 / ASCII 曲名必须
+靠日文原名才对上。只按页面名匹配过的地方踩过雷——2026-10-22 首版补的 10 行里
+6 行是「同名不同曲」（`Libra(mira)` 对上了 Eon 的 Libra 等），已整笔撤回。
+
 **维护自己的写法**：机器人只改两种格子——空的，和自己写过的（内容与缓存里记过的
 ``sources`` / ``written`` 逐字相同）。这些格子会随新结论更新 / 清空；别人写过的
 格子一个字都不碰，**哪怕格式和机器人一模一样**（页面主人也按
@@ -1259,14 +1264,37 @@ def season_data(site, fetcher: Fetcher, refresh: bool = False) -> Dict:
     return data
 
 
+def title_hint(title: str) -> str:
+    """``Colors(kouta)`` / ``月光(春风哈娜)`` 里括号中的 P主 —— 用来核对同名不同曲。"""
+    match = re.match(r"^(?P<base>.+?)\s*[(（](?P<hint>[^()（）]{1,40})[)）]$", str(title or "").strip())
+    if not match:
+        return ""
+    hint = match.group("hint").strip()
+    if not hint or hint.isdigit() or hint.startswith("无翻译"):
+        return ""
+    return hint
+
+
+def has_kana(text: str) -> bool:
+    return bool(re.search(r"[\u3040-\u30ff]", str(text or "")))
+
+
 def atwiki_song(fetcher: Fetcher, index: Dict[str, str], names: Dict[str, str],
                 title: str) -> Optional[Tuple[str, str, str]]:
-    """按条目名 / 日文原名找 AtWiki → ``(页面 id, 译者, P主)``；对不上就不认。"""
-    candidates = [title]
-    alias = names.get(title_key(title))
+    """核实一首「还没录入」的歌在 AtWiki 有没有译文 → ``(页面 id, 译者, P主)``。
+
+    页面名对上不够（同名不同曲太多），还要核对 P主：
+    * 曲名带括号注记时（``Colors(kouta)``、``月光(春风哈娜)``），P主 必须就是括号里那位；
+    * 曲名本身是日文，或用大家族模板里的**日文原名**才对上时，可以认；
+    * 只靠纯中文 / ASCII 曲名对上又没法核对 P主 的，一律不认（宁可漏，不能错）。
+    """
+    hint = title_hint(title)
+    japanese = has_kana(title)
+    alias = names.get(title_key(title)) or ""
+    candidates = [(title, "title")]
     if alias:
-        candidates.append(alias)
-    for name in candidates:
+        candidates.append((alias, "alias"))
+    for name, via in candidates:
         pid = index.get(title_key(name))
         if not pid:
             continue
@@ -1275,6 +1303,11 @@ def atwiki_song(fetcher: Fetcher, index: Dict[str, str], names: Dict[str, str],
             continue
         producer = atwiki_credits(body)
         translator = credit_name(body)
+        if hint:
+            if person_key(producer) != person_key(hint):
+                continue
+        elif via == "title" and not japanese:
+            continue
         if producer or translator:
             return pid, translator, producer
     return None

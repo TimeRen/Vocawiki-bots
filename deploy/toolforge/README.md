@@ -148,6 +148,22 @@ toolforge jobs run once --image python3.13 --wait \
 cat ~/once.out
 ```
 
+### 部署完的自检（跑一次，别等定时任务）
+
+`sync.sh` 成功只说明**代码和任务定义**上去了，还差一步确认 job 容器里能真正跑起来
+（venv、`user-password.py`、出口网络）：
+
+```bash
+deploy/toolforge/preflight.sh          # 只读：仓库 / 密码 600 权限 / venv / kubeconfig
+toolforge jobs run translations-check --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --dry-run"
+tail -n 30 ~/translations-check.out
+```
+
+干跑日志里出现 `已登录：Renjian-bot` 和 `待查 N 行、本轮查了 M 首` 就说明链路通了
+（`--dry-run` 不保存页面）。同样的办法可以验另外三个：
+`run-once.sh --dry-run`、`run-lyrics-completion.sh --dry-run`、`run-contributions.sh --dry-run`。
+
 ## 7. 查看状态与日志
 
 **先 `become <工具名>`**：`toolforge jobs` 只在工具账号下能用，在个人账号下会报

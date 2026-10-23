@@ -508,7 +508,19 @@ python bots/vocaloid_collection_translations.py --write
 `No such file or directory`（那里的 `~` 是你的个人 home），`toolforge jobs` 也会
 因为找不到工具账号的 kubeconfig 而失败。
 
-**一条命令搞定（推荐）**：
+**第一次部署（工具账号里还没有仓库）**：
+
+```bash
+ssh zgyx-0717-rjbt@login.toolforge.org \
+  'become vocawiki-cont -- bash -lc "curl -fsSL https://raw.githubusercontent.com/TimeRen/Vocawiki-bots/main/deploy/toolforge/bootstrap.sh | bash"'
+```
+
+`bootstrap.sh` 用 `getent passwd` 取工具账号真正的 home（`/data/project/<工具名>`），
+把 `HOME` 纠过去，没有仓库就 `git clone`，然后交给 `sync.sh`。它会先打印 GitHub 的
+连通性（`github.com` / `raw.githubusercontent.com` 的 HTTP 码），clone 失败时按报错
+给出对应处置。
+
+**以后更新（推荐）**：
 
 ```bash
 # 从你自己的机器上（不用先 ssh 进去）

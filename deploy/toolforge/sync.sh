@@ -67,12 +67,12 @@ if ! git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>
     say "  当前分支没有 upstream（detached？）：git checkout main"
     exit 1
 fi
-incoming=$(git log --oneline HEAD..@{upstream} 2>/dev/null | wc -l)
+incoming=$(git log --oneline "HEAD..@{upstream}" 2>/dev/null | wc -l)
 if [[ "$incoming" == 0 ]]; then
     say "  已是最新（$(git rev-parse --short HEAD)）"
 else
     say "  有 $incoming 个新提交："
-    git --no-pager log --oneline HEAD..@{upstream} | sed 's/^/    /'
+    git --no-pager log --oneline "HEAD..@{upstream}" | sed 's/^/    /'
     if ! run git pull --ff-only; then
         say "  git pull 失败：本地有改动挡住了合并，看看是什么："
         git status --short | sed 's/^/    /'

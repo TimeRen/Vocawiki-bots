@@ -34,6 +34,16 @@ URL="https://github.com/TimeRen/Vocawiki-bots.git"
 
 if [[ -d "$REPO/.git" ]]; then
     say "已有仓库：$REPO"
+    if [[ ! -f "$REPO/deploy/toolforge/sync.sh" ]]; then
+        say "这个仓库比较旧，里面还没有 sync.sh —— 先拉一次代码"
+        if ! git -C "$REPO" pull --ff-only; then
+            say "git pull 失败，本地有什么改动："
+            git -C "$REPO" status --short | head -20
+            say "只有权限位（old mode / new mode）的话可以丢掉："
+            say "  git -C \"$REPO\" checkout -- . && git -C \"$REPO\" pull --ff-only"
+            exit 1
+        fi
+    fi
 else
     say "出口网络检查（GitHub 能不能连上）："
     if command -v curl >/dev/null 2>&1; then
@@ -48,6 +58,7 @@ else
         say "克隆失败。按上面的报错处理："
         say "  · Could not resolve host / Connection timed out -> 工具没有出口网络，问一下 Toolforge 状态"
         say "  · Permission denied -> 目录不可写（工具 home 不对？）"
+        say "  · destination path ... already exists -> 目录非空，改用 git pull（本脚本开头已处理）"
         say "  · 要账号密码 -> 仓库是私有的，用带 token 的地址重试："
         say "      git clone https://<token>@github.com/TimeRen/Vocawiki-bots.git \"$REPO\""
         exit 1

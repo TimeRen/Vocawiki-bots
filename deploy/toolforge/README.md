@@ -508,17 +508,34 @@ python bots/vocaloid_collection_translations.py --write
 `No such file or directory`（那里的 `~` 是你的个人 home），`toolforge jobs` 也会
 因为找不到工具账号的 kubeconfig 而失败。
 
-**第一次部署（工具账号里还没有仓库）**：
+**第一次部署（工具账号里还没有仓库）**——用 git 装，不依赖 curl（有的跳板机 curl 是精简版，`-fsSL` 会被拒绝）：
+
+```bash
+# 1) 看工具账号真正的 home（工具名就是 become 后面那个）
+ssh zgyx-0717-rjbt@login.toolforge.org 'become vocawiki-cont -- getent passwd vocawiki-cont'
+
+# 2) 按上一步给出的 home 克隆（下面假定是 /data/project/vocawiki-cont）
+ssh zgyx-0717-rjbt@login.toolforge.org \
+  'become vocawiki-cont -- git clone https://github.com/TimeRen/Vocawiki-bots.git /data/project/vocawiki-cont/Vocawiki-bots'
+
+# 3) 拉代码 + 修权限 + 校验 + 重载四个定时任务
+ssh zgyx-0717-rjbt@login.toolforge.org \
+  'become vocawiki-cont -- /data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh'
+```
+
+第 2 步若报 `destination path ... already exists`，说明仓库早就有了，改成
+`git -C <那个目录> pull --ff-only`（`sync.sh` 自己也会 pull，所以也可以跳过第 2 步
+直接跑第 3 步）。
+
+`curl` 能用的机器上也可以用一键版：
 
 ```bash
 ssh zgyx-0717-rjbt@login.toolforge.org \
   'become vocawiki-cont -- bash -lc "curl -fsSL https://raw.githubusercontent.com/TimeRen/Vocawiki-bots/main/deploy/toolforge/bootstrap.sh | bash"'
 ```
 
-`bootstrap.sh` 用 `getent passwd` 取工具账号真正的 home（`/data/project/<工具名>`），
-把 `HOME` 纠过去，没有仓库就 `git clone`，然后交给 `sync.sh`。它会先打印 GitHub 的
-连通性（`github.com` / `raw.githubusercontent.com` 的 HTTP 码），clone 失败时按报错
-给出对应处置。
+`bootstrap.sh` 会自己找工具 home、没有仓库就 clone、已有旧 clone 就 pull，最后交给
+`sync.sh`；clone 失败时按报错给出处置。
 
 **以后更新（推荐）**：
 

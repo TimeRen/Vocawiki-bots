@@ -47,9 +47,20 @@ REPO="${VOCA_REPO:-$(cd "$SELF_DIR/../.." && pwd)}"
 TOOL_HOME="${VOCA_HOME:-$(dirname "$REPO")}"
 JOBS="$REPO/deploy/toolforge/jobs.yaml"
 
-# become 不重置 HOME，而 toolforge CLI 靠 $HOME/.kube/config 找工具账号，所以纠回来
-if [[ "$HOME" != "$TOOL_HOME" && -d "$TOOL_HOME" ]] \
-   && [[ -d "$TOOL_HOME/.kube" || -d "$TOOL_HOME/pyvenv" || -d "$TOOL_HOME/Vocawiki-bots" ]]; then
+# become 不重置 HOME，而 toolforge CLI 靠 $HOME/.kube/config 找工具账号，所以纠回来。
+# 但只在「这个路径确实是工具 home」时才动 HOME —— 个人 home 里也有一份 Vocawiki-bots
+# 的话（外面 clone 的），把 HOME 改过去只会更乱，直接报错让用户先 become。
+if [[ -z "${VOCA_HOME:-}" ]] \
+   && [[ "$TOOL_HOME" != /data/project/* && ! -d "$TOOL_HOME/.kube" ]]; then
+    say "这个路径不像工具 home：$TOOL_HOME"
+    say "  先 become <工具名> 再跑本脚本（工具 home 形如 /data/project/<工具名>）："
+    say "    ssh <用户名>@login.toolforge.org"
+    say "    become vocawiki-contrib"
+    say "    cd ~/Vocawiki-bots && ./deploy/toolforge/sync.sh"
+    exit 1
+fi
+if [[ "$HOME" != "$TOOL_HOME" && -d "$TOOL_HOME" \
+      && ( "$TOOL_HOME" == /data/project/* || -d "$TOOL_HOME/.kube" ) ]]; then
     say "HOME 指在 $HOME，改用工具 home：$TOOL_HOME"
     export HOME="$TOOL_HOME"
 fi

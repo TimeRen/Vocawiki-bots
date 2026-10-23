@@ -116,6 +116,9 @@ toolforge jobs delete watcher   # 如果之前部署过旧版常驻 watcher
 toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 ```
 
+> 平时不用手敲这两行：`~/Vocawiki-bots/deploy/toolforge/sync.sh` 会拉代码、
+> 修权限、校验 `command:` 路径、再 `jobs load`（见「更新代码」一节）。
+
 会创建或更新 `hourly` / `lyrics-plan` / `contributions` / `translations` 四个任务：
 
 | job | 类型 | 作用 |
@@ -504,6 +507,30 @@ python bots/vocaloid_collection_translations.py --write
 存在于工具账号里。在个人账号下 `cd ~/Vocawiki-bots` 会直接报
 `No such file or directory`（那里的 `~` 是你的个人 home），`toolforge jobs` 也会
 因为找不到工具账号的 kubeconfig 而失败。
+
+**一条命令搞定（推荐）**：
+
+```bash
+become vocawiki-cont
+~/Vocawiki-bots/deploy/toolforge/sync.sh
+```
+
+`sync.sh` 依次做四件事，全部幂等：
+
+1. `git pull --ff-only`（先列出有哪些新提交；本地有改动挡住合并就打印出来并停下）；
+2. 把 `deploy/toolforge/*.sh` 补回可执行位（`exitcode 126` 的成因）；
+3. 校验 `jobs.yaml`：YAML 能解析、每个 `command:` 指向的脚本都真的存在（写错是
+   `exitcode 127`）；
+4. `toolforge jobs load deploy/toolforge/jobs.yaml` 并 `jobs list`。
+
+其它用法：
+
+```bash
+sync.sh --dry-run    # 只打印会做什么，不改任何东西（jobs list 这种只读命令照跑）
+sync.sh --verify     # 顺带跑一轮 translations 的干跑，确认链路通
+```
+
+想手动分步做也可以：
 
 ```bash
 cd ~/Vocawiki-bots && git pull

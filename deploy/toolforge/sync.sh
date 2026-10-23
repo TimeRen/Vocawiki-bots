@@ -30,13 +30,6 @@ for arg in "$@"; do
     esac
 done
 
-# 自己在仓库里（deploy/toolforge/），所以不依赖 $HOME：become 之后 HOME 可能还是
-# 个人 home，靠 ~ 找仓库会找到 /home/<用户名>/Vocawiki-bots（工具账号读不了）。
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="${VOCA_REPO:-$(cd "$SELF_DIR/../.." && pwd)}"
-TOOL_HOME="${VOCA_HOME:-$(dirname "$REPO")}"
-JOBS="$REPO/deploy/toolforge/jobs.yaml"
-
 say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 run() {
@@ -46,6 +39,20 @@ run() {
     fi
     "$@"
 }
+
+# 自己在仓库里（deploy/toolforge/），所以不依赖 $HOME：become 之后 HOME 可能还是
+# 个人 home，靠 ~ 找仓库 / venv / kubeconfig 都会落到 /home/<用户名>（工具账号读不了）。
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="${VOCA_REPO:-$(cd "$SELF_DIR/../.." && pwd)}"
+TOOL_HOME="${VOCA_HOME:-$(dirname "$REPO")}"
+JOBS="$REPO/deploy/toolforge/jobs.yaml"
+
+# become 不重置 HOME，而 toolforge CLI 靠 $HOME/.kube/config 找工具账号，所以纠回来
+if [[ "$HOME" != "$TOOL_HOME" && -d "$TOOL_HOME" ]] \
+   && [[ -d "$TOOL_HOME/.kube" || -d "$TOOL_HOME/pyvenv" || -d "$TOOL_HOME/Vocawiki-bots" ]]; then
+    say "HOME 指在 $HOME，改用工具 home：$TOOL_HOME"
+    export HOME="$TOOL_HOME"
+fi
 
 # ---------------------------------------------------------------- 0. 前置检查
 step "检查环境"

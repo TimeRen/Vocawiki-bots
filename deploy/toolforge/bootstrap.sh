@@ -32,6 +32,30 @@ export HOME="$tool_home"
 REPO="$tool_home/Vocawiki-bots"
 URL="https://github.com/TimeRen/Vocawiki-bots.git"
 
+# 目录在、但没有 .git：不是 git 仓库（clone 被中断、或别人拷过去的文件）。
+# 这时不能 pull，只能挪到一旁重新 clone —— 但要把密码和缓存搬回来。
+if [[ -d "$REPO" && ! -d "$REPO/.git" ]]; then
+    backup="$REPO.bak-$(date +%Y%m%d%H%M%S)"
+    say "$REPO 存在但不是 git 仓库（没有 .git）"
+    say "  挪到 $backup，然后重新 clone"
+    if ! mv "$REPO" "$backup"; then
+        say "  挪不动：目录不可写？确认工具 home 对不对"
+        exit 1
+    fi
+    if ! git clone "$URL" "$REPO"; then
+        say "clone 失败。原来的目录在 $backup（没丢东西），修好网络后重跑本脚本"
+        exit 1
+    fi
+    if [[ -f "$backup/user-password.py" ]]; then
+        cp -p "$backup/user-password.py" "$REPO/" && say "  已搬回 user-password.py"
+    fi
+    if [[ -d "$backup/data" ]]; then
+        mkdir -p "$REPO/data" && cp -a "$backup/data/." "$REPO/data/" \
+            && say "  已搬回 data/（缓存）"
+    fi
+    say "  旧目录保留在 $backup，确认没问题后可以删掉"
+fi
+
 if [[ -d "$REPO/.git" ]]; then
     say "已有仓库：$REPO"
     if [[ ! -f "$REPO/deploy/toolforge/sync.sh" ]]; then

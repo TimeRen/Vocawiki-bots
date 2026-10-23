@@ -616,6 +616,26 @@ git config core.fileMode false
 
 ## 排错
 
+### `fatal: not a git repository (or any parent up to mount point /mnt/nfs)`
+
+`/data/project/<工具名>/Vocawiki-bots` 这个**目录在，但没有 `.git`** —— 不是 clone
+出来的（clone 被中断，或者文件是拷过去的）。这时 `git pull` 无从谈起，`sync.sh`
+也还没在里面。先把旧的挪到一旁、重新 clone，**密码与缓存搬回来**：
+
+```bash
+ssh <用户名>@login.toolforge.org \
+ 'become vocawiki-contrib -- bash -lc "cd /data/project/vocawiki-contrib &&
+   ls -la Vocawiki-bots | head -20 &&
+   mv Vocawiki-bots Vocawiki-bots.bak &&
+   git clone https://github.com/TimeRen/Vocawiki-bots.git Vocawiki-bots &&
+   cp -p Vocawiki-bots.bak/user-password.py Vocawiki-bots/ 2>/dev/null;
+   mkdir -p Vocawiki-bots/data && cp -a Vocawiki-bots.bak/data/. Vocawiki-bots/data/ 2>/dev/null;
+   bash Vocawiki-bots/deploy/toolforge/sync.sh"'
+```
+
+`deploy/toolforge/bootstrap.sh` 里也有同样的分支（检测到「目录存在但没有 `.git`」
+就自动挪开 + clone + 搬回密码与 `data/`），确认无误后 `Vocawiki-bots.bak` 可以删。
+
 ### `KubernetesConfigFileNotFoundException` / `Failed to load configuration, did you forget to run 'become <mytool>'?`
 
 `toolforge jobs` 是在**个人账号**下跑的，读的是个人 home 里不存在的

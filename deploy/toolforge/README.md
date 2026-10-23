@@ -512,15 +512,15 @@ python bots/vocaloid_collection_translations.py --write
 
 ```bash
 # 1) 看工具账号真正的 home（工具名就是 become 后面那个）
-ssh zgyx-0717-rjbt@login.toolforge.org 'become vocawiki-cont -- getent passwd vocawiki-cont'
+ssh zgyx-0717-rjbt@login.toolforge.org 'become vocawiki-contrib -- getent passwd vocawiki-contrib'
 
-# 2) 按上一步给出的 home 克隆（下面假定是 /data/project/vocawiki-cont）
+# 2) 按上一步给出的 home 克隆（下面假定是 /data/project/vocawiki-contrib）
 ssh zgyx-0717-rjbt@login.toolforge.org \
-  'become vocawiki-cont -- git clone https://github.com/TimeRen/Vocawiki-bots.git /data/project/vocawiki-cont/Vocawiki-bots'
+  'become vocawiki-contrib -- git clone https://github.com/TimeRen/Vocawiki-bots.git /data/project/vocawiki-contrib/Vocawiki-bots'
 
 # 3) 拉代码 + 修权限 + 校验 + 重载四个定时任务
 ssh zgyx-0717-rjbt@login.toolforge.org \
-  'become vocawiki-cont -- /data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh'
+  'become vocawiki-contrib -- /data/project/vocawiki-contrib/Vocawiki-bots/deploy/toolforge/sync.sh'
 ```
 
 第 2 步若报 `destination path ... already exists`，说明仓库早就有了，改成
@@ -531,7 +531,7 @@ ssh zgyx-0717-rjbt@login.toolforge.org \
 
 ```bash
 ssh zgyx-0717-rjbt@login.toolforge.org \
-  'become vocawiki-cont -- bash -lc "curl -fsSL https://raw.githubusercontent.com/TimeRen/Vocawiki-bots/main/deploy/toolforge/bootstrap.sh | bash"'
+  'become vocawiki-contrib -- bash -lc "curl -fsSL https://raw.githubusercontent.com/TimeRen/Vocawiki-bots/main/deploy/toolforge/bootstrap.sh | bash"'
 ```
 
 `bootstrap.sh` 会自己找工具 home、没有仓库就 clone、已有旧 clone 就 pull，最后交给
@@ -542,14 +542,14 @@ ssh zgyx-0717-rjbt@login.toolforge.org \
 ```bash
 # 从你自己的机器上（不用先 ssh 进去）
 ssh zgyx-0717-rjbt@login.toolforge.org \
-  'become vocawiki-cont -- /data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh'
+  'become vocawiki-contrib -- /data/project/vocawiki-contrib/Vocawiki-bots/deploy/toolforge/sync.sh'
 ```
 
 或者登上跳板机、进工具账号之后再跑（在哪个目录都行，脚本按自己的位置找仓库）：
 
 ```bash
-become vocawiki-cont
-/data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh
+become vocawiki-contrib
+/data/project/vocawiki-contrib/Vocawiki-bots/deploy/toolforge/sync.sh
 ```
 
 > **别在外面用 `~/Vocawiki-bots/...` 调用**：`become … -- bash -lc "~/…"` 里的 `~`

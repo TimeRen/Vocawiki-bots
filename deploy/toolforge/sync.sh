@@ -3,11 +3,11 @@
 #
 #   # 从你自己的机器上（一行搞定）
 #   ssh <用户名>@login.toolforge.org \
-#     'become vocawiki-cont -- /data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh'
+#     'become vocawiki-contrib -- /data/project/vocawiki-contrib/Vocawiki-bots/deploy/toolforge/sync.sh'
 #
 #   # 或者登上跳板机、进工具账号之后（在哪个目录都行，脚本自己找仓库）
-#   become vocawiki-cont
-#   /data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh
+#   become vocawiki-contrib
+#   /data/project/vocawiki-contrib/Vocawiki-bots/deploy/toolforge/sync.sh
 #   ...                                                     --dry-run   # 只看会做什么
 #   ...                                                     --verify    # 顺便干跑一轮
 #
@@ -73,7 +73,7 @@ if ! command -v toolforge >/dev/null 2>&1; then
 fi
 if ! toolforge jobs list >/dev/null 2>&1; then
     say "  toolforge jobs 不可用：多半是还没 become 工具账号，或 HOME 指错了"
-    say "    become vocawiki-cont"
+    say "    become vocawiki-contrib"
     say "    # 从外面一行调用时用绝对路径，别用 ~（见文件头）"
     exit 1
 fi
@@ -98,10 +98,22 @@ else
     say "  有 $incoming 个新提交："
     git --no-pager log --oneline "HEAD..@{upstream}" | sed 's/^/    /'
     if ! run git pull --ff-only; then
-        say "  git pull 失败：本地有改动挡住了合并，看看是什么："
-        git status --short | sed 's/^/    /'
-        say "  确认可以丢弃的话：git checkout -- . && git pull --ff-only"
-        exit 1
+        summary="$(git diff --summary)"
+        if [[ -n "$summary" ]] && ! grep -qv 'mode change' <<<"$summary"; then
+            # 早前手工 chmod +x 留下的权限位改动，仓库里本来就带可执行位
+            say "  只有权限位改动（chmod 留下的），关掉 fileMode 再拉一次"
+            run git config core.fileMode false
+            if ! run git pull --ff-only; then
+                say "  还是失败："
+                git status --short | sed 's/^/    /'
+                exit 1
+            fi
+        else
+            say "  git pull 失败：本地有改动挡住了合并，看看是什么："
+            git status --short | sed 's/^/    /'
+            say "  确认可以丢弃的话：git checkout -- . && git pull --ff-only"
+            exit 1
+        fi
     fi
 fi
 say "  当前版本 $(git rev-parse --short HEAD)  $(git log -1 --format=%s)"

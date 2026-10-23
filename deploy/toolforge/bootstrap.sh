@@ -2,7 +2,7 @@
 # 第一次部署（或换了新工具账号）时用一次：把仓库装到工具 home，然后交给 sync.sh。
 #
 #   ssh <用户名>@login.toolforge.org \
-#     'become vocawiki-cont -- bash -lc "curl -fsSL \
+#     'become vocawiki-contrib -- bash -lc "curl -fsSL \
 #        https://raw.githubusercontent.com/TimeRen/Vocawiki-bots/main/deploy/toolforge/bootstrap.sh | bash"'
 #
 # 之后每次更新只要跑 sync.sh（bootstrap 只多做一件「没有仓库就 clone」）。

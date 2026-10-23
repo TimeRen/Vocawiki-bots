@@ -511,9 +511,22 @@ python bots/vocaloid_collection_translations.py --write
 **一条命令搞定（推荐）**：
 
 ```bash
-become vocawiki-cont
-~/Vocawiki-bots/deploy/toolforge/sync.sh
+# 从你自己的机器上（不用先 ssh 进去）
+ssh zgyx-0717-rjbt@login.toolforge.org \
+  'become vocawiki-cont -- /data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh'
 ```
+
+或者登上跳板机、进工具账号之后再跑（在哪个目录都行，脚本按自己的位置找仓库）：
+
+```bash
+become vocawiki-cont
+/data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh
+```
+
+> **别在外面用 `~/Vocawiki-bots/...` 调用**：`become … -- bash -lc "~/…"` 里的 `~`
+> 展开成的仍是**你的个人 home**（`/home/<用户名>`），工具账号进不去那里，只会得到
+> `bash: /home/<用户名>/Vocawiki-bots/...: Permission denied`。要么用上面的绝对路径，
+> 要么先 `become` 再执行。
 
 `sync.sh` 依次做四件事，全部幂等：
 
@@ -523,11 +536,11 @@ become vocawiki-cont
    `exitcode 127`）；
 4. `toolforge jobs load deploy/toolforge/jobs.yaml` 并 `jobs list`。
 
-其它用法：
+其它用法（`SYNC` 指上面那个绝对路径）：
 
 ```bash
-sync.sh --dry-run    # 只打印会做什么，不改任何东西（jobs list 这种只读命令照跑）
-sync.sh --verify     # 顺带跑一轮 translations 的干跑，确认链路通
+$SYNC --dry-run    # 只打印会做什么，不改任何东西（jobs list 这种只读命令照跑）
+$SYNC --verify     # 顺带跑一轮 translations 的干跑，确认链路通
 ```
 
 想手动分步做也可以：

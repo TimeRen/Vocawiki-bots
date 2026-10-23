@@ -1,11 +1,19 @@
 #!/bin/bash
 # 一键更新 Toolforge 上的机器人：拉代码 + 修脚本权限 + 重载全部定时任务。
 #
-# 在工具账号里跑（job 定义、kubeconfig 都只在那里）：
+#   # 从你自己的机器上（一行搞定）
+#   ssh <用户名>@login.toolforge.org \
+#     'become vocawiki-cont -- /data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh'
+#
+#   # 或者登上跳板机、进工具账号之后（在哪个目录都行，脚本自己找仓库）
 #   become vocawiki-cont
-#   ~/Vocawiki-bots/deploy/toolforge/sync.sh            # 拉代码 + 重载 jobs
-#   ~/Vocawiki-bots/deploy/toolforge/sync.sh --dry-run  # 只看会做什么
-#   ~/Vocawiki-bots/deploy/toolforge/sync.sh --verify   # 顺便干跑一轮 translations
+#   /data/project/vocawiki-cont/Vocawiki-bots/deploy/toolforge/sync.sh
+#   ...                                                     --dry-run   # 只看会做什么
+#   ...                                                     --verify    # 顺便干跑一轮
+#
+# **别用 `~/Vocawiki-bots/...` 从外面调**：`become … -- bash -lc "~/…"` 里的 `~`
+# 仍是你的个人 home（/home/<用户名>），工具账号进不去那里，只会得到
+# 「Permission denied」。要么用上面的绝对路径，要么先 become 再执行。
 #
 # 幂等：没有新提交时只会重载一次 jobs（几秒），不会动页面。
 # 不碰 user-password.py、不碰 data/ 里的缓存、不重建 venv。
@@ -17,12 +25,16 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
         --verify)  VERIFY=1 ;;
-        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
         *) echo "未知参数：$arg（见 --help）" >&2; exit 2 ;;
     esac
 done
 
-REPO="${VOCA_REPO:-$HOME/Vocawiki-bots}"
+# 自己在仓库里（deploy/toolforge/），所以不依赖 $HOME：become 之后 HOME 可能还是
+# 个人 home，靠 ~ 找仓库会找到 /home/<用户名>/Vocawiki-bots（工具账号读不了）。
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="${VOCA_REPO:-$(cd "$SELF_DIR/../.." && pwd)}"
+TOOL_HOME="${VOCA_HOME:-$(dirname "$REPO")}"
 JOBS="$REPO/deploy/toolforge/jobs.yaml"
 
 say()  { printf '%s\n' "$*"; }
@@ -43,14 +55,19 @@ if [[ ! -d "$REPO/.git" ]]; then
     exit 1
 fi
 say "  仓库 $REPO"
+say "  工具 home $TOOL_HOME"
+if [[ ! -d "$TOOL_HOME/pyvenv" && ! -d "$HOME/pyvenv" ]]; then
+    say "  注意：$TOOL_HOME/pyvenv 不存在（venv 还没建？见第 4 节），本轮只更新代码与任务"
+fi
 
 if ! command -v toolforge >/dev/null 2>&1; then
     say "  找不到 toolforge 命令 —— 请在跳板机上、或 ssh login.toolforge.org 后运行"
     exit 1
 fi
 if ! toolforge jobs list >/dev/null 2>&1; then
-    say "  toolforge jobs 不可用：多半是还没 become 工具账号"
+    say "  toolforge jobs 不可用：多半是还没 become 工具账号，或 HOME 指错了"
     say "    become vocawiki-cont"
+    say "    # 从外面一行调用时用绝对路径，别用 ~（见文件头）"
     exit 1
 fi
 say "  toolforge CLI 可用"
@@ -102,7 +119,7 @@ if [[ ! -f "$JOBS" ]]; then
 fi
 
 python_bin=""
-for candidate in "$HOME/pyvenv/bin/python" python3 python; do
+for candidate in "$TOOL_HOME/pyvenv/bin/python" "$HOME/pyvenv/bin/python" python3 python; do
     if command -v "$candidate" >/dev/null 2>&1; then
         python_bin="$candidate"
         break

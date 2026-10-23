@@ -1556,7 +1556,9 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
                 current[cell] = row.text(side, COLUMNS.index("source")).strip()
     # --refresh 只跳过「缓存还有效就不再查」，不丢缓存：要靠 written 认出自己写过的格子
     cache = load_cache()
-    index = atwiki_page_index(fetcher)
+    # 不查歌词wiki 时不必读「全ページ一覧」（8 千多个页面名，冷缓存要几分钟）：
+    # 补录要用它、`drop_wrong_rows` 不用（它只按行里已有的 AtWiki 链接核对投稿年）
+    index = atwiki_page_index(fetcher) if USE_ATWIKI else {}
 
     fills: Dict[Tuple[int, int], str] = {}
     queried = 0

@@ -1697,6 +1697,96 @@ def remove_row(text: str, line: int) -> str:
     return "\n".join(lines)
 
 
+def blank_row(row: Row) -> bool:
+    """这一行是不是整行空白（只剩一堆 ``||``）。"""
+    return not any(row.text(side, column).strip()
+                   for side in range(row.sides) for column in range(PER_SIDE))
+
+
+def _side_cells(row: Row, side: int) -> List[Cell]:
+    """某一行某一侧的 6 个单元格（列数不够时补空）。"""
+    cells: List[Cell] = []
+    for column in range(PER_SIDE):
+        index = side * PER_SIDE + column
+        cells.append(row.cells[index] if index < len(row.cells) else Cell(" ", "", ""))
+    return cells
+
+
+def _put_side_cells(row: Row, side: int, cells: Sequence[Cell]) -> None:
+    while len(row.cells) < (side + 1) * PER_SIDE:
+        row.cells.append(Cell(" ", "", ""))
+    for column, cell in enumerate(cells):
+        row.cells[side * PER_SIDE + column] = cell
+
+
+def _row_blocks(text: str) -> List[List[Row]]:
+    """把行按表格分组（同一张表里相邻的行只隔着 ``|-``）。"""
+    lines = text.split("\n")
+    rows, _ = parse_rows(text)
+    blocks: List[List[Row]] = []
+    for row in rows:
+        if blocks and all(lines[i].strip() == "|-"
+                          for i in range(blocks[-1][-1].line + 1, row.line)):
+            blocks[-1].append(row)
+        else:
+            blocks.append([row])
+    return blocks
+
+
+def compact_sides(text: str) -> Tuple[str, int]:
+    """每侧的空位挪到表尾，别在表格中间留一块空白 → ``(新文本, 挪动的行数)``。
+
+    ``prune`` 只清一侧时（另一侧还没条目），那一行就空出半格；页面主人看到的是
+    表格中间凭空多出一条空白带（2026-10-25 反馈）。这里把同一侧后面的曲目依次
+    上移补位：顺序不变、曲目一个不丢，空位移到表尾——表尾本来就长短不一。
+    """
+    lines = text.split("\n")
+    moved = 0
+    for block in _row_blocks(text):
+        if any(row.sides != 2 for row in block):
+            continue
+        touched = False
+        for side in (0, 1):
+            slots = [_side_cells(row, side) for row in block]
+            filled = [cells for cells in slots
+                      if any(cell.value.strip() for cell in cells)]
+            if len(filled) == len(slots):
+                continue                       # 这一侧没有空位
+            if not filled:
+                continue                       # 全空：交给 remove_blank_rows
+            template = next(cells for cells in slots
+                            if not any(cell.value.strip() for cell in cells))
+            shifted = [filled[i] if i < len(filled) else template
+                       for i in range(len(slots))]
+            if all(new is old for new, old in zip(shifted, slots)):
+                continue
+            for row, cells in zip(block, shifted):
+                _put_side_cells(row, side, cells)
+            touched = True
+        if touched:
+            for row in block:
+                new_line = join_row(row.cells)
+                if new_line != lines[row.line]:
+                    lines[row.line] = new_line
+                    moved += 1
+    return "\n".join(lines), moved
+
+
+def remove_blank_rows(text: str) -> Tuple[str, int]:
+    """删掉整行空白的行 → ``(新文本, 删掉的行数)``。
+
+    只清一侧的旧版本会留下「有行没内容」的空壳，页面上的表现就是表格中间多出
+    一条空白带（2026-10-25 反馈）。
+    """
+    rows, _ = parse_rows(text)
+    removed = 0
+    for row in sorted(rows, key=lambda item: item.line, reverse=True):
+        if blank_row(row):
+            text = remove_row(text, row.line)
+            removed += 1
+    return text, removed
+
+
 def prune_created_rows(text: str, keys: Set[str]) -> Tuple[str, List[str]]:
     """删掉「这首歌已经有条目」的行 → ``(新文本, 删掉的曲名列表)``。
 
@@ -1843,6 +1933,8 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
 
     # 先删「已经有条目」的行，再填来源：省得给马上要删的行白查一遍（--limit 也不浪费）
     pruned: List[str] = []
+    moved = 0
+    blanks = 0
     text = original
     if prune:
         text, pruned = prune_entries(site, fetcher, text, refresh)
@@ -1922,6 +2014,15 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
                                                   max_add, write)
             except Exception as exc:    # noqa: BLE001 - 补录失败不影响填来源
                 pywikibot.warning(f"补录未录入的曲目失败：{exc}")
+    if prune:
+        # 只清了一侧的行会把那一侧空出半格：同侧后面的曲目上移补位，再把整行
+        # 空白的空壳删掉，表格中间就不会留一条空白带（2026-10-25 反馈）。
+        text, moved = compact_sides(text)
+        if moved:
+            pywikibot.output(f"  {moved} 行的曲目上移补位")
+        text, blanks = remove_blank_rows(text)
+        if blanks:
+            pywikibot.output(f"  删掉 {blanks} 个整行空白的行")
     if text == original:
         pywikibot.output("页面无需更新。")
         return False
@@ -1929,15 +2030,18 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         pywikibot.output("[dry-run] 页面有改动；加 --write 以保存。")
         return True
     page.text = text
-    note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行"
+    parts = [f"补 {len(fills)} 行"]
     if pruned:
-        extra = f"，删掉 {len(pruned)} 个已有条目的行"
-        note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行{extra}"
+        parts.append(f"删掉 {len(pruned)} 个已有条目的行")
     if added:
-        note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行、补录 {added} 首"
+        parts.append(f"补录 {added} 首")
     if dropped:
-        note = summary or (f"{DEFAULT_SUMMARY}，补 {len(fills)} 行，"
-                           f"删掉 {len(dropped)} 行配错的补录")
+        parts.append(f"删掉 {len(dropped)} 行配错的补录")
+    if moved:
+        parts.append(f"曲目上移补位 {moved} 行")
+    if blanks:
+        parts.append(f"删掉 {blanks} 个空行")
+    note = summary or f"{DEFAULT_SUMMARY}，{'、'.join(parts)}"
     try:
         page.save(summary=note, minor=True, bot=True, tags="Bot")
     except EditConflictError as exc:

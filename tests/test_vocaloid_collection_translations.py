@@ -1112,6 +1112,87 @@ class PruneCreatedRowsTest(TestCase):
         self.assertEqual((PRUNE_PAGE, []), tr.prune_created_rows(PRUNE_PAGE, set()))
 
 
+class CompactSidesTest(TestCase):
+    """只清一侧之后，同侧后面的曲目上移补位——表格中间不能留一条空白带。
+
+    2026-10-25 反馈：删行不能只清内容。整行删掉会把同一行另一侧的曲目也删没
+    （274610 就是这么丢的 `没有心` / `ORDER`），所以这里把空位移到表尾。
+    """
+
+    PAGE = """== ボカコレ2022春 ==
+{| class="wikitable " style="text-align:center;"
+|-
+! colspan="6"|TOP100 !! colspan="6"|ROOKIE
+|-
+! 名次 !! 曲名 !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名 !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 46 || [[Maison]] || {{lj|歩く人}} || 未创建 || || || {{注|5|总榜为第10}} || [[没有心]] || saikawa || 未创建 || 
+|-
+| 24 || [[诅咒之吻]] || IZ || 未创建 || || || {{注|3|总榜为第5}} || [[无题 ep.01]] || {{lj|袖野あらわ}} || 未创建 || 
+|-
+| 56 || [[Equivalent]] || {{lj|きっと、ずっと、ぼっち。}} || 未创建 || || || {{注|14|总榜为第27}} || [[ORDER]] || Hal || 未创建 || 
+|}
+"""
+
+    def test_a_cleared_side_pulls_the_next_song_up(self):
+        text, _ = tr.prune_created_rows(self.PAGE, {tr.title_key("Maison")})
+        text, moved = tr.compact_sides(text)
+
+        rows, _ = tr.parse_rows(text)
+        self.assertEqual(3, len(rows))
+        self.assertEqual("24", rows[0].text(0, tr.COLUMNS.index("rank")).strip())
+        self.assertEqual("[[没有心]]", rows[0].text(1, tr.COLUMNS.index("title")).strip())
+        for title in ("[[诅咒之吻]]", "[[Equivalent]]", "[[没有心]]",
+                      "[[无题 ep.01]]", "[[ORDER]]"):
+            self.assertIn(title, text, f"{title} 不该丢")   # 曲目一个不丢、顺序不变
+        self.assertGreater(moved, 0)
+
+    def test_the_hole_moves_to_the_end_of_the_table(self):
+        text, _ = tr.prune_created_rows(self.PAGE, {tr.title_key("Maison")})
+        text, _ = tr.compact_sides(text)
+
+        rows, _ = tr.parse_rows(text)
+        last = rows[-1]
+        self.assertEqual("", last.text(0, tr.COLUMNS.index("title")).strip())
+        self.assertEqual("[[ORDER]]", last.text(1, tr.COLUMNS.index("title")).strip())
+
+    def test_compacting_twice_changes_nothing(self):
+        text, _ = tr.prune_created_rows(self.PAGE, {tr.title_key("Maison")})
+        once, _ = tr.compact_sides(text)
+        twice, moved = tr.compact_sides(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(0, moved)
+
+    def test_a_table_without_holes_is_left_alone(self):
+        self.assertEqual((self.PAGE, 0), tr.compact_sides(self.PAGE))
+
+
+class RemoveBlankRowsTest(TestCase):
+    PAGE = """{| class="wikitable"
+|-
+! 名次 !! 曲名
+|-
+| 1 || [[甲]]
+|-
+|  || 
+|-
+| 2 || [[乙]]
+|}"""
+
+    def test_removes_the_row_and_the_separator_above_it(self):
+        text, removed = tr.remove_blank_rows(self.PAGE)
+
+        self.assertEqual(1, removed)
+        self.assertNotIn("|  || ", text)
+        self.assertNotIn("\n|-\n|-\n", text)
+        rows, _ = tr.parse_rows(text)
+        self.assertEqual(2, len(rows))
+
+    def test_a_page_without_blank_rows_is_unchanged(self):
+        text, removed = tr.remove_blank_rows(PRUNE_PAGE)
+        self.assertEqual((PRUNE_PAGE, 0), (text, removed))
+
+
 class PruneEntriesTest(TestCase):
     """整条链路：条目存在 + 贡献列表已创建，两种证据都要用上。"""
 

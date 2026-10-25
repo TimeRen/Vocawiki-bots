@@ -30,6 +30,24 @@
 「标题对上」用 ``title_key()``（全半角、大小写、空白、``{{lj|…}}``、括号消歧后缀
 都归一化）。查不到就留空——宁可少填，也不要把别人的翻译安到另一首歌上。
 
+**删掉「已经有条目」的行**（默认开启，``--no-prune`` 关掉）：页面主人就是这么做
+的——某首歌的条目建好之后，把搜集库里对应那一行删掉（274610 删了 `Maison` /
+`Tokyo Nighthawk` / `Equivalent`）。机器人每轮先做这一步，再填「翻译来源」，
+省得给马上要删的行白查一遍。证据两条，都是站内事实：
+
+* [[Vocawiki:贡献列表/The VOCALOID Collection]] 里那一格标成「已创建」
+  （``{{colorlink|#色|曲名|名次}}`` 而不是 ``[[曲名|名次]]``）；
+* 条目真的存在（跟重定向、排除消歧义页），**并且条目的 ``|P主 =`` 和这一行一致**。
+
+标题按 ``strict_key()`` 比 —— 它和 ``title_key()`` 一样归一化，但**保留**
+``(消歧义后缀)``：``[[EDEN(酔シグレ)|EDEN]]`` 不能因为剥掉括号就对上了
+みつばちぼっち 的 ``EDEN``，``[[言灵(PiroP)|言灵]]`` 也不能对上 kamome sano 的
+``言灵``（2026-10-25 实测这两条都会误删）。条目里没写 P主 时一律不认——
+删错比漏删糟得多。
+
+一行两侧都有歌、只有一侧有条目时，只清那一侧；两侧都有条目才整行删（连它前面的
+``|-`` 一起）。
+
 **补录未录入的曲目**（``--add-missing``）：搜集库只收「外站已经有译文」的歌，所以
 拿活动清单反查——[[Vocawiki:贡献列表/The VOCALOID Collection]] 的赛季表列出每个赛季
 每条赛道 100 格的曲名与名次（``[[曲名|名次]]`` 是还没条目、``{{colorlink|…}}`` 是
@@ -113,6 +131,7 @@ FAILURE_LIMIT = 5                   # 同一个站连错几次就整轮不再查
 MAX_SOURCES = 3
 ARTICLE_BATCH = 50                  # 查条目是否存在时一次问几个标题
 DISAMBIG_CATEGORIES = ("消歧义页", "消歧義頁", "Disambiguation pages")
+ARTICLE_PRODUCER_RE = re.compile(r"\|\s*(?:P主|職人|职人|作者)\s*=\s*([^\n]*)")
 
 # 2026-10-22 页面主人：「这四个都不对，暂时不收录中文歌词wiki」。
 # 歌词wiki 的页面名太容易和同名的老曲撞上（`Linaria`→Mysteka、`死亡フラグ`→コーチP
@@ -216,6 +235,23 @@ def person_key(name: str) -> str:
             break
         text = replaced
     return title_key(text)
+
+
+def strict_key(text: str) -> str:
+    """``title_key`` 的严格版：**不**去掉末尾的 ``(消歧义后缀)``。
+
+    「这首歌有没有条目」必须按完整标题认：``[[EDEN(酔シグレ)|EDEN]]`` 不能因为
+    剥掉括号就对上了 みつばちぼっち 的 ``EDEN``，``[[言灵(PiroP)|言灵]]`` 也一样
+    （``言灵`` 是 kamome sano 的歌）。其余归一化与 ``title_key`` 相同。
+    """
+    text = unicodedata.normalize("NFKC", str(text or ""))
+    text = COMMENT_RE.sub("", text)
+    text = LJ_RE.sub(lambda m: m.group(1), text)
+    text = LINK_RE.sub(lambda m: (m.group(1) or m.group(2) or ""), text)
+    text = TAG_RE.sub("", text)
+    text = re.sub(r"'{2,}", "", text)
+    text = re.sub(r"\s+", "", text)
+    return text.strip("*").lower()
 
 
 def link_target(cell: str) -> str:
@@ -537,6 +573,115 @@ def page_overall_ranks(text: str) -> Dict[str, Set[int]]:
         if found:
             result[name] = found
     return result
+
+
+def is_disambig_category(category: str) -> bool:
+    """``Category:消歧义页`` 这类分类才算消歧义（``消歧义模板链入页面错误`` 不算）。"""
+    name = str(category or "").split(":", 1)[-1].strip()
+    return name in DISAMBIG_CATEGORIES
+
+
+def created_after_redirects(query: dict) -> Set[str]:
+    """API 的 query 结果 → 已经有正式条目的标题（原标题、重定向源都算）。
+
+    缺页不算；消歧义页也不算（``pageprops.disambiguation``，或分类是
+    ``Category:消歧义页``）——页面主人在消歧义，不是建了条目。
+    """
+    chain: Dict[str, str] = {}
+    for key in ("normalized", "redirects"):
+        for item in query.get(key) or []:
+            source, target = item.get("from"), item.get("to")
+            if source and target:
+                chain[source] = target
+    alive: Set[str] = set()
+    for page in (query.get("pages") or {}).values():
+        if "pageid" not in page or page.get("missing") is not None:
+            continue
+        if "disambiguation" in (page.get("pageprops") or {}):
+            continue
+        if any(is_disambig_category(item.get("title") or "")
+               for item in page.get("categories") or []):
+            continue
+        title = page.get("title") or ""
+        if title:
+            alive.add(title)
+
+    def final(title: str) -> str:
+        seen: Set[str] = set()
+        while title in chain and title not in seen:
+            seen.add(title)
+            title = chain[title]
+        return title
+
+    result = set(alive)
+    for title in list(chain):
+        if final(title) in alive:
+            result.add(title)
+    return result
+
+
+def article_keys(site, titles: Sequence[str]) -> Set[str]:
+    """这些标题里哪些已经有正式条目 → ``strict_key`` 集合（一次查 50 个，跟重定向）。"""
+    wanted: List[str] = []
+    for title in titles:
+        text = str(title or "").strip()
+        if text and text not in wanted:
+            wanted.append(text)
+    keys: Set[str] = set()
+    for start in range(0, len(wanted), ARTICLE_BATCH):
+        batch = wanted[start:start + ARTICLE_BATCH]
+        try:
+            data = site.simple_request(
+                action="query", titles="|".join(batch), redirects=1,
+                prop="info|pageprops|categories", ppprop="disambiguation",
+                clshow="!hidden", cllimit=50).submit()
+        except Exception as exc:        # noqa: BLE001 - 查不到就当没条目，不删
+            pywikibot.warning(f"查条目是否存在失败：{exc}")
+            continue
+        for title in created_after_redirects(data.get("query") or {}):
+            key = strict_key(title)
+            if key:
+                keys.add(key)
+    return keys
+
+
+def created_keys_from_contrib(contrib: Dict[str, Dict[str, Dict[int, Tuple[str, bool]]]]
+                              ) -> Set[str]:
+    """[[Vocawiki:贡献列表/The VOCALOID Collection]] 里标成「已创建」的曲名 key。
+
+    同样用 ``strict_key``：清单里的 ``言灵`` / ``EDEN`` 和搜集库里的
+    ``言灵(PiroP)`` / ``EDEN(酔シグレ)`` 是两首不同的歌，不能混。
+    """
+    keys: Set[str] = set()
+    for tracks in (contrib or {}).values():
+        for cells in tracks.values():
+            for title, created in cells.values():
+                key = strict_key(title)
+                if created and key:
+                    keys.add(key)
+    return keys
+
+
+def article_producer(site, title: str) -> str:
+    """条目 Songbox 里的 ``|P主 =`` / ``|職人 =``；读不到就返回空串。"""
+    try:
+        text = Page(site, title).text or ""
+    except Exception as exc:            # noqa: BLE001 - 读不到就不删
+        pywikibot.warning(f"读取条目失败（{title}）：{exc}")
+        return ""
+    match = ARTICLE_PRODUCER_RE.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def article_is_ours(site, title: str, producer: str) -> bool:
+    """条目里写的 P主 和这一行的 P主 是同一个人才算「这首歌的条目」。
+
+    条目没写 P主（列表页、消歧义模板等）就一律不认——删错比漏删糟得多。
+    """
+    found = article_producer(site, title)
+    if not found or not str(producer or "").strip():
+        return False
+    return person_key(found) == person_key(producer)
 
 
 def missing_songs(page_text: str, contrib: Dict[str, Dict[str, Dict[int, Tuple[str, bool]]]],
@@ -1319,12 +1464,19 @@ def collect_sources(fetcher: Fetcher, song: Song, index: Dict[str, str],
     return unique[:MAX_SOURCES]
 
 
-def season_data(site, fetcher: Fetcher, refresh: bool = False) -> Dict:
-    """活动清单（贡献列表 + 12 个大家族模板）缓存 7 天。"""
+def season_data(site, fetcher: Fetcher, refresh: bool = False,
+                with_titles: Optional[bool] = None) -> Dict:
+    """活动清单（贡献列表，必要时再加 12 个大家族模板）缓存 7 天。
+
+    ``with_titles``：要不要读大家族模板（只有补录需要日文原名）。默认看
+    ``USE_ATWIKI``，所以仅仅为了「删掉已有条目的行」时不会白读 12 个模板。
+    """
+    with_titles = USE_ATWIKI if with_titles is None else with_titles
     cache = load_cache(SEASONS_CACHE)
     if (not refresh and cache.get("v") == SEASONS_VERSION and cache.get("data")
             and is_fresh(cache.get("built"), SEASONS_TTL)
-            and (cache["data"].get("titles") or not cache["data"].get("contrib"))):
+            and (not with_titles or cache["data"].get("titles")
+                 or not cache["data"].get("contrib"))):
         return cache["data"]
     data: Dict = {"contrib": {}, "titles": {}}
     try:
@@ -1333,14 +1485,15 @@ def season_data(site, fetcher: Fetcher, refresh: bool = False) -> Dict:
     except Exception as exc:            # noqa: BLE001
         pywikibot.warning(f"读取贡献列表失败：{exc}")
     titles: Dict[str, List[str]] = {}
-    for season in data["contrib"]:
-        template = NAVBOX_TEMPLATE.format(season=season.replace("ボカコレ", ""))
-        try:
-            markup = Page(site, template).text or ""
-        except Exception as exc:        # noqa: BLE001
-            pywikibot.warning(f"读取大家族模板失败（{template}）：{exc}")
-            continue
-        titles[season] = sorted(navbox_titles(markup))
+    if with_titles:
+        for season in data["contrib"]:
+            template = NAVBOX_TEMPLATE.format(season=season.replace("ボカコレ", ""))
+            try:
+                markup = Page(site, template).text or ""
+            except Exception as exc:    # noqa: BLE001
+                pywikibot.warning(f"读取大家族模板失败（{template}）：{exc}")
+                continue
+            titles[season] = sorted(navbox_titles(markup))
     data["titles"] = titles
     if data["contrib"]:
         save_cache({"v": SEASONS_VERSION, "built": time.time(), "data": data},
@@ -1472,23 +1625,64 @@ def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str]
     return text, added
 
 
-def drop_row(text: str, row: Row, side: int) -> str:
-    """删掉一行；另一侧还有内容时只清这一侧，别把别人的半边也删了。"""
+def clear_sides(text: str, line: int, sides: Sequence[int]) -> str:
+    """把某一行的指定侧清空（另一侧的单元格与空白原样保留）。"""
     lines = text.split("\n")
-    others = [other for other in range(row.sides)
-              if other != side and row.text(other, COLUMNS.index("title")).strip()]
-    if others:
-        cells = split_row(lines[row.line])
+    cells = split_row(lines[line])
+    for side in sides:
         for column in range(PER_SIDE):
             index = side * PER_SIDE + column
             if index < len(cells):
                 cells[index].value = ""
-        lines[row.line] = join_row(cells)
-        return "\n".join(lines)
-    del lines[row.line]
-    if row.line > 0 and lines[row.line - 1].strip() == "|-":
-        del lines[row.line - 1]
+    lines[line] = join_row(cells)
     return "\n".join(lines)
+
+
+def remove_row(text: str, line: int) -> str:
+    """整行删掉，连同它前面那行 ``|-``。"""
+    lines = text.split("\n")
+    del lines[line]
+    if line > 0 and lines[line - 1].strip() == "|-":
+        del lines[line - 1]
+    return "\n".join(lines)
+
+
+def prune_created_rows(text: str, keys: Set[str]) -> Tuple[str, List[str]]:
+    """删掉「这首歌已经有条目」的行 → ``(新文本, 删掉的曲名列表)``。
+
+    页面主人的做法就是这样（274610：`Maison` / `Tokyo Nighthawk` / `Equivalent`
+    有条目之后，对应的行整行删掉）。两侧都有歌、只有一侧有条目时，只清那一侧
+    —— 另一侧还没条目，留着继续待补。
+    """
+    if not keys:
+        return text, []
+    seasons = season_of_lines(text)
+    rows, _ = parse_rows(text)
+    notes: List[str] = []
+    for row in sorted(rows, key=lambda item: item.line, reverse=True):
+        titles = {side: row.text(side, COLUMNS.index("title")).strip()
+                  for side in range(row.sides)}
+        titles = {side: value for side, value in titles.items() if value}
+        hit = [side for side, value in titles.items()
+               if strict_key(link_target(value)) in keys]
+        if not hit:
+            continue
+        for side in hit:
+            notes.append(f"{seasons.get(row.line, '')} {link_display(titles[side])}")
+        if len(hit) == len(titles):
+            text = remove_row(text, row.line)
+        else:
+            text = clear_sides(text, row.line, hit)
+    return text, notes
+
+
+def drop_row(text: str, row: Row, side: int) -> str:
+    """删掉一行；另一侧还有内容时只清这一侧，别把别人的半边也删了。"""
+    others = [other for other in range(row.sides)
+              if other != side and row.text(other, COLUMNS.index("title")).strip()]
+    if others:
+        return clear_sides(text, row.line, [side])
+    return remove_row(text, row.line)
 
 
 def drop_wrong_rows(text: str, fetcher: Fetcher) -> Tuple[str, List[str]]:
@@ -1523,20 +1717,69 @@ def drop_wrong_rows(text: str, fetcher: Fetcher) -> Tuple[str, List[str]]:
                 continue
             producer = row.text(side, COLUMNS.index("producer")).strip()
             credits = atwiki_credits(atwiki_body(fetcher, pid))
+            who = link_display(title)
+            why = f"AtWiki p/{pid} 是 {upload} 年的另一首"
             if person_key(producer) and person_key(producer) == person_key(credits):
                 text = drop_row(text, row, side)
-                notes.append(f"{season} {link_display(title)}（AtWiki p/{pid} 是 {upload} 年的另一首，整行删除）")
+                notes.append(f"{season} {who}（{why}，整行删除）")
             else:
                 text = apply_fills(text, {(row.line, side): ""})
-                notes.append(f"{season} {link_display(title)}（AtWiki p/{pid} 是 {upload} 年的另一首，只清来源）")
+                notes.append(f"{season} {who}（{why}，只清来源）")
             break
     return text, notes
+
+
+def prune_entries(site, fetcher: Fetcher, text: str, refresh: bool = False,
+                  lookup=article_keys, ours=article_is_ours) -> Tuple[str, List[str]]:
+    """把「这首歌已经有条目」的行清掉 → ``(新文本, 删掉的曲名)``。
+
+    证据两条，都是站内事实，且都用 ``strict_key``（保留 ``(消歧义后缀)``）：
+
+    1. [[Vocawiki:贡献列表/The VOCALOID Collection]] 里那一格已经标成「已创建」
+       （``{{colorlink|…}}``）——页面主人维护的清单；
+    2. 条目真的存在（跟重定向、排除消歧义页），**并且条目的 P主 和这一行一致**
+       —— 光有同名页面不算：``EDEN`` 是 みつばちぼっち 的，跟 ``EDEN(酔シグレ)``
+       无关；``言灵`` 是 kamome sano 的，跟 ``言灵(PiroP)`` 无关。
+    """
+    rows, _ = parse_rows(text)
+    entries: Dict[str, Tuple[str, str]] = {}      # strict_key -> (标题, P主)
+    for row in rows:
+        for side in range(row.sides):
+            title = row.text(side, COLUMNS.index("title")).strip()
+            if not title:
+                continue
+            target = link_target(title)
+            producer = row.text(side, COLUMNS.index("producer")).strip()
+            key = strict_key(target)
+            if key:
+                entries.setdefault(key, (target, producer))
+    keys: Set[str] = set()
+    try:
+        data = season_data(site, fetcher, refresh, with_titles=False)
+        keys |= created_keys_from_contrib(data.get("contrib") or {})
+    except Exception as exc:            # noqa: BLE001 - 读不到清单就只按条目判断
+        pywikibot.warning(f"读取活动清单失败：{exc}")
+    pending = {key: value for key, value in entries.items() if key not in keys}
+    if pending:
+        try:
+            existing = lookup(site, [target for target, _ in entries.values()])
+        except Exception as exc:        # noqa: BLE001
+            pywikibot.warning(f"查条目是否存在失败：{exc}")
+            existing = set()
+        for key in sorted(existing & set(pending)):
+            target, producer = pending[key]
+            try:
+                if ours(site, target, producer):
+                    keys.add(key)
+            except Exception as exc:    # noqa: BLE001
+                pywikibot.warning(f"核对条目 P主 失败（{target}）：{exc}")
+    return prune_created_rows(text, keys)
 
 
 def run_once(site, write: bool = False, summary: Optional[str] = None,
              ttl: float = CACHE_TTL, limit: int = 0, refresh: bool = False,
              fetcher: Optional[Fetcher] = None, add_missing: bool = False,
-             max_add: int = 10) -> bool:
+             max_add: int = 10, prune: bool = True) -> bool:
     """跑一轮。返回页面是否需要（或已经）改动。"""
     fetcher = fetcher or Fetcher()
     if write:
@@ -1546,10 +1789,21 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
             raise RuntimeError("登录失败：请检查 user-config.py 与 user-password.py")
     page = Page(site, PAGE_TITLE)
     original = page.text or ""
-    songs = songs_from(original)
-    seasons = season_of_lines(original)
 
-    rows, _ = parse_rows(original)
+    # 先删「已经有条目」的行，再填来源：省得给马上要删的行白查一遍（--limit 也不浪费）
+    pruned: List[str] = []
+    text = original
+    if prune:
+        text, pruned = prune_entries(site, fetcher, text, refresh)
+        for note in pruned:
+            pywikibot.output(f"  - 已有条目，删掉：{note}")
+        if pruned:
+            pywikibot.output(f"本轮删掉 {len(pruned)} 个已有条目的条目")
+
+    songs = songs_from(text)
+    seasons = season_of_lines(text)
+
+    rows, _ = parse_rows(text)
     current: Dict[Tuple[int, int], str] = {}
     for row in rows:
         for side in range(row.sides):
@@ -1599,7 +1853,7 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     save_cache(cache)
     pywikibot.output(f"待查 {len(current)} 行、本轮查了 {queried} 首、"
                      f"改动 {len(fills)} 行")
-    text = apply_fills(original, fills)
+    text = apply_fills(text, fills)
     added = 0
     dropped: List[str] = []
     if add_missing:
@@ -1625,6 +1879,9 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         return True
     page.text = text
     note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行"
+    if pruned:
+        extra = f"，删掉 {len(pruned)} 个已有条目的行"
+        note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行{extra}"
     if added:
         note = summary or f"{DEFAULT_SUMMARY}，补 {len(fills)} 行、补录 {added} 首"
     if dropped:
@@ -1656,10 +1913,12 @@ def main() -> None:
                         help="把「外站有翻译、搜集库没录入」的曲目补进对应赛季的表格")
     parser.add_argument("--max-add", type=int, default=10,
                         help="本轮最多补录几首（默认 10，0 = 不限制）")
+    parser.add_argument("--no-prune", action="store_true",
+                        help="不删「已经有条目」的行（默认会删，和页面主人的做法一致）")
     args = parser.parse_args()
     run_once(pywikibot.Site(), args.write, args.summary, args.ttl, args.limit,
              args.refresh, add_missing=args.add_missing,
-             max_add=args.max_add or 10 ** 6)
+             max_add=args.max_add or 10 ** 6, prune=not args.no_prune)
 
 
 if __name__ == "__main__":

@@ -444,6 +444,33 @@ Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `sched
   查过但没找到的按 `--ttl` 过期后再查。GitHub runner 出口到 AtWiki / B 站都慢，
   不设上限时一轮容易跑到超时（实测冷缓存 55 分钟还没跑完），所以那边也限 60 首。
 
+### 删掉「已经有条目」的行（默认开启，`--no-prune` 关掉）
+
+页面主人手工做的是：某首歌条目建好之后，把搜集库里对应那一行删掉（rev 274610 删了
+`Maison` / `Tokyo Nighthawk` / `Equivalent`）。机器人现在每轮**先**做这一步，再填
+「翻译来源」——省得给马上要删的行白查一遍（`--limit` 也不浪费）。
+
+证据两条，都是站内事实：
+
+| 证据 | 说明 |
+| --- | --- |
+| 贡献列表标了「已创建」 | `{{colorlink|#色|曲名|名次}}`（已创建）而不是 `[[曲名|名次]]`（未创建） |
+| 条目存在 **且** P主 一致 | 跟重定向、排除消歧义页，再读条目的 `|P主 =` 与这一行比 |
+
+标题用 `strict_key()` 比：归一化方式与 `title_key()` 相同，但**保留** `(消歧义后缀)`。
+这一条是踩过坑才加的——`[[EDEN(酔シグレ)|EDEN]]` 剥掉括号会撞上 みつばちぼっち 的
+`EDEN`，`[[言灵(PiroP)|言灵]]` 会撞上 kamome sano 的 `言灵`，两条都会被误删
+（2026-10-25 实测）。条目里没写 P主 时一律不认，宁可漏删。
+
+一行两侧都有歌、只有一侧有条目时只清那一侧；两侧都有条目才整行删（连它前面的
+`|-` 一起删）。
+
+```bash
+python bots/vocaloid_collection_translations.py                 # 干跑：只打印会删哪些
+python bots/vocaloid_collection_translations.py --write          # 正常跑（删 + 填来源）
+python bots/vocaloid_collection_translations.py --no-prune       # 只填来源，不删行
+```
+
 ### 补录「外站有翻译、搜集库没录入」的曲目（`--add-missing`，随 AtWiki 一起暂停）
 
 > **现状**：`USE_ATWIKI = False` 时不再补录新行（没有可核实的证据源，宁可不补）。

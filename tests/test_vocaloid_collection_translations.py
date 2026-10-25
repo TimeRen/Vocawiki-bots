@@ -536,17 +536,59 @@ class RunOnceTest(TestCase):
         def logged_in(self):
             return True
 
-    def _run(self, page_text, cache=None, sources=(), fetcher=None):
+    def _run(self, page_text, cache=None, sources=(), fetcher=None, pruned=()):
+        """``pruned``：模拟 prune_entries 的结论（默认不动页面）。"""
         page = self.FakePage(None, None)
         page.text = page_text
+
+        def fake_prune(site, fetcher_, text, refresh=False, lookup=None):
+            return tr.prune_created_rows(text, set(pruned)) if pruned else (text, [])
+
         with patch.object(tr, "Page", return_value=page), \
                 patch.object(tr, "load_cache", return_value=cache or {}), \
                 patch.object(tr, "save_cache"), \
                 patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries", side_effect=fake_prune), \
                 patch.object(tr, "collect_sources", return_value=list(sources)):
             changed = tr.run_once(self.FakeSite(), write=True, refresh=True,
                                   fetcher=fetcher or object(), add_missing=True)
         return changed, page
+
+    def test_rows_of_created_songs_are_removed_before_filling(self):
+        """有条目的行整行删掉，摘要里写清楚删了几个。"""
+        page_text = ("== ボカコレ2022春 ==\n"
+                     "{| class=\"wikitable\"\n"
+                     "|-\n"
+                     "! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注\n"
+                     "|-\n"
+                     "| 46 || [[Maison]] || {{lj|歩く人}} || 未创建 || || \n"
+                     "|-\n"
+                     "| 24 || [[诅咒之吻]] || IZ || 未创建 || || \n"
+                     "|}")
+        changed, page = self._run(page_text, pruned={tr.title_key("Maison")})
+        self.assertTrue(changed)
+        self.assertNotIn("Maison", page.saved[0])
+        self.assertIn("[[诅咒之吻]]", page.saved[0])
+        self.assertIn("删掉 1 个已有条目的行", page.summaries[0])
+
+    def test_no_prune_flag_keeps_created_rows(self):
+        page_text = ("{|\n"
+                     "! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注\n"
+                     "|-\n"
+                     "| 46 || [[Maison]] || P || 未创建 || || \n"
+                     "|}")
+        page = self.FakePage(None, None)
+        page.text = page_text
+        with patch.object(tr, "Page", return_value=page), \
+                patch.object(tr, "load_cache", return_value={}), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries") as prune, \
+                patch.object(tr, "collect_sources", return_value=[]):
+            tr.run_once(self.FakeSite(), write=True, refresh=True,
+                        fetcher=object(), prune=False)
+        prune.assert_not_called()
+        self.assertEqual([], page.saved)
 
     def test_wrong_rows_are_dropped_even_when_atwiki_is_paused(self):
         """AtWiki 停用只停「收录」，配错的旧行还是要删（``USE_ATWIKI`` 不能挡住清理）。"""
@@ -897,6 +939,188 @@ class DropWrongRowsTest(TestCase):
         })
         text, notes = tr.drop_wrong_rows(self.PAGE, fetcher)
         self.assertEqual(self.PAGE, text)
+        self.assertEqual([], notes)
+
+
+PRUNE_PAGE = """== ボカコレ2022春 ==
+{| class="wikitable " style="text-align:center;"
+|-
+! colspan="6"|TOP100 !! colspan="6"|ROOKIE
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 46 || [[Maison]] || {{lj|歩く人}} || {{color|#FF0000|未创建}} || || || {{注|5|总榜为第10}} || [[没有心]] || saikawa || {{color|#FF0000|未创建}} || 
+|-
+| 24 || [[诅咒之吻]] || IZ || {{color|#FF0000|未创建}} || || || {{注|3|总榜为第5}} || [[无题 ep.01]] || {{lj|袖野あらわ}} || {{color|#FF0000|未创建}} || 
+|-
+| 56 || [[Equivalent]] || {{lj|きっと、ずっと、ぼっち。}} || {{color|#FF0000|未创建}} || || || {{注|14|总榜为第27}} || [[ORDER]] || Hal || {{color|#FF0000|未创建}} || 
+|}
+"""
+
+
+class StrictKeyTest(TestCase):
+    """删行必须按完整标题认：括注是消歧义后缀，不是装饰。"""
+
+    def test_keeps_the_parenthetical_suffix(self):
+        self.assertEqual("eden(酔シグレ)", tr.strict_key("[[EDEN(酔シグレ)|EDEN]]"))
+        self.assertEqual("言灵(pirop)", tr.strict_key("[[言灵(PiroP)|言灵]]"))
+        self.assertNotEqual(tr.strict_key("[[EDEN(酔シグレ)|EDEN]]"), tr.strict_key("EDEN"))
+
+    def test_still_normalises_everything_else(self):
+        self.assertEqual("maison", tr.strict_key("[[Maison]]"))
+        self.assertEqual("meromu", tr.strict_key("{{lj|[[ Meromu]]}}<!-- x -->"))
+        self.assertEqual("burial-marker", tr.strict_key("Burial-Marker"))
+
+
+class ArticleProducerTest(TestCase):
+    class FakeSite:
+        pass
+
+    def test_reads_p_main_field(self):
+        with patch.object(tr, "Page") as page_cls:
+            page_cls.return_value.text = "{{VOCALOID Songbox\n|P主 = {{lj|[[いち野]]}}\n}}"
+            self.assertEqual("{{lj|[[いち野]]}}", tr.article_producer(self.FakeSite(), "RITA"))
+
+    def test_missing_field_is_empty(self):
+        with patch.object(tr, "Page") as page_cls:
+            page_cls.return_value.text = "只是一个列表页"
+            self.assertEqual("", tr.article_producer(self.FakeSite(), "Redial"))
+
+    def test_same_producer(self):
+        with patch.object(tr, "article_producer", return_value="{{lj|[[いち野]]}}"):
+            self.assertTrue(tr.article_is_ours(self.FakeSite(), "RITA", "{{lj|いち野}}"))
+        with patch.object(tr, "article_producer", return_value="{{lj|[[みつばちぼっち]]}}"):
+            self.assertFalse(tr.article_is_ours(self.FakeSite(), "EDEN", "{{lj|酔シグレ}}"))
+        with patch.object(tr, "article_producer", return_value=""):
+            self.assertFalse(tr.article_is_ours(self.FakeSite(), "Redial", "鶴三"))
+
+
+class CreatedAfterRedirectsTest(TestCase):
+    """API 结果 → 已经有条目的标题（跟重定向、排除消歧义页）。"""
+
+    def test_plain_existing_page(self):
+        query = {"pages": {"1": {"title": "maison", "pageid": 1}}}
+        self.assertEqual({"maison"}, tr.created_after_redirects(query))
+
+    def test_missing_and_disambiguation_are_not_articles(self):
+        query = {"pages": {
+            "1": {"title": "ORDER", "missing": ""},
+            "-1": {"title": "幽灵"},
+            "2": {"title": "心不在焉", "pageid": 2,
+                  "pageprops": {"disambiguation": ""}},
+            "3": {"title": "涅槃", "pageid": 3,
+                  "categories": [{"title": "Category:消歧义页"}]},
+            "4": {"title": "涅槃(HotaRu)", "pageid": 4,
+                  "categories": [{"title": "Category:消歧义模板链入页面错误"}]},
+        }}
+        self.assertEqual({"涅槃(HotaRu)"}, tr.created_after_redirects(query))
+
+    def test_redirect_chain_maps_back_to_the_query_title(self):
+        query = {
+            "normalized": [{"from": "maison ", "to": "Maison"}],
+            "redirects": [{"from": "Maison", "to": "メゾン"}],
+            "pages": {"7": {"title": "メゾン", "pageid": 7}},
+        }
+        found = tr.created_after_redirects(query)
+        self.assertIn("maison ", found)     # 原标题也算
+        self.assertIn("メゾン", found)
+
+    def test_redirect_to_a_missing_page_is_not_an_article(self):
+        query = {
+            "redirects": [{"from": "東京Nighthawk", "to": "东京Nighthawk"}],
+            "pages": {"-1": {"title": "东京Nighthawk", "missing": ""}},
+        }
+        self.assertEqual(set(), tr.created_after_redirects(query))
+
+
+class CreatedKeysTest(TestCase):
+    def test_contrib_created_flags(self):
+        seasons = tr.parse_contrib_seasons(CONTRIB)
+        keys = tr.created_keys_from_contrib(seasons)
+        self.assertIn(tr.title_key("随之任之"), keys)          # {{colorlink|…}} = 已创建
+        self.assertNotIn(tr.title_key("無題 ep.01"), keys)     # [[曲名|名次]] = 未创建
+
+
+class PruneCreatedRowsTest(TestCase):
+    def test_deletes_the_whole_row_when_both_sides_have_articles(self):
+        keys = {tr.title_key("Maison"), tr.title_key("没有心")}
+        text, notes = tr.prune_created_rows(PRUNE_PAGE, keys)
+        self.assertNotIn("Maison", text)
+        self.assertNotIn("没有心", text)
+        self.assertEqual(2, len(notes))
+
+    def test_clears_only_the_created_side(self):
+        """Only one side has an article: keep the other song in the table."""
+        text, notes = tr.prune_created_rows(PRUNE_PAGE, {tr.title_key("Maison")})
+        self.assertNotIn("Maison", text)
+        self.assertIn("[[没有心]]", text)                      # 另一侧留着
+        self.assertIn("{{注|5|总榜为第10}}", text)
+        self.assertIn("[[诅咒之吻]]", text)
+        self.assertEqual(1, len(notes))
+
+    def test_matches_the_lowercase_article_of_a_capitalised_link(self):
+        """页面写 [[Maison]]，条目是 maison（本 wiki 区分首字母大小写）。"""
+        keys = {tr.title_key("maison")}
+        self.assertEqual(keys, {tr.title_key("Maison")})
+        text, _ = tr.prune_created_rows(PRUNE_PAGE, keys)
+        self.assertNotIn("Maison", text)
+
+    def test_no_keys_changes_nothing(self):
+        self.assertEqual((PRUNE_PAGE, []), tr.prune_created_rows(PRUNE_PAGE, set()))
+
+
+class PruneEntriesTest(TestCase):
+    """整条链路：条目存在 + 贡献列表已创建，两种证据都要用上。"""
+
+    class FakeSite:
+        pass
+
+    def test_uses_article_lookup_and_contrib_flags(self):
+        seasons = tr.parse_contrib_seasons(CONTRIB)
+        lookup_calls = []
+
+        def fake_lookup(site, titles):
+            lookup_calls.append(list(titles))
+            return {tr.strict_key("Maison")}
+
+        with patch.object(tr, "season_data", return_value={"contrib": seasons, "titles": {}}):
+            text, notes = tr.prune_entries(self.FakeSite(), object(), PRUNE_PAGE,
+                                           lookup=fake_lookup,
+                                           ours=lambda site, title, producer: True)
+        self.assertTrue(lookup_calls)
+        self.assertNotIn("Equivalent", text)                    # 贡献列表标了已创建
+        self.assertNotIn("Maison", text)                        # 条目存在 + P主 一致
+        self.assertIn("[[诅咒之吻]]", text)                     # 未创建、无条目 → 留着
+
+    def test_article_with_a_different_producer_is_kept(self):
+        """``EDEN`` 是别人的歌：只同名不算，P主 对不上就不删。"""
+        page = PRUNE_PAGE.replace("[[Equivalent]]", "[[EDEN(酔シグレ)|EDEN]]")
+        with patch.object(tr, "season_data", return_value={"contrib": {}, "titles": {}}):
+            text, notes = tr.prune_entries(
+                self.FakeSite(), object(), page,
+                lookup=lambda site, titles: {tr.strict_key("EDEN")},
+                ours=lambda site, title, producer: False)
+        self.assertIn("EDEN(酔シグレ)", text)
+        self.assertEqual([], notes)
+
+    def test_parenthetical_title_is_not_clipped_to_the_base_name(self):
+        """``[[言灵(PiroP)|言灵]]`` 不能因为清单里有 ``言灵`` 就被删。"""
+        page = PRUNE_PAGE.replace("[[Equivalent]]", "[[言灵(PiroP)|言灵]]")
+        contrib = {"ボカコレ2022春": {"TOP100": {78: ("言灵", True)}}}
+        with patch.object(tr, "season_data", return_value={"contrib": contrib, "titles": {}}):
+            text, notes = tr.prune_entries(self.FakeSite(), object(), page,
+                                           lookup=lambda site, titles: set())
+        self.assertIn("言灵(PiroP)", text)
+        self.assertEqual([], notes)
+
+    def test_lookup_failure_does_not_break_the_run(self):
+        def boom(site, titles):
+            raise RuntimeError("api down")
+
+        with patch.object(tr, "season_data", return_value={"contrib": {}, "titles": {}}):
+            text, notes = tr.prune_entries(self.FakeSite(), object(), PRUNE_PAGE,
+                                           lookup=boom)
+        self.assertEqual(PRUNE_PAGE, text)
         self.assertEqual([], notes)
 
 

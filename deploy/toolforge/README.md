@@ -183,6 +183,28 @@ toolforge jobs delete hourly
 
 `jobs.yaml` 里配了 `emails: onfailure`，所以任务失败时会给你发邮件。
 
+### 页面不动、任务看着又在跑
+
+先跑一次体检，把任务状态、最近日志、代码版本、缓存年龄一起打出来：
+
+```bash
+cd ~/Vocawiki-bots
+./deploy/toolforge/diagnose.sh            # 全部
+./deploy/toolforge/diagnose.sh hourly     # 只看某个任务的定义与日志
+```
+
+页面「三天没动」有两种完全不同的原因，wiki 上都只表现为页面没变：
+
+* **任务没跑/报错**：`toolforge jobs list` 里状态是 `Failed`，或者根本没这个任务
+  （Toolforge 故障后需要 `toolforge jobs load deploy/toolforge/jobs.yaml` 重新载入）。
+* **任务在跑但轮不到保存**：一轮维护要挨个问萌百百科，一问几十秒、失败还会重试；
+  这类慢查询排在页面保存之前时，整轮会耗在这上面，改动永远等不到写回
+  （2026-10-22 起 `hourly` 连续三天没动页面就是这个原因）。现在已经把**保存提到报告
+  之前**，并且缓存每两分钟落一次盘（`flush_caches`），慢也不会再把改动丢掉。
+
+`diagnose.sh` 最后会打印一条 `toolforge jobs run ... --dry-run` 的命令：在 job 容器里
+干跑一次，日志里若是「页面无需更新」就是真没东西可改，若是卡住或 traceback 才是故障。
+
 查询「创建者」的规则：条目的创建者是页面**最旧一版**的作者。例外是跨站导入的
 页面——voca 从萌娘百科导入时，那一版连作者和时间都抄的是**源站最后一版**的
 （用户名写作 `zhmoe>某人`），照它算就会把源站最后一位编辑者当成创建者

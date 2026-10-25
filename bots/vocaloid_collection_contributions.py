@@ -167,6 +167,9 @@ MOEGIRL_OFFICIAL_ATTEMPTS = 4  # 它常常握手超时，重试几次基本就�
 MOEGIRL_OFFICIAL_LOGIN_TRIES = 5  # 登录失败不锁死整轮：后面用到时再试几次
 MOEGIRL_OFFICIAL_DELAY = 0.5
 MOEGIRL_CACHE_TTL = 7 * 24 * 3600  # 「萌娘没有这条」过一阵要重新确认
+# 缓存多久落一次盘：萌百那边一问就是几十秒，一轮马拉松下来进程被下一次定时任务
+# 挤掉的话，查到的全白费、下一轮又从零开始，于是永远跑不完（见 flush_caches）。
+CACHE_FLUSH_INTERVAL = 120
 MOEGIRL_SOURCE_MIRROR = "icu"  # 缓存里的答案是谁给的：镜像站
 MOEGIRL_SOURCE_OFFICIAL = "zh"  # 官方站（这时「没有」才算定论）
 MOEGIRL_SOURCE_FALLBACK = "table"  # 下面那张核对表
@@ -758,6 +761,30 @@ def save_cache(path: Path, cache: Dict) -> None:
         pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+# 本轮在用的缓存 ``(路径, 内存里的字典)``，由 ``run_once`` 登记。
+_CACHE_REGISTRY: List[Tuple[Path, Dict]] = []
+_LAST_FLUSH = 0.0
+
+
+def flush_caches(force: bool = False, interval: float = CACHE_FLUSH_INTERVAL) -> None:
+    """把缓存写回磁盘（默认最多每 ``interval`` 秒一次）。
+
+    整轮维护慢在萌百百科的查询上，一轮能跑上几十分钟。以前缓存只在最后写一次，
+    于是进程被下一次定时任务挤掉、或者机器把人踢掉时，这一轮问到的全丢，下一轮
+    又从头问一遍——同样慢，再次被挤掉，页面永远等不到保存。现在查到就顺手落盘。
+    """
+    global _LAST_FLUSH
+    now = time.time()
+    if not force and now - _LAST_FLUSH < interval:
+        return
+    _LAST_FLUSH = now
+    for path, cache in _CACHE_REGISTRY:
+        try:
+            save_cache(path, cache)
+        except Exception as exc:  # noqa: BLE001
+            pywikibot.warning(f"缓存写盘失败（{path.name}）：{exc}")
+
+
 def batch_creators(site, titles: Iterable[str], cache: Dict,
                    resolved: Optional[Dict[str, str]] = None) -> None:
     """Fill ``cache`` for many titles using oldest-revision queries.
@@ -802,6 +829,7 @@ def creator_of(site, title: str, cache: Dict) -> Optional[str]:
         cache[title] = (user, import_source(user),
                         revisions[0].get("timestamp"),
                         revisions[0].get("comment") or "")
+        flush_caches()
     return user
 
 
@@ -849,6 +877,7 @@ def is_derivative(site, title: str, cache: Dict) -> bool:
         return False  # 读不到就当原创，别把整条曲目从统计里抹掉
     verdict = any(marker in text for marker in DERIVATIVE_TEXT_MARKERS)
     cache[title] = (verdict, time.time())
+    flush_caches()
     return verdict
 
 
@@ -1898,10 +1927,12 @@ def moegirl_imported_creator(title: str, editor: Optional[str], stamp,
     page = moegirl_official_page(title)
     if page is None:
         # 官方站整个问不到（没凭据、被 IP 拦、网络断）：只信核对表
+        flush_caches()
         return moegirl_fallback_creator(title, cache)
     if page.title:
         cache[title] = (page.title, page.creator, time.time(),
                         MOEGIRL_SOURCE_OFFICIAL)
+        flush_caches()
         return page.creator
     asked, source = moegirl_source_title(editor, stamp) if editor else (True, None)
     if asked and source and source != title:
@@ -1911,9 +1942,11 @@ def moegirl_imported_creator(title: str, editor: Optional[str], stamp,
                              f"（导入版记的是 {editor} 的 {stamp}）")
             cache[title] = (found.title, found.creator, time.time(),
                             MOEGIRL_SOURCE_OFFICIAL)
+            flush_caches()
             return found.creator
     fallback = moegirl_fallback_creator(title, cache)
     if fallback is not None:
+        flush_caches()
         return fallback
     if not asked:
         return None  # 没问到，不下结论、也不写缓存
@@ -2033,6 +2066,7 @@ def moegirl_lookup(titles: Iterable[str], cache: Dict) -> Dict[str, MoePage]:
             continue  # 页面在却拿不到作者：多半是这次请求失败，不写缓存
         result[title] = MoePage(moe_title, user, True)
         cache[title] = (moe_title, user, time.time(), MOEGIRL_SOURCE_MIRROR)
+        flush_caches()
     return result
 
 
@@ -2457,6 +2491,9 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     cache = load_cache(CREATOR_CACHE)
     moe_cache = load_cache(MOEGIRL_CACHE)
     derivative_cache = load_cache(DERIVATIVE_CACHE)
+    # 登记给 flush_caches()：慢查询途中也要落盘，别把这一轮问到的全丢在内存里。
+    _CACHE_REGISTRY[:] = [(MOEGIRL_CACHE, moe_cache), (CREATOR_CACHE, cache),
+                          (DERIVATIVE_CACHE, derivative_cache)]
 
     def derivative_of(title: str) -> bool:
         """这一页是不是二创（标题看不出来时读页面正文，结果进缓存）。"""
@@ -2592,6 +2629,23 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     if "recredit" in actions:
         text = recredit(site, text, sections, legend, cache, moe_cache,
                         participants_of, songs_of, excluded_of, from_rev, kinds)
+    # 先保存页面、再出报告。萌百百科那边一问几十秒还要重试，报告排在保存前面时
+    # 整轮常在这儿耗掉，页面就永远等不到保存（2026-10-22 起连续三天没动就是这样）。
+    result = False
+    if actions <= {"report", "moe"}:
+        pass  # 只出报告的动作不改页面
+    elif text == original:
+        pywikibot.output("页面无需更新。")
+    elif not write:
+        import difflib
+        diff = difflib.unified_diff(original.splitlines(), text.splitlines(),
+                                    "old", "new", lineterm="")
+        pywikibot.output("\n".join(list(diff)[:200]))
+        pywikibot.output("\n[dry-run] 加 --write 以保存。")
+        result = True
+    else:
+        result = save_page(page, text, summary)
+
     if "report" in actions:
         report = build_report(site, sections, legend, cache, exists, plan)
         pywikibot.output("异常报告:\n" + (report or "  （无）"))
@@ -2600,23 +2654,8 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
                                 songs_of, moe_cache)
         pywikibot.output("萌娘百科交叉比对:\n" + (report or "  （无）"))
 
-    save_cache(MOEGIRL_CACHE, moe_cache)
-    save_cache(CREATOR_CACHE, cache)
-    save_cache(DERIVATIVE_CACHE, derivative_cache)
-
-    if actions <= {"report", "moe"}:
-        return False
-    if text == original:
-        pywikibot.output("页面无需更新。")
-        return False
-    if not write:
-        import difflib
-        diff = difflib.unified_diff(original.splitlines(), text.splitlines(),
-                                    "old", "new", lineterm="")
-        pywikibot.output("\n".join(list(diff)[:200]))
-        pywikibot.output("\n[dry-run] 加 --write 以保存。")
-        return True
-    return save_page(page, text, summary)
+    flush_caches(force=True)
+    return result
 
 
 def main() -> None:

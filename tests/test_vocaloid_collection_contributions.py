@@ -1343,3 +1343,77 @@ class TestMoegirlAction(TestCase):
 
         run_once.assert_called_once_with(
             site_factory.return_value, {"moe"}, "listed", False, None, None, None)
+
+
+class FakePage:
+    """只记住保存了什么的页面。"""
+
+    def __init__(self, text):
+        self.text = text
+        self.saved = None
+
+    def save(self, summary=None, **kwargs):
+        self.saved = self.text
+
+
+class TestRunOnceOrder(TestCase):
+    """页面要赶在慢查询/报告之前保存。
+
+    2026-10-22 起页面连续三天不动：报告排在保存前面，萌百那边一问几十秒又重试，
+    整轮耗在报告上，改动永远等不到保存。报告失败也不能把这一轮改动丢掉。
+    """
+
+    def _run(self, page, report):
+        with patch.object(contributions, "Page", return_value=page), \
+                patch.object(contributions, "ensure_login"), \
+                patch.object(contributions, "parse_sections",
+                             return_value=[Mock(season="2024春")]), \
+                patch.object(contributions, "Legend"), \
+                patch.object(contributions, "compute_created",
+                             return_value={}), \
+                patch.object(contributions, "recompute_counts",
+                             return_value=("new text", 1)), \
+                patch.object(contributions, "build_report", side_effect=report):
+            return contributions.run_once(FakeSite(), {"counts", "report"},
+                                          write=True)
+
+    def test_page_is_saved_even_when_the_report_blows_up(self):
+        page = FakePage("old text")
+
+        def boom(*args, **kwargs):
+            self.assertEqual("new text", page.saved, "报告跑之前页面就该保存了")
+            raise RuntimeError("萌百超时")
+
+        with self.assertRaises(RuntimeError):
+            self._run(page, boom)
+
+        self.assertEqual("new text", page.saved)
+
+    def test_a_finished_round_still_reports_changed(self):
+        page = FakePage("old text")
+
+        self.assertTrue(self._run(page, lambda *a, **k: ""))
+        self.assertEqual("new text", page.saved)
+
+
+class TestCacheFlush(TestCase):
+    def test_caches_are_written_while_the_round_is_still_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.pickle"
+            cache = {"某曲": (None, None, time.time(), "icu")}
+            with patch.object(contributions, "_CACHE_REGISTRY",
+                              [(path, cache)]), \
+                    patch.object(contributions, "_LAST_FLUSH", 0.0):
+                contributions.flush_caches()
+
+            self.assertEqual(cache, contributions.load_cache(path))
+
+    def test_flush_is_rate_limited(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.pickle"
+            with patch.object(contributions, "_CACHE_REGISTRY",
+                              [(path, {"a": 1})]), \
+                    patch.object(contributions, "_LAST_FLUSH", time.time()):
+                contributions.flush_caches()
+
+            self.assertFalse(path.exists())

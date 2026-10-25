@@ -111,6 +111,8 @@ CACHE_VERSION = 5                   # 判定规则变了就 +1，旧缓存自动
 REQUEST_TIMEOUT = 25
 FAILURE_LIMIT = 5                   # 同一个站连错几次就整轮不再查
 MAX_SOURCES = 3
+ARTICLE_BATCH = 50                  # 查条目是否存在时一次问几个标题
+DISAMBIG_CATEGORIES = ("消歧义页", "消歧義頁", "Disambiguation pages")
 
 # 2026-10-22 页面主人：「这四个都不对，暂时不收录中文歌词wiki」。
 # 歌词wiki 的页面名太容易和同名的老曲撞上（`Linaria`→Mysteka、`死亡フラグ`→コーチP

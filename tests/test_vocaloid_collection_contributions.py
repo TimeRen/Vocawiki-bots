@@ -1026,6 +1026,54 @@ class TestMoegirlCrossCheck(TestCase):
         self.assertIn(f"某人（{colour}）：+1", report)
 
 
+class TestMoegirlBudget(TestCase):
+    """官方站慢到跑不完时，这一轮必须放弃它——否则维护永远走不到保存页面那一步。"""
+
+    def _ready_session(self, opener):
+        session = contributions.MoegirlSession(("人间百态@vclc", "secret"))
+        with patch.object(contributions.urllib.request, "build_opener",
+                          return_value=opener), \
+                patch.object(contributions.time, "sleep"):
+            self.assertTrue(session.ready())
+        return session
+
+    def test_the_session_stops_once_the_round_budget_is_spent(self):
+        opener = FakeOpener([
+            {"query": {"tokens": {"logintoken": "tok"}}},
+            {"login": {"result": "Success"}},
+            {"query": {"userinfo": {"name": "人间百态"}}},
+        ])
+        session = self._ready_session(opener)
+        session._deadline = time.time() - 1  # 预算已经用完
+
+        session._opener = None  # 模拟「登录还没落地、要用时才去登」
+        self.assertFalse(session.ready())
+        self.assertIsNone(session.api({"action": "query"}))
+
+    def test_repeated_failures_stop_hammering_the_official_site(self):
+        opener = FakeOpener([
+            {"query": {"tokens": {"logintoken": "tok"}}},
+            {"login": {"result": "Success"}},
+            {"query": {"userinfo": {"name": "人间百态"}}},
+        ])
+        session = self._ready_session(opener)
+
+        def boom(*args, **kwargs):
+            raise TimeoutError("timed out")
+
+        with patch.object(contributions.time, "sleep"), \
+                patch.object(session, "_opener") as mock_opener:
+            mock_opener.open.side_effect = boom
+            for _ in range(contributions.MOEGIRL_OFFICIAL_GIVE_UP):
+                self.assertIsNone(session.api({"action": "query"}))
+            calls = mock_opener.open.call_count
+
+            self.assertFalse(session.ready(), "连着失败之后这一轮就别再问了")
+            self.assertIsNone(session.api({"action": "query"}))
+
+        self.assertEqual(calls, mock_opener.open.call_count)
+
+
 class TestMoegirlOfficial(TestCase):
     """镜像站看不见萌百「待审核」的条目——那些要去官方站（得先登录）才查得到。"""
 

@@ -166,6 +166,11 @@ MOEGIRL_OFFICIAL_TIMEOUT = 20  # 官方站时不时要十几秒才回，但也�
 MOEGIRL_OFFICIAL_ATTEMPTS = 4  # 它常常握手超时，重试几次基本就能过
 MOEGIRL_OFFICIAL_LOGIN_TRIES = 5  # 登录失败不锁死整轮：后面用到时再试几次
 MOEGIRL_OFFICIAL_DELAY = 0.5
+# 一轮里最多花这么多秒问官方站。它握手超时的时候一次查询要 4 次尝试 × 20 秒，
+# 几百条下来能问到下一次定时任务开始——那一轮就永远走不到保存页面那一步
+# （2026-10-22 起 hourly 三天没动页面就是这么来的）。超了改查镜像与核对表。
+MOEGIRL_OFFICIAL_BUDGET = 900
+MOEGIRL_OFFICIAL_GIVE_UP = 3  # 连着失败这么多次，这一轮就别再敲它了
 MOEGIRL_CACHE_TTL = 7 * 24 * 3600  # 「萌娘没有这条」过一阵要重新确认
 # 缓存多久落一次盘：萌百那边一问就是几十秒，一轮马拉松下来进程被下一次定时任务
 # 挤掉的话，查到的全白费、下一轮又从零开始，于是永远跑不完（见 flush_caches）。
@@ -1651,17 +1656,31 @@ class MoegirlSession:
         self._credentials = credentials
         self._opener: Optional[urllib.request.OpenerDirector] = None
         self._tries = 0
+        self._deadline: Optional[float] = None
+        self._fails = 0
+
+    def _give_up(self, why: str) -> None:
+        """这一轮不再问官方站（查镜像站、核对表就够了）。"""
+        pywikibot.warning(f"萌百官方站：{why}，剩下的只查镜像")
+        self._tries = MOEGIRL_OFFICIAL_LOGIN_TRIES
+        self._opener = None
 
     def ready(self) -> bool:
         """能不能用（第一次调用时才登录）。
 
         官方站常常握手超时，可能只是这一会儿运气不好，所以登录失败不当成永久结论：
         后面再用到时还会试，但整个进程最多试 ``MOEGIRL_OFFICIAL_LOGIN_TRIES`` 次，
-        免得每查一条都去折腾一次登录。
+        免得每查一条都去折腾一次登录。整轮也给它 ``MOEGIRL_OFFICIAL_BUDGET`` 秒的
+        上限——慢到跑不完的维护，比查得少还糟（页面根本轮不到保存）。
         """
         if self._opener is not None:
             return True
         if self._tries >= MOEGIRL_OFFICIAL_LOGIN_TRIES:
+            return False
+        if self._deadline is None:
+            self._deadline = time.time() + MOEGIRL_OFFICIAL_BUDGET
+        elif time.time() > self._deadline:
+            self._give_up(f"这一轮已经问了 {MOEGIRL_OFFICIAL_BUDGET} 秒")
             return False
         self._tries += 1
         self._opener = self._login()
@@ -1697,9 +1716,13 @@ class MoegirlSession:
             except Exception as exc:  # noqa: BLE001
                 if attempt == attempts - 1:
                     pywikibot.warning(f"萌百官方站查询失败: {exc}")
+                    self._fails += 1
+                    if self._fails >= MOEGIRL_OFFICIAL_GIVE_UP:
+                        self._give_up(f"连着 {self._fails} 次问不到")
                     return None
                 time.sleep(1 + attempt)
                 continue
+            self._fails = 0
             if "error" in data:
                 error = data["error"]
                 pywikibot.warning(f"萌百官方站拒绝请求: {error.get('code')} "

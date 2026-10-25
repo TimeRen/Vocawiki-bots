@@ -89,8 +89,9 @@
 ——这是有意的：宁可少更新，也不能覆盖别人的来源。``--refresh`` 只跳过「缓存还有效
 就不再查」，不会丢缓存。
 
-结果（含「查过、没有」）缓存在 ``data/vocaloid_collection_translations.pickle``，
-默认 14 天后重新核对；AtWiki 页面清单缓存 7 天。
+结果（含「查过、没有」）缓存在 ``data/vocaloid_collection_translations.pickle``：
+查到来源的 14 天后重新核对，**没查到的 3 天后再试**（``--miss-ttl``）——「查不到」占
+绝大多数，一律按 14 天算的话页面会连着几周都不动。AtWiki 页面清单缓存 7 天。
 
 Everything is a dry run unless ``--write`` is given.
 """
@@ -123,7 +124,8 @@ DATA_DIR = Path("data")
 CACHE = DATA_DIR / "vocaloid_collection_translations.pickle"
 ATWIKI_CACHE = DATA_DIR / "vocaloid_collection_translations_atwiki.pickle"
 
-CACHE_TTL = 14 * 24 * 3600          # 一首歌多久重新核对一次
+CACHE_TTL = 14 * 24 * 3600          # 查到来源的歌：多久重新核对一次
+MISS_TTL = 3 * 24 * 3600            # 没查到来源的歌：3 天后再试（否则页面几周没动静）
 ATWIKI_TTL = 7 * 24 * 3600          # AtWiki 页面清单多久重建一次
 CACHE_VERSION = 5                   # 判定规则变了就 +1，旧缓存自动作废
 REQUEST_TIMEOUT = 25
@@ -981,10 +983,19 @@ def is_fresh(stamp: object, ttl: float) -> bool:
     return 0 <= age < ttl
 
 
-def is_current(entry: Optional[Dict], ttl: float) -> bool:
-    """这条缓存还能直接用（同版本、没过期）。规则一改就靠版本号整体作废。"""
-    return (isinstance(entry, dict) and entry.get("v") == CACHE_VERSION
-            and is_fresh(entry.get("at"), ttl))
+def is_current(entry: Optional[Dict], ttl: float, miss_ttl: float = 0) -> bool:
+    """这条缓存还能直接用（同版本、没过期）。规则一改就靠版本号整体作废。
+
+    ``miss_ttl``：没查到来源的结论用更短的有效期。查不到的歌占绝大多数（134/161），
+    一律 14 天不复核的话，页面会连着几周一点都不变——那不是「没东西可填」，
+    只是没再去问。
+    """
+    if not isinstance(entry, dict) or entry.get("v") != CACHE_VERSION:
+        return False
+    limit = ttl
+    if miss_ttl and not entry.get("sources"):
+        limit = min(ttl, miss_ttl) if ttl else miss_ttl
+    return is_fresh(entry.get("at"), limit)
 
 
 # ---------------------------------------------------------------- AtWiki
@@ -1136,23 +1147,57 @@ def netease_credits(candidate: dict) -> set:
     return credits
 
 
+def netease_queries(song: Song) -> List[str]:
+    """去网易云搜什么。先用歌名，再用「P主 歌名」。
+
+    只搜歌名会漏：同名曲太热门时，正确的那首排在十几位之后（``hubble`` /
+    ``walker`` / ``次世代`` 就是这样漏的）。带上 P主 之后，前几条基本就是他本人的
+    投稿。两个词都试，代价只是多几次请求。
+    """
+    wanted: List[str] = []
+    for word in (song.title_target, song.title_display):
+        word = str(word or "").strip()
+        if word and word not in wanted:
+            wanted.append(word)
+    producer = str(song.producer or "")
+    for _ in range(3):                  # {{lj|歩く人}} → 歩く人
+        replaced = re.sub(r"\{\{[^{}]*\|([^{}]*)\}\}", lambda m: m.group(1), producer)
+        if replaced == producer:
+            break
+        producer = replaced
+    producer = re.sub(r"\{\{|\}\}", "", producer).strip()
+    if producer:
+        for word in (song.title_target, song.title_display):
+            word = str(word or "").strip()
+            joined = f"{producer} {word}".strip()
+            if word and joined not in wanted:
+                wanted.append(joined)
+    return wanted
+
+
 def lookup_netease(fetcher: Fetcher, song: Song) -> List[str]:
     """歌名对上**且** P主 出现在歌手 / 专辑里才记。
 
     只有歌名对上是不够的：``月之花`` 能搜到 Daoko 的 ``月の花``，``言灵`` 能搜到
     V.W.P 的 ``言霊``，都是同名不同曲。网易云上 Vocaloid 曲一般由 P主 自己上传，
     所以「歌手或专辑里有 P主」是个便宜又准的判据；查不到 P主 就干脆不记。
+
+    同一首歌的 remix / cover 不算（``Silver Lining`` 对上了 ``Silver Lining
+    (Yandere VIP Remix)``）：歌词可能被改过，宁可不记。
     """
     wanted = {title_key(song.title_target), title_key(song.title_display)}
     wanted.discard("")
     producer = person_key(song.producer)
     if not producer:
         return []
-    for keyword in (song.title_target, song.title_display):
+    own_variant = is_variant_title(song.title_target) or is_variant_title(song.title_display)
+    for keyword in netease_queries(song):
         for candidate in netease_search(fetcher, keyword):
             if not (netease_titles(candidate) & wanted):
                 continue
             if producer not in netease_credits(candidate):
+                continue
+            if not own_variant and is_variant_title(str(candidate.get("name") or "")):
                 continue
             payload = netease_lyrics(fetcher, str(candidate.get("id")))
             if not payload or not (payload.get("tlyric") or {}).get("lyric"):
@@ -1337,13 +1382,18 @@ def lookup_bilibili(fetcher: Fetcher, song: Song, bb_id: str = ""
     candidates: List[str] = []
     if bb_id:
         candidates.append(bb_id)                # 本家投稿：不用核对标题
-    for keyword in (f"{song.title_display} 翻译", f"{song.title_target} 翻译"):
-        if not keyword.strip():
+    # 「翻译」是最常见的写法；没结果时再试「中字」「字幕」——不少译文视频标题只写这两个
+    for word in (song.title_display, song.title_target):
+        if not str(word or "").strip():
             continue
-        for hit in bilibili_search(fetcher, keyword)[:4]:
-            bvid = str(hit.get("bvid") or "")
-            if bvid and bvid not in candidates:
-                candidates.append(bvid)
+        for suffix in ("翻译", "中字", "字幕"):
+            keyword = f"{word} {suffix}"
+            for hit in bilibili_search(fetcher, keyword)[:4]:
+                bvid = str(hit.get("bvid") or "")
+                if bvid and bvid not in candidates:
+                    candidates.append(bvid)
+            if len(candidates) >= 4 or sources:
+                break
         if len(candidates) >= 4 or sources:
             break
     for bvid in candidates[:3]:
@@ -1779,7 +1829,8 @@ def prune_entries(site, fetcher: Fetcher, text: str, refresh: bool = False,
 def run_once(site, write: bool = False, summary: Optional[str] = None,
              ttl: float = CACHE_TTL, limit: int = 0, refresh: bool = False,
              fetcher: Optional[Fetcher] = None, add_missing: bool = False,
-             max_add: int = 10, prune: bool = True) -> bool:
+             max_add: int = 10, prune: bool = True,
+             miss_ttl: float = MISS_TTL) -> bool:
     """跑一轮。返回页面是否需要（或已经）改动。"""
     fetcher = fetcher or Fetcher()
     if write:
@@ -1824,7 +1875,7 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         existing = current.get(cell, "")
         if cell_state(existing, cached) == "skip":
             continue                    # 别人写的内容：一个字都不动
-        if is_current(cached, ttl) and not refresh:
+        if is_current(cached, ttl, miss_ttl) and not refresh:
             # 缓存里有结论，但页面可能还没跟上（上次保存失败 / 另一台机器写的）：
             # 只在结论更全时补写，避免两边来回覆盖。
             value = join_sources(cached.get("sources") or [])
@@ -1904,7 +1955,9 @@ def main() -> None:
     parser.add_argument("--write", action="store_true", help="保存页面（默认只干跑）")
     parser.add_argument("--summary", default=None, help="编辑摘要")
     parser.add_argument("--ttl", type=float, default=CACHE_TTL,
-                        help="一首歌多久重新核对一次（秒，默认 14 天）")
+                        help="查到来源的歌多久重新核对一次（秒，默认 14 天）")
+    parser.add_argument("--miss-ttl", type=float, default=MISS_TTL,
+                        help="没查到来源的歌多久再试一次（秒，默认 3 天）")
     parser.add_argument("--limit", type=int, default=0,
                         help="本轮最多查多少首（0 = 不限制）")
     parser.add_argument("--refresh", action="store_true",
@@ -1918,7 +1971,8 @@ def main() -> None:
     args = parser.parse_args()
     run_once(pywikibot.Site(), args.write, args.summary, args.ttl, args.limit,
              args.refresh, add_missing=args.add_missing,
-             max_add=args.max_add or 10 ** 6, prune=not args.no_prune)
+             max_add=args.max_add or 10 ** 6, prune=not args.no_prune,
+             miss_ttl=args.miss_ttl)
 
 
 if __name__ == "__main__":

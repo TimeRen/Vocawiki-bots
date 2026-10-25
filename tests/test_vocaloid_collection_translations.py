@@ -2,6 +2,7 @@
 """bots/vocaloid_collection_translations.py 的测试（不联网）。"""
 import time
 import urllib.error
+import urllib.parse
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -194,6 +195,48 @@ class CreditNameTest(TestCase):
         """「用谷歌翻译成英文后根据英文翻译而来」不是署名（真实案例：Ensemble）。"""
         text = "没学过法语，词句是用谷歌翻译成英文后根据英文翻译而来，如有理解偏差是我个人的问题。"
         self.assertEqual("", credit_name(text))
+
+
+class MissTtlTest(TestCase):
+    """查不到来源的歌用更短的有效期，否则页面会几周没动静。"""
+
+    def test_miss_expires_sooner_than_a_hit(self):
+        now = time.time()
+        miss = {"at": now - 4 * 24 * 3600, "v": tr.CACHE_VERSION, "sources": []}
+        hit = {"at": now - 4 * 24 * 3600, "v": tr.CACHE_VERSION, "sources": ["[u 甲]"]}
+        self.assertFalse(tr.is_current(miss, tr.CACHE_TTL, tr.MISS_TTL))
+        self.assertTrue(tr.is_current(hit, tr.CACHE_TTL, tr.MISS_TTL))
+        self.assertTrue(tr.is_current(miss, tr.CACHE_TTL))       # 不传 miss_ttl 就按老规矩
+
+    def test_defaults(self):
+        self.assertLess(tr.MISS_TTL, tr.CACHE_TTL)
+
+
+class NeteaseQueryTest(TestCase):
+    """搜歌名不够时，再用「P主 歌名」搜一遍（hubble / walker / 次世代 就是这样找到的）。"""
+
+    def test_queries_include_the_producer(self):
+        song = Song(0, 0, "11", "hubble", "hubble", "{{lj|歩く人}}")
+        queries = tr.netease_queries(song)
+        self.assertEqual("hubble", queries[0])
+        self.assertIn("歩く人 hubble", queries)
+        self.assertEqual(1, sum(1 for q in queries if q == "hubble"), "重复的别加两次")
+
+    def test_no_producer_no_extra_query(self):
+        song = Song(0, 0, "11", "hubble", "hubble", "")
+        self.assertEqual(["hubble"], tr.netease_queries(song))
+
+    def test_variant_result_is_rejected(self):
+        """``Silver Lining`` 对上了 ``Silver Lining (Yandere VIP Remix)``：不记。"""
+        song = Song(0, 0, "11", "Silver Lining", "Silver Lining", "picco")
+        fetcher = LookupTest.FakeFetcher(payloads={
+            tr.NETEASE_SEARCH.format(kw=urllib.parse.quote("Silver Lining")):
+                {"result": {"songs": [{"id": 2, "name": "Silver Lining (Yandere VIP Remix)",
+                                       "alias": [], "transNames": [],
+                                       "artists": [{"name": "picco"}]}]}},
+            tr.NETEASE_LYRIC.format(id="2"): {"tlyric": {"lyric": "[00:01]银线"}},
+        })
+        self.assertEqual([], tr.lookup_netease(fetcher, song))
 
 
 class CellStateTest(TestCase):

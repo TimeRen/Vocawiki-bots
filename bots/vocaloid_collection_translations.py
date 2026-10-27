@@ -112,6 +112,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -388,9 +389,22 @@ def parse_rows(text: str) -> Tuple[List[Row], Dict[int, int]]:
             if per_side != PER_SIDE:            # 表结构变了：至少把多出来的列补上
                 while len(cells) < sides * per_side:
                     cells.append(Cell(" ", "", ""))
-            rows.append(Row(index, cells, sides))
+            rows.append(Row(index, cells, row_sides(cells, sides)))
             sides_of[index] = per_side
     return rows, sides_of
+
+
+def row_sides(cells: Sequence[Cell], declared: int) -> int:
+    """这一行有几侧：表头说的和**实际单元格数**取大的那个。
+
+    光看表头不行：某张表若漏了 ``! colspan=`` 那一行，表头会算出「1 侧 12 列」，
+    于是按 1 侧读，右半边整片看不见——那一节的歌就永远轮不到查询
+    （2026-10-28 反馈：2022秋 一行都没补过）。单元格数是硬事实：12 格就是 2 侧。
+    表头说 2 侧而这一行只写了 6 格（右侧整半格省略）时仍按表头的 2 侧算。
+    """
+    if not cells or len(cells) % PER_SIDE:
+        return declared
+    return max(declared, min(len(cells) // PER_SIDE, 4))
 
 
 def songs_from(text: str) -> List[Song]:
@@ -1938,12 +1952,53 @@ def prune_entries(site, fetcher: Fetcher, text: str, refresh: bool = False,
     return prune_created_rows(text, keys)
 
 
+def query_order(songs: Sequence[Song], cache: Dict) -> List[Song]:
+    """按「上次核对的时间」排：从没查过的排最前，其次是最久没查的。
+
+    ``--limit`` 是按顺序截断的，一直按页面顺序截，就永远只查最上面那几个赛季
+    （2026-10-28：搜集库最后一节 2022秋 一行都没查过，前面几节却查了好几遍）。
+    改按核对时间轮转之后，整页都会轮到，最后几节不会再垫底。
+    """
+    def stamp(song: Song) -> float:
+        entry = cache.get(song.key)
+        at = entry.get("at") if isinstance(entry, dict) else None
+        return float(at) if isinstance(at, (int, float)) else -1.0
+
+    # sorted 是稳定排序：一样的时间就保持页面顺序
+    return sorted(songs, key=stamp)
+
+
+def season_coverage(songs: Sequence[Song], cache: Dict,
+                    seasons: Dict[int, str],
+                    current: Dict[Tuple[int, int], str]) -> List[str]:
+    """每个赛季的进度，用来一眼看出哪一节被落下了 → 每节一句话。"""
+    totals: Counter = Counter()
+    filled: Counter = Counter()
+    known: Counter = Counter()
+    order: List[str] = []
+    for song in songs:
+        season = seasons.get(song.line, "") or "（无赛季）"
+        if season not in totals:
+            order.append(season)
+        totals[season] += 1
+        if (current.get((song.line, song.side)) or "").strip():
+            filled[season] += 1
+        if isinstance(cache.get(song.key), dict):
+            known[season] += 1
+    return [f"{season} {totals[season]} 行：页面已填 {filled[season]}、"
+            f"核对过 {known[season]}、没核对过 {totals[season] - known[season]}"
+            for season in order]
+
+
 def run_once(site, write: bool = False, summary: Optional[str] = None,
              ttl: float = CACHE_TTL, limit: int = 0, refresh: bool = False,
              fetcher: Optional[Fetcher] = None, add_missing: bool = False,
              max_add: int = 10, prune: bool = True,
-             miss_ttl: float = MISS_TTL) -> bool:
-    """跑一轮。返回页面是否需要（或已经）改动。"""
+             miss_ttl: float = MISS_TTL, season: str = "") -> bool:
+    """跑一轮。返回页面是否需要（或已经）改动。
+
+    ``season``：只查某个赛季（``--season 2022秋``），用来单独补某一节。
+    """
     fetcher = fetcher or Fetcher()
     if write:
         if not site.logged_in():
@@ -1967,6 +2022,24 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
 
     songs = songs_from(text)
     seasons = season_of_lines(text)
+    rows, _ = parse_rows(text)
+    # 有表格行却认不出曲名 = 那一节对机器人是隐形的（表头被改过之类），要吵一声，
+    # 否则只表现为「这一节永远不补」。
+    row_counts: Counter = Counter(seasons.get(row.line, "") or "（无赛季）"
+                                 for row in rows
+                                 if any(row.text(side, column).strip()
+                                        for side in range(row.sides)
+                                        for column in range(PER_SIDE)))
+    song_counts: Counter = Counter(seasons.get(song.line, "") or "（无赛季）"
+                                   for song in songs)
+    for name, count in row_counts.items():
+        if count and not song_counts[name]:
+            pywikibot.warning(f"{name}：有 {count} 行却认不出任何曲名，"
+                              f"表格结构可能变了，这一节不会被补充")
+    if season:
+        songs = [song for song in songs
+                 if season in (seasons.get(song.line, "") or "")]
+        pywikibot.output(f"只查赛季「{season}」：{len(songs)} 行")
 
     rows, _ = parse_rows(text)
     current: Dict[Tuple[int, int], str] = {}
@@ -1983,7 +2056,8 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
 
     fills: Dict[Tuple[int, int], str] = {}
     queried = 0
-    for song in songs:
+    # 按核对时间轮转：--limit 才不会被最上面几节一直吃掉（见 query_order）
+    for song in query_order(songs, cache):
         cell = (song.line, song.side)
         cached = cache.get(song.key)
         existing = current.get(cell, "")
@@ -2018,6 +2092,8 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     save_cache(cache)
     pywikibot.output(f"待查 {len(current)} 行、本轮查了 {queried} 首、"
                      f"改动 {len(fills)} 行")
+    for line in season_coverage(songs, cache, seasons, current):
+        pywikibot.output(f"  {line}")
     text = apply_fills(text, fills)
     added = 0
     dropped: List[str] = []
@@ -2094,11 +2170,13 @@ def main() -> None:
                         help="本轮最多补录几首（默认 10，0 = 不限制）")
     parser.add_argument("--no-prune", action="store_true",
                         help="不删「已经有条目」的行（默认会删，和页面主人的做法一致）")
+    parser.add_argument("--season", default="",
+                        help="只查某个赛季，例如 --season 2022秋（默认整页轮转）")
     args = parser.parse_args()
     run_once(pywikibot.Site(), args.write, args.summary, args.ttl, args.limit,
              args.refresh, add_missing=args.add_missing,
              max_add=args.max_add or 10 ** 6, prune=not args.no_prune,
-             miss_ttl=args.miss_ttl)
+             miss_ttl=args.miss_ttl, season=args.season)
 
 
 if __name__ == "__main__":

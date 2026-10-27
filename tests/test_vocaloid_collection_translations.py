@@ -1318,3 +1318,183 @@ class CollectSourcesTest(TestCase):
              patch.object(tr, "lookup_netease", return_value=["[b 乙]"]), \
              patch.object(tr, "lookup_bilibili", return_value=([], [], [])):
             self.assertEqual(["[b 乙]"], tr.collect_sources(object(), song, {}))
+
+TWO_SEASONS = """== ボカコレ2020冬 ==
+{| class="wikitable"
+|-
+! colspan="6"|TOP100
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 1 || [[甲]] || P甲 || 未创建 || ||
+|}
+
+== ボカコレ2022秋 ==
+{| class="wikitable"
+|-
+! colspan="6"|TOP100
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 1 || [[乙]] || P乙 || 未创建 || ||
+|}
+"""
+
+
+class QueryOrderTest(TestCase):
+    """``--limit`` 不能让最上面那几节一直吃掉预算（2026-10-28：2022秋 一行都没查过）。"""
+
+    def _songs(self):
+        return tr.songs_from(TWO_SEASONS)
+
+    def test_never_checked_songs_come_first(self):
+        first, second = self._songs()
+        cache = {first.key: {"at": time.time(), "v": tr.CACHE_VERSION,
+                             "sources": []}}
+        head = tr.query_order([first, second], cache)[0]
+        self.assertEqual(second.key, head.key, "没查过的要排在已经查过的前面")
+
+    def test_the_oldest_result_is_checked_first(self):
+        first, second = self._songs()
+        now = time.time()
+        cache = {first.key: {"at": now, "v": tr.CACHE_VERSION, "sources": []},
+                 second.key: {"at": now - 10, "v": tr.CACHE_VERSION, "sources": []}}
+        head = tr.query_order([first, second], cache)[0]
+        self.assertEqual(second.key, head.key, "没查过的要排在已经查过的前面")
+
+    def test_equal_timestamps_keep_the_page_order(self):
+        songs = self._songs()
+        now = time.time()
+        cache = {song.key: {"at": now, "v": tr.CACHE_VERSION, "sources": []}
+                 for song in songs}
+        self.assertEqual([s.key for s in songs],
+                         [s.key for s in tr.query_order(songs, cache)])
+
+
+class LimitedRoundTest(TestCase):
+    """复现并锁住病根：一轮只查 1 首时，第二节也必须能轮到。"""
+
+    class FakePage:
+        def __init__(self, site, title):
+            self.text = TWO_SEASONS
+            self.saved = []
+
+        def save(self, **kwargs):
+            self.saved.append(self.text)
+
+    class FakeSite:
+        def logged_in(self):
+            return True
+
+    def _round(self, cache, **kwargs):
+        """跑一轮，返回这一轮实际查了哪几首。"""
+        asked = []
+        page = self.FakePage(None, None)
+
+        def fake_sources(fetcher, song, index, site=None, season=""):
+            asked.append(song.title_display)
+            return []
+
+        with patch.object(tr, "Page", return_value=page), \
+                patch.object(tr, "load_cache", return_value=cache), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries", return_value=(TWO_SEASONS, [])), \
+                patch.object(tr, "collect_sources", side_effect=fake_sources):
+            tr.run_once(self.FakeSite(), write=True, fetcher=object(), **kwargs)
+        return asked
+
+    def test_the_second_season_is_reached_on_the_next_round(self):
+        cache = {}
+        self.assertEqual(["甲"], self._round(cache, limit=1))
+        self.assertEqual(["乙"], self._round(cache, limit=1),
+                         "第一首已经查过，这一轮该轮到最后一节")
+        self.assertEqual([], self._round(cache, limit=1),
+                         "全查过之后不该反复重查")
+
+    def test_a_season_filter_limits_the_round_to_that_season(self):
+        self.assertEqual(["乙"], self._round({}, limit=0, season="2022秋"))
+
+    def test_the_filter_does_not_touch_other_seasons(self):
+        cache = {}
+        self._round(cache, limit=0, season="2022秋")
+        self.assertIn("乙", cache)                 # 只查了 2022秋
+        self.assertNotIn("甲", cache)
+
+
+class SeasonCoverageTest(TestCase):
+    def test_reports_progress_per_season(self):
+        songs = tr.songs_from(TWO_SEASONS)
+        seasons = tr.season_of_lines(TWO_SEASONS)
+        current = {(songs[0].line, songs[0].side): "[u 甲]"}
+        cache = {songs[0].key: {"at": time.time(), "v": tr.CACHE_VERSION, "sources": []}}
+
+        lines = tr.season_coverage(songs, cache, seasons, current)
+
+        self.assertEqual(2, len(lines))
+        self.assertIn("ボカコレ2020冬 1 行：页面已填 1、核对过 1、没核对过 0", lines[0])
+        self.assertIn("ボカコレ2022秋 1 行：页面已填 0、核对过 0、没核对过 1", lines[1])
+
+NO_COLSPAN = """== ボカコレ2022秋 ==
+{| class="wikitable"
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 1 || [[左曲]] || P左 || 未创建 || || || 2 || [[右曲]] || P右 || 未创建 || ||
+|}
+"""
+
+
+class RowSidesTest(TestCase):
+    """表头漏了 ``colspan`` 时，右半边的歌也不能消失（那一节会永远不补）。"""
+
+    def test_cell_count_wins_over_a_missing_colspan_header(self):
+        rows, _ = tr.parse_rows(NO_COLSPAN)
+        self.assertEqual(1, len(rows))
+        self.assertEqual(2, rows[0].sides)
+
+    def test_both_sides_of_such_a_table_are_seen(self):
+        titles = [s.title_display for s in tr.songs_from(NO_COLSPAN)]
+        self.assertEqual(["左曲", "右曲"], titles)
+
+    def test_a_short_row_keeps_the_declared_sides(self):
+        """右侧整半格省略的行仍按表头的 2 侧算（不能因此把行当成 1 侧）。"""
+        text = """{| class="wikitable"
+|-
+! colspan="6"|TOP100 !! colspan="6"|ROOKIE
+|-
+! 名次 !! 曲名 !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名 !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 1 || [[左曲]] || P左 || 未创建 || ||
+|}"""
+        rows, _ = tr.parse_rows(text)
+        self.assertEqual(2, rows[0].sides)
+        self.assertEqual("左曲", tr.songs_from(text)[0].title_display)
+
+
+class SilentSectionTest(TestCase):
+    """认不出曲名的一节要报警，而不是静悄悄什么都不做。"""
+
+    class FakePage:
+        def __init__(self, site, title):
+            self.text = "== ボカコレ2022秋 ==\n{|\n|-\n| 1 || || || || || \n|}"
+
+        def save(self, **kwargs):
+            pass
+
+    class FakeSite:
+        def logged_in(self):
+            return True
+
+    def test_a_section_without_titles_is_reported(self):
+        with patch.object(tr, "Page", side_effect=self.FakePage), \
+                patch.object(tr, "load_cache", return_value={}), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries",
+                             side_effect=lambda site, fetcher, text, refresh=False:
+                             (text, [])), \
+                patch.object(tr.pywikibot, "warning") as warning:
+            tr.run_once(self.FakeSite(), write=False, fetcher=object())
+
+        self.assertTrue(any("认不出任何曲名" in str(call) for call in warning.call_args_list))

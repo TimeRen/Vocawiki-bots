@@ -2084,7 +2084,9 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     moved = 0
     blanks = 0
     text = original
-    if prune:
+    # --season 是「只补这一节」，别的节一个字都不动：连删行/补录也一起跳过，
+    # 免得用户只想补 2022秋 却发现别的赛季少了几行。
+    if prune and not season:
         text, pruned = prune_entries(site, fetcher, text, refresh)
         for note in pruned:
             pywikibot.output(f"  - 已有条目，删掉：{note}")
@@ -2168,7 +2170,7 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     text = apply_fills(text, fills)
     added = 0
     dropped: List[str] = []
-    if add_missing:
+    if add_missing and not season:
         # 清理配错的旧行只做「证明它错」的核对（投稿年对不上），不新增任何内容，
         # 所以 ``USE_ATWIKI = False`` 时也照跑——那是删错，不是收录。
         text, dropped = drop_wrong_rows(text, fetcher)
@@ -2183,7 +2185,7 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
                                                   max_add, write)
             except Exception as exc:    # noqa: BLE001 - 补录失败不影响填来源
                 pywikibot.warning(f"补录未录入的曲目失败：{exc}")
-    if prune:
+    if prune and not season:
         # 只清了一侧的行会把那一侧空出半格：同侧后面的曲目上移补位，再把整行
         # 空白的空壳删掉，表格中间就不会留一条空白带（2026-10-25 反馈）。
         text, moved = compact_sides(text)

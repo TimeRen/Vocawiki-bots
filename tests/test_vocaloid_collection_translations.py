@@ -197,19 +197,33 @@ class CreditNameTest(TestCase):
         self.assertEqual("", credit_name(text))
 
 
-class MissTtlTest(TestCase):
-    """查不到来源的歌用更短的有效期，否则页面会几周没动静。"""
+class RecheckTtlTest(TestCase):
+    """复检每周一次：查到的和没查到的都一样（2026-10-28 页面主人定的口径）。"""
 
-    def test_miss_expires_sooner_than_a_hit(self):
+    def test_both_ttls_are_one_week(self):
+        self.assertEqual(7 * 24 * 3600, tr.CACHE_TTL)
+        self.assertEqual(tr.CACHE_TTL, tr.MISS_TTL)
+
+    def test_nothing_is_rechecked_before_a_week(self):
+        now = time.time()
+        for sources in ([], ["[u 甲]"]):
+            fresh = {"at": now - 6 * 24 * 3600, "v": tr.CACHE_VERSION,
+                     "sources": sources}
+            self.assertTrue(tr.is_current(fresh, tr.CACHE_TTL, tr.MISS_TTL))
+
+    def test_everything_is_rechecked_after_a_week(self):
+        now = time.time()
+        for sources in ([], ["[u 甲]"]):
+            stale = {"at": now - 8 * 24 * 3600, "v": tr.CACHE_VERSION,
+                     "sources": sources}
+            self.assertFalse(tr.is_current(stale, tr.CACHE_TTL, tr.MISS_TTL))
+
+    def test_a_shorter_miss_ttl_still_wins_when_asked_for(self):
         now = time.time()
         miss = {"at": now - 4 * 24 * 3600, "v": tr.CACHE_VERSION, "sources": []}
         hit = {"at": now - 4 * 24 * 3600, "v": tr.CACHE_VERSION, "sources": ["[u 甲]"]}
-        self.assertFalse(tr.is_current(miss, tr.CACHE_TTL, tr.MISS_TTL))
-        self.assertTrue(tr.is_current(hit, tr.CACHE_TTL, tr.MISS_TTL))
-        self.assertTrue(tr.is_current(miss, tr.CACHE_TTL))       # 不传 miss_ttl 就按老规矩
-
-    def test_defaults(self):
-        self.assertLess(tr.MISS_TTL, tr.CACHE_TTL)
+        self.assertFalse(tr.is_current(miss, tr.CACHE_TTL, 3 * 24 * 3600))
+        self.assertTrue(tr.is_current(hit, tr.CACHE_TTL, 3 * 24 * 3600))
 
 
 class NeteaseQueryTest(TestCase):
@@ -1469,10 +1483,11 @@ class LimitedRoundTest(TestCase):
         def logged_in(self):
             return True
 
-    def _round(self, cache, **kwargs):
+    def _round(self, cache, page_text=TWO_SEASONS, **kwargs):
         """跑一轮，返回这一轮实际查了哪几首。"""
         asked = []
         page = self.FakePage(None, None)
+        page.text = page_text
 
         def fake_sources(fetcher, song, index, site=None, season=""):
             asked.append(song.title_display)
@@ -1482,18 +1497,21 @@ class LimitedRoundTest(TestCase):
                 patch.object(tr, "load_cache", return_value=cache), \
                 patch.object(tr, "save_cache"), \
                 patch.object(tr, "atwiki_page_index", return_value={}), \
-                patch.object(tr, "prune_entries", return_value=(TWO_SEASONS, [])), \
+                patch.object(tr, "prune_entries", return_value=(page_text, [])), \
                 patch.object(tr, "collect_sources", side_effect=fake_sources):
             tr.run_once(self.FakeSite(), write=True, fetcher=object(), **kwargs)
         return asked
 
-    def test_the_second_season_is_reached_on_the_next_round(self):
+    def test_every_season_gets_its_own_budget(self):
+        """``--limit 1`` 是「每一届 1 首」：一轮里两届都轮得到（2026-10-28 反馈）。"""
         cache = {}
-        self.assertEqual(["甲"], self._round(cache, limit=1))
-        self.assertEqual(["乙"], self._round(cache, limit=1),
-                         "第一首已经查过，这一轮该轮到最后一节")
-        self.assertEqual([], self._round(cache, limit=1),
-                         "全查过之后不该反复重查")
+        self.assertEqual(["甲", "乙"], self._round(cache, limit=1))
+        self.assertEqual([], self._round(cache, limit=1), "都查过（未满 7 天）就不重查")
+
+    def test_the_budget_still_caps_a_single_season(self):
+        cache = {}
+        page = "== ボカコレ2022秋 ==\n" + TWO_SEASONS.split("== ボカコレ2022秋 ==")[1]
+        self.assertEqual(1, len(self._round(cache, limit=1, page_text=page)))
 
     def test_a_season_filter_limits_the_round_to_that_season(self):
         self.assertEqual(["乙"], self._round({}, limit=0, season="2022秋"))
@@ -1581,3 +1599,162 @@ class SilentSectionTest(TestCase):
             tr.run_once(self.FakeSite(), write=False, fetcher=object())
 
         self.assertTrue(any("认不出任何曲名" in str(call) for call in warning.call_args_list))
+
+class SeasonGroupsTest(TestCase):
+    def test_groups_keep_the_page_order(self):
+        songs = tr.songs_from(TWO_SEASONS)
+        groups = tr.season_groups(songs, tr.season_of_lines(TWO_SEASONS))
+        self.assertEqual(["ボカコレ2020冬", "ボカコレ2022秋"],
+                         [name for name, _ in groups])
+        self.assertEqual(["甲"], [s.title_display for s in groups[0][1]])
+
+    def test_filter_keeps_only_the_named_seasons(self):
+        songs = tr.songs_from(TWO_SEASONS)
+        groups = tr.season_groups(songs, tr.season_of_lines(TWO_SEASONS),
+                                  ["2022秋"])
+        self.assertEqual(["ボカコレ2022秋"], [name for name, _ in groups])
+
+
+class PruneOnlyTest(TestCase):
+    """``--prune-only``：每小时只删「已经有条目的行」，不联网查来源。"""
+
+    class FakePage:
+        def __init__(self, site, title):
+            self.text = PRUNE_PAGE
+            self.saved = []
+            self.summaries = []
+
+        def save(self, **kwargs):
+            self.saved.append(self.text)
+            self.summaries.append(kwargs.get("summary", ""))
+
+    class FakeSite:
+        def logged_in(self):
+            return True
+
+    def _run(self, **kwargs):
+        page = self.FakePage(None, None)
+        with patch.object(tr, "Page", return_value=page), \
+                patch.object(tr, "load_cache", return_value={}), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries",
+                             side_effect=lambda s, f, t, r=False:
+                             tr.prune_created_rows(t, {tr.title_key("Maison")})), \
+                patch.object(tr, "collect_sources") as lookup:
+            changed = tr.run_once(self.FakeSite(), write=True, fetcher=object(),
+                                  **kwargs)
+        return changed, page, lookup
+
+    def test_no_source_lookup_happens(self):
+        changed, page, lookup = self._run(fill=False)
+        lookup.assert_not_called()
+        self.assertTrue(changed)
+        self.assertNotIn("Maison", page.saved[0])
+
+    def test_the_row_is_still_deleted(self):
+        _, page, _ = self._run(fill=False)
+        self.assertNotIn("Maison", page.saved[0])
+
+    def test_add_missing_is_skipped(self):
+        with patch.object(tr, "add_missing_entries") as add:
+            self._run(fill=False, add_missing=False)
+        add.assert_not_called()
+
+    def test_summary_says_it_only_cleaned_rows(self):
+        # 每小时那一档的摘要不能写「补 0 行」——它根本没查来源
+        _, page, _ = self._run(fill=False)
+        self.assertTrue(page.summaries[0].startswith("清理搜集库："),
+                        page.summaries[0])
+        self.assertIn("删掉 1 个已有条目的行", page.summaries[0])
+
+
+class BahamutSearchTest(TestCase):
+    """巴哈姆特站内搜索：从搜索页（或它的 JSON）里扫出 ``artwork.php?sn=``。"""
+
+    class FakeFetcher:
+        def __init__(self, pages):
+            self.pages = list(pages)
+            self.asked = []
+
+        def is_blocked(self, url):
+            return False
+
+        def text(self, url, attempts=3):
+            self.asked.append(url)
+            return self.pages.pop(0) if self.pages else ""
+
+    HTML = ('<a href="https://home.gamer.com.tw/artwork.php?sn=6103400">译文</a>'
+            '<a href="//home.gamer.com.tw/artwork.php?sn=6097695">另一个</a>'
+            '<a href="https://home.gamer.com.tw/artwork.php?sn=6103400">重复</a>')
+
+    def test_extracts_and_dedupes_artwork_links(self):
+        self.assertEqual(
+            ["https://home.gamer.com.tw/artwork.php?sn=6103400",
+             "https://home.gamer.com.tw/artwork.php?sn=6097695"],
+            tr.bahamut_artwork_urls(self.HTML))
+
+    def test_reads_json_escaped_links(self):
+        """JSON 接口把链接写成 ``https:\/\/…`` 或百分号转义，也要认出来。"""
+        payload = '{"list":[{"url":"https:\/\/home.gamer.com.tw\/artwork.php?sn=6111"}]}'
+        self.assertEqual(["https://home.gamer.com.tw/artwork.php?sn=6111"],
+                         tr.bahamut_artwork_urls(payload))
+        escaped = "https%3A%2F%2Fhome.gamer.com.tw%2Fartwork.php%3Fsn%3D6222"
+        self.assertEqual(["https://home.gamer.com.tw/artwork.php?sn=6222"],
+                         tr.bahamut_artwork_urls(escaped))
+
+    def test_falls_back_to_the_next_endpoint(self):
+        fetcher = self.FakeFetcher(["<html>JS 渲染，什么都没有</html>", self.HTML])
+        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", ""):
+            found = tr.bahamut_search(fetcher, "千本桜")
+            self.assertEqual(tr.BAHAMUT_SEARCH_URLS[1], tr._BAHAMUT_SEARCH_WORKING,
+                             "第一个地址扫不出链接，第二个可以：要记住第二个")
+        self.assertEqual(2, len(found), "两个不同的 sn，重复的那个不算")
+
+    def test_the_working_endpoint_is_tried_first_next_time(self):
+        working = tr.BAHAMUT_SEARCH_URLS[1]
+        fetcher = self.FakeFetcher([self.HTML])
+        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", working):
+            tr.bahamut_search(fetcher, "千本桜")
+        self.assertTrue(fetcher.asked[0].startswith(working.split("{kw}")[0]))
+
+    def test_no_result_means_no_links(self):
+        fetcher = self.FakeFetcher([""] * len(tr.BAHAMUT_SEARCH_URLS))
+        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", ""):
+            self.assertEqual([], tr.bahamut_search(fetcher, "千本桜"))
+
+    def test_searched_pages_are_verified_before_being_recorded(self):
+        song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
+        fetcher = self.FakeFetcher([self.HTML])
+        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", ""), \
+                patch.object(tr, "lookup_bahamut",
+                             return_value=["[u 巴哈姆特(by. 月勳)]"]) as verify:
+            sources = tr.lookup_bahamut_search(fetcher, song)
+        self.assertEqual(["[u 巴哈姆特(by. 月勳)]"], sources)
+        verify.assert_called()
+
+
+class BahamutSearchWiringTest(TestCase):
+    """B站那边没结果时才去站内搜（别每首歌都多敲对方一次）。"""
+
+    def _collect(self, gamer):
+        song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
+        with patch.object(tr, "lookup_netease", return_value=[]), \
+                patch.object(tr, "lookup_bilibili", return_value=([], [], [])), \
+                patch.object(tr, "lookup_bahamut_search",
+                             return_value=gamer) as search:
+            sources = tr.collect_sources(object(), song, {})
+        return sources, search
+
+    def test_search_runs_when_nothing_else_found_a_source(self):
+        sources, search = self._collect(["[u 巴哈姆特(by. 月勳)]"])
+        search.assert_called_once()
+        self.assertEqual(["[u 巴哈姆特(by. 月勳)]"], sources)
+
+    def test_search_is_skipped_when_a_source_was_already_found(self):
+        song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
+        with patch.object(tr, "lookup_netease", return_value=["[b 乙]"]), \
+                patch.object(tr, "lookup_bilibili", return_value=([], [], [])), \
+                patch.object(tr, "lookup_bahamut_search") as search:
+            tr.collect_sources(object(), song, {})
+        search.assert_not_called()

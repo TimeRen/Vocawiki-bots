@@ -34,16 +34,28 @@
   mem: 512Mi
   emails: onfailure
 
-# 每天填充 [[User:周某不是轴某/VOCALOID collection搜集库]] 的「翻译来源」一栏
-# （只填空格；AtWiki / 网易云 / B站 / 巴哈姆特 逐个查，逐首缓存 14 天）。
-# 抓取很慢（一首几秒到十几秒），所以每轮限 60 首，靠缓存逐日补齐；
-# 与 GitHub Actions（06:43）错开。
+# 每小时删掉「已经有条目」的歌（--prune-only）：只看站内事实（贡献列表标了已创建、
+# 条目存在且 P主 一致），不联网问外站，所以可以比填来源跑得勤。
+# 与 hourly（:17）、contributions（:53）、translations（周日 03:37）都错开。
+- name: collection-prune
+  image: python3.13
+  command: ./Vocawiki-bots/deploy/toolforge/run-collection-prune.sh
+  schedule: "7 * * * *"
+  mem: 512Mi
+  emails: onfailure
+
+# 每周填一次 [[User:周某不是轴某/VOCALOID collection搜集库]] 的「翻译来源」一栏
+# （只填空格；网易云 / B站 / 巴哈姆特 逐个查）。抓取很慢（一首几秒到十几秒），所以
+# 复检定成每周一次，并且带 --refresh：定时器早跑晚跑几十秒也不会漏掉某一周。
+# 每一届各有 --limit 80 的预算，十几届互不挤占（2026-10-28：以前是一份全局预算，
+# 最后一节 2022秋 永远轮不到）。
+# 与 GitHub Actions（周一 06:43）错开。
 #
 # 2026-10-22 曾暂停过一阵（自动写的三次都被整笔回退，那批来源确实查错了 P主）；
 # 修好「每个来源都核对 P主」「只认自己写过的格子」之后已恢复定时。
 - name: translations
   image: python3.13
-  command: ./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --limit 60
-  schedule: "37 6 * * *"
+  command: ./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --limit 80 --refresh
+  schedule: "37 3 * * 1"
   mem: 512Mi
   emails: onfailure

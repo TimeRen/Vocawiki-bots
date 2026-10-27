@@ -131,8 +131,8 @@ DATA_DIR = Path("data")
 CACHE = DATA_DIR / "vocaloid_collection_translations.pickle"
 ATWIKI_CACHE = DATA_DIR / "vocaloid_collection_translations_atwiki.pickle"
 
-CACHE_TTL = 14 * 24 * 3600          # 查到来源的歌：多久重新核对一次
-MISS_TTL = 3 * 24 * 3600            # 没查到来源的歌：3 天后再试（否则页面几周没动静）
+CACHE_TTL = 7 * 24 * 3600           # 查到来源的歌：每周复检一次（再看看有没有新翻译）
+MISS_TTL = 7 * 24 * 3600            # 没查到来源的歌：也是每周再搜一遍
 ATWIKI_TTL = 7 * 24 * 3600          # AtWiki 页面清单多久重建一次
 CACHE_VERSION = 7                   # 判定规则变了就 +1，旧缓存自动作废
 REQUEST_TIMEOUT = 25
@@ -190,6 +190,20 @@ BILIBILI_VIEW = "https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
 BILIBILI_REPLY = "https://api.bilibili.com/x/v2/reply?type=1&oid={oid}&ps=20&pn={pn}&sort=2"
 BILIBILI_DANMAKU = "https://api.bilibili.com/x/v1/dm/list.so?oid={cid}"
 BILIBILI_VIDEO = "https://www.bilibili.com/video/{bvid}"
+
+# 巴哈姆特：作品页写作 ``home.gamer.com.tw/artwork.php?sn=…``，站内搜索以前只能在
+# 浏览器里点（B站简介里的外链才带得进来）。搜索页可以按下面这些地址抓，谁先回出
+# 带 ``sn`` 的链接就用谁（``bahamut_search`` 会记住这一轮管用的那个）。
+BAHAMUT_ARTWORK = "https://home.gamer.com.tw/artwork.php?sn={sn}"
+BAHAMUT_ARTWORK_RE = re.compile(r"home\.gamer\.com\.tw/artwork\.php\?sn=(\d+)")
+BAHAMUT_SEARCH_URLS = (
+    "https://search.gamer.com.tw/?q={kw}&p=1&t=3",       # 站内搜索 · 創作
+    "https://search.gamer.com.tw/?q={kw}&p=1",           # 站内搜索 · 全部
+    "https://search.gamer.com.tw/api/search?q={kw}&p=1&size=20",
+    "https://home.gamer.com.tw/search.php?q={kw}",       # 小屋创作搜索
+)
+BAHAMUT_SEARCH_MAX = 4              # 站内搜索命中的作品页最多核对几个
+
 
 # 译者署名的写法：`翻譯：yanao`、`翻译: 某人`、`译 person`、`譯者：某人`
 # 必须有冒号：「谷歌翻译成英文后……」这类句子里的「翻译」不是署名
@@ -1559,6 +1573,99 @@ def lookup_bahamut(fetcher: Fetcher, url: str, song: Song) -> List[str]:
     return [render_source(url, "巴哈姆特", name)]
 
 
+def bahamut_artwork_urls(markup: str) -> List[str]:
+    """页面或 JSON 里出现的作品页链接，按出现顺序去重。
+
+    搜索页的作品链接可能写成相对路径、``%3Fsn%3D`` 这种转义形式、或者包在 JSON
+    字符串里（``"url":"https:\\/\\/home.gamer.com.tw\\/artwork.php?sn=6103400"``），
+    所以先整体反转义再扫一遍 ``artwork.php?sn=``。
+    """
+    text = urllib.parse.unquote(str(markup or "")).replace("\\/", "/")
+    found: List[str] = []
+    for match in BAHAMUT_ARTWORK_RE.finditer(text):
+        url = BAHAMUT_ARTWORK.format(sn=match.group(1))
+        if url not in found:
+            found.append(url)
+    return found
+
+
+# 这一轮里哪个搜索地址回得出作品链接（下一个进程重新试，命中率高的会记在这）
+_BAHAMUT_SEARCH_WORKING = ""
+
+
+def bahamut_search(fetcher: Fetcher, keyword: str) -> List[str]:
+    """巴哈姆特站内搜索 → 作品页 URL 列表（最多 ``BAHAMUT_SEARCH_MAX`` 条）。
+
+    搜索页是 JS 渲染的，但结果链接在**初始 HTML 或它的 JSON 接口**里就能拿到，
+    所以这里按 ``BAHAMUT_SEARCH_URLS`` 逐个试：谁回出带 ``sn`` 的链接就记住谁，
+    后面的歌直接用那个地址。全都拿不到就返回空（退回「从 B站简介里找外链」）。
+    """
+    global _BAHAMUT_SEARCH_WORKING
+    if not str(keyword or "").strip():
+        return []
+    keyword = urllib.parse.quote(keyword)
+    templates = list(BAHAMUT_SEARCH_URLS)
+    if _BAHAMUT_SEARCH_WORKING in templates:
+        templates.remove(_BAHAMUT_SEARCH_WORKING)
+        templates.insert(0, _BAHAMUT_SEARCH_WORKING)
+    for template in templates:
+        url = template.replace("{kw}", keyword)
+        if fetcher.is_blocked(url):
+            continue
+        markup = fetcher.text(url, attempts=1)
+        if not markup:
+            continue
+        found = bahamut_artwork_urls(markup)
+        if not found:
+            continue
+        if template != _BAHAMUT_SEARCH_WORKING:
+            _BAHAMUT_SEARCH_WORKING = template
+            pywikibot.output(f"巴哈姆特站内搜索可用：{template}")
+        return found[:BAHAMUT_SEARCH_MAX]
+    return []
+
+
+def lookup_bahamut_search(fetcher: Fetcher, song: Song) -> List[str]:
+    """站内搜索 + 逐个核对（标题要对得上、正文要有译文署名）。"""
+    sources: List[str] = []
+    keyword = song.title_target or song.title_display
+    for url in bahamut_search(fetcher, keyword):
+        try:
+            found = lookup_bahamut(fetcher, url, song)
+        except Exception as exc:        # noqa: BLE001 - 单个页面出错不影响别的
+            pywikibot.warning(f"巴哈姆特查询失败（{url}）：{exc}")
+            continue
+        for item in found:
+            if item not in sources:
+                sources.append(item)
+        if len(sources) >= 2:
+            break
+    return sources
+
+
+def probe_bahamut(keyword: str) -> None:
+    """``--probe-bahamut 歌名``：逐个试搜索地址，打印状态与抓到的作品链接。
+
+    站内搜索的地址一旦变了，用它一次就能看出该改哪一个（机器人只认能扫出
+    ``artwork.php?sn=`` 的那个地址）。
+    """
+    fetcher = Fetcher()
+    quoted = urllib.parse.quote(keyword)
+    for template in BAHAMUT_SEARCH_URLS:
+        url = template.replace("{kw}", quoted)
+        try:
+            with fetcher.opener.open(url, timeout=REQUEST_TIMEOUT) as response:
+                status = getattr(response, "status", 200)
+                raw = response.read().decode("utf-8", "replace")
+        except Exception as exc:        # noqa: BLE001 - 探测就是把失败打出来
+            pywikibot.output(f"✗ {url}\n    {type(exc).__name__}: {exc}")
+            continue
+        found = bahamut_artwork_urls(raw)
+        pywikibot.output(f"{'✓' if found else '·'} {url}\n"
+                         f"    HTTP {status}、{len(raw)} 字节、作品链接 {len(found)} 个"
+                         + (f"：{found[0]} …" if found else ""))
+
+
 # ---------------------------------------------------------------- voca 条目
 
 def article_video(site, song: Song) -> str:
@@ -1613,6 +1720,14 @@ def collect_sources(fetcher: Fetcher, song: Song, index: Dict[str, str],
             sources.extend(lookup_bahamut(fetcher, url, song))
         except Exception as exc:        # noqa: BLE001
             pywikibot.warning(f"巴哈姆特查询失败（{url}）：{exc}")
+    if not sources:
+        # B站那边没找到译文时，再去巴哈姆特站内搜一遍（拿到的页面照样要过
+        # 标题 + 署名的核对，认错的风险和别的来源一样低）。只在没别的来源时才搜，
+        # 免得每首歌都多敲对方一次。
+        try:
+            sources.extend(lookup_bahamut_search(fetcher, song))
+        except Exception as exc:        # noqa: BLE001
+            pywikibot.warning(f"巴哈姆特站内搜索失败（{song.title_display}）：{exc}")
 
     unique: List[str] = []
     for item in sources:
@@ -2061,14 +2176,31 @@ def season_coverage(songs: Sequence[Song], cache: Dict,
             for season in order]
 
 
+def season_groups(songs: Sequence[Song], seasons: Dict[int, str],
+                  wanted: Sequence[str] = ()) -> List[Tuple[str, List[Song]]]:
+    """按赛季分组（保持页面顺序）→ ``[(赛季名, [歌…]), …]``。
+
+    ``wanted`` 给定时只留名字里含其中任一子串的赛季（``--season 2022秋``）。
+    """
+    groups: Dict[str, List[Song]] = {}
+    for song in songs:
+        name = seasons.get(song.line, "") or "（无赛季）"
+        if wanted and not any(word in name for word in wanted):
+            continue
+        groups.setdefault(name, []).append(song)
+    return list(groups.items())
+
+
 def run_once(site, write: bool = False, summary: Optional[str] = None,
              ttl: float = CACHE_TTL, limit: int = 0, refresh: bool = False,
              fetcher: Optional[Fetcher] = None, add_missing: bool = False,
              max_add: int = 10, prune: bool = True,
-             miss_ttl: float = MISS_TTL, season: str = "") -> bool:
+             miss_ttl: float = MISS_TTL, season: Sequence[str] = (),
+             fill: bool = True) -> bool:
     """跑一轮。返回页面是否需要（或已经）改动。
 
-    ``season``：只查某个赛季（``--season 2022秋``），用来单独补某一节。
+    ``season``：只查这些赛季（``--season 2022秋``，可写多个）；默认每一届都查。
+    ``fill``：False 时只做「删掉已经有条目的行」+ 收尾，不联网查来源（``--prune-only``）。
     """
     fetcher = fetcher or Fetcher()
     if write:
@@ -2084,9 +2216,10 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     moved = 0
     blanks = 0
     text = original
-    # --season 是「只补这一节」，别的节一个字都不动：连删行/补录也一起跳过，
+    # --season 是「只补这几届」，别的届一个字都不动：连删行/补录也一起跳过，
     # 免得用户只想补 2022秋 却发现别的赛季少了几行。
-    if prune and not season:
+    wanted = [season] if isinstance(season, str) else [s for s in season if s]
+    if prune and not wanted:
         text, pruned = prune_entries(site, fetcher, text, refresh)
         for note in pruned:
             pywikibot.output(f"  - 已有条目，删掉：{note}")
@@ -2109,10 +2242,10 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         if count and not song_counts[name]:
             pywikibot.warning(f"{name}：有 {count} 行却认不出任何曲名，"
                               f"表格结构可能变了，这一节不会被补充")
-    if season:
-        songs = [song for song in songs
-                 if season in (seasons.get(song.line, "") or "")]
-        pywikibot.output(f"只查赛季「{season}」：{len(songs)} 行")
+    groups = season_groups(songs, seasons, wanted)
+    if wanted:
+        pywikibot.output("只查 " + "、".join(name for name, _ in groups)
+                         + f"：{sum(len(group) for _, group in groups)} 行")
 
     rows, _ = parse_rows(text)
     current: Dict[Tuple[int, int], str] = {}
@@ -2129,38 +2262,46 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
 
     fills: Dict[Tuple[int, int], str] = {}
     queried = 0
-    # 按核对时间轮转：--limit 才不会被最上面几节一直吃掉（见 query_order）
-    for song in query_order(songs, cache):
-        cell = (song.line, song.side)
-        cached = cache.get(song.key)
-        existing = current.get(cell, "")
-        if cell_state(existing, cached) == "skip":
-            continue                    # 别人写的内容：一个字都不动
-        if is_current(cached, ttl, miss_ttl) and not refresh:
-            # 缓存里有结论，但页面可能还没跟上（上次保存失败 / 另一台机器写的）：
-            # 只在结论更全时补写，避免两边来回覆盖。
-            value = join_sources(cached.get("sources") or [])
-            if value and source_count(value) > source_count(existing):
-                fills[cell] = value
-                cached["written"] = value
-            continue
-        if limit and queried >= limit:
-            break
-        queried += 1
-        sources = collect_sources(fetcher, song, index, site,
-                                  seasons.get(song.line, ""))
-        value = join_sources(sources)
-        entry = {"at": time.time(), "v": CACHE_VERSION, "sources": sources,
-                 "title": song.title_display, "written": existing}
-        if value != existing:
-            fills[cell] = value         # 新内容 / 更新 / 清掉自己以前写的
-            entry["written"] = value
-        cache[song.key] = entry
-        if sources:
-            pywikibot.output(f"  {song.rank or '-'} {song.title_display}："
-                             f"{len(sources)} 个来源")
-        else:
-            pywikibot.output(f"  {song.rank or '-'} {song.title_display}：没找到")
+    if not fill:
+        pywikibot.output("只删行：本轮不查来源（--prune-only）")
+    # 每一届各自排队、各自用掉一份 --limit：整页十几届不会互相饿死（见 query_order）。
+    for name, group in (groups if fill else []):
+        asked = 0
+        for song in query_order(group, cache):
+            cell = (song.line, song.side)
+            cached = cache.get(song.key)
+            existing = current.get(cell, "")
+            if cell_state(existing, cached) == "skip":
+                continue                # 别人写的内容：一个字都不动
+            if is_current(cached, ttl, miss_ttl) and not refresh:
+                # 缓存里有结论，但页面可能还没跟上（上次保存失败 / 另一台机器写的）：
+                # 只在结论更全时补写，避免两边来回覆盖。
+                value = join_sources(cached.get("sources") or [])
+                if value and source_count(value) > source_count(existing):
+                    fills[cell] = value
+                    cached["written"] = value
+                continue
+            if limit and asked >= limit:
+                continue                # 这一届的预算用完了，剩下的留到下一轮
+            asked += 1
+            queried += 1
+            sources = collect_sources(fetcher, song, index, site,
+                                      seasons.get(song.line, ""))
+            value = join_sources(sources)
+            entry = {"at": time.time(), "v": CACHE_VERSION, "sources": sources,
+                     "title": song.title_display, "written": existing}
+            if value != existing:
+                fills[cell] = value     # 新内容 / 更新 / 清掉自己以前写的
+                entry["written"] = value
+            cache[song.key] = entry
+            if sources:
+                pywikibot.output(f"  {name} {song.rank or '-'} "
+                                 f"{song.title_display}：{len(sources)} 个来源")
+            else:
+                pywikibot.output(f"  {name} {song.rank or '-'} "
+                                 f"{song.title_display}：没找到")
+        if fill and group:
+            pywikibot.output(f"  {name}：本轮查了 {asked} 首（共 {len(group)} 行）")
 
     save_cache(cache)
     pywikibot.output(f"待查 {len(current)} 行、本轮查了 {queried} 首、"
@@ -2170,7 +2311,7 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     text = apply_fills(text, fills)
     added = 0
     dropped: List[str] = []
-    if add_missing and not season:
+    if add_missing and not wanted and fill:
         # 清理配错的旧行只做「证明它错」的核对（投稿年对不上），不新增任何内容，
         # 所以 ``USE_ATWIKI = False`` 时也照跑——那是删错，不是收录。
         text, dropped = drop_wrong_rows(text, fetcher)
@@ -2185,7 +2326,7 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
                                                   max_add, write)
             except Exception as exc:    # noqa: BLE001 - 补录失败不影响填来源
                 pywikibot.warning(f"补录未录入的曲目失败：{exc}")
-    if prune and not season:
+    if prune and not wanted:
         # 只清了一侧的行会把那一侧空出半格：同侧后面的曲目上移补位，再把整行
         # 空白的空壳删掉，表格中间就不会留一条空白带（2026-10-25 反馈）。
         text, moved = compact_sides(text)
@@ -2201,7 +2342,9 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         pywikibot.output("[dry-run] 页面有改动；加 --write 以保存。")
         return True
     page.text = text
-    parts = [f"补 {len(fills)} 行"]
+    parts: List[str] = []
+    if fill:
+        parts.append(f"补 {len(fills)} 行")
     if pruned:
         parts.append(f"删掉 {len(pruned)} 个已有条目的行")
     if added:
@@ -2212,7 +2355,8 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         parts.append(f"曲目上移补位 {moved} 行")
     if blanks:
         parts.append(f"删掉 {blanks} 个空行")
-    note = summary or f"{DEFAULT_SUMMARY}，{'、'.join(parts)}"
+    body = "、".join(parts) or "无改动"
+    note = summary or (f"{DEFAULT_SUMMARY}，{body}" if fill else f"清理搜集库：{body}")
     try:
         page.save(summary=note, minor=True, bot=True, tags="Bot")
     except EditConflictError as exc:
@@ -2230,11 +2374,11 @@ def main() -> None:
     parser.add_argument("--write", action="store_true", help="保存页面（默认只干跑）")
     parser.add_argument("--summary", default=None, help="编辑摘要")
     parser.add_argument("--ttl", type=float, default=CACHE_TTL,
-                        help="查到来源的歌多久重新核对一次（秒，默认 14 天）")
+                        help="查到来源的歌多久复检一次（秒，默认 7 天）")
     parser.add_argument("--miss-ttl", type=float, default=MISS_TTL,
-                        help="没查到来源的歌多久再试一次（秒，默认 3 天）")
+                        help="没查到来源的歌多久再搜一次（秒，默认 7 天）")
     parser.add_argument("--limit", type=int, default=0,
-                        help="本轮最多查多少首（0 = 不限制）")
+                        help="每一届最多查多少首（0 = 不限制）；每一届各有一份预算")
     parser.add_argument("--refresh", action="store_true",
                         help="忽略缓存的有效期，重新核对（缓存本身保留，用于认出自己写过的格子）")
     parser.add_argument("--add-missing", action="store_true",
@@ -2243,13 +2387,26 @@ def main() -> None:
                         help="本轮最多补录几首（默认 10，0 = 不限制）")
     parser.add_argument("--no-prune", action="store_true",
                         help="不删「已经有条目」的行（默认会删，和页面主人的做法一致）")
-    parser.add_argument("--season", default="",
-                        help="只查某个赛季，例如 --season 2022秋（默认整页轮转）")
+    parser.add_argument("--prune-only", action="store_true",
+                        help="只删「已经有条目」的行，不联网查来源（每小时跑这一档）")
+    parser.add_argument("--season", action="append", default=[],
+                        help="只查这几届，例如 --season 2022秋 --season 2023春"
+                             "（也可写成 --season 2022秋,2023春）；默认每一届都查")
+    parser.add_argument("--probe-bahamut", default="",
+                        help="试一试各个巴哈姆特站内搜索地址能不能扫出作品链接，然后退出")
     args = parser.parse_args()
+
+    if args.probe_bahamut:
+        probe_bahamut(args.probe_bahamut)
+        return
+
+    wanted: List[str] = []
+    for item in args.season:
+        wanted.extend(part.strip() for part in re.split(r"[,，]", item) if part.strip())
     run_once(pywikibot.Site(), args.write, args.summary, args.ttl, args.limit,
-             args.refresh, add_missing=args.add_missing,
+             args.refresh, add_missing=args.add_missing and not args.prune_only,
              max_add=args.max_add or 10 ** 6, prune=not args.no_prune,
-             miss_ttl=args.miss_ttl, season=args.season)
+             miss_ttl=args.miss_ttl, season=wanted, fill=not args.prune_only)
 
 
 if __name__ == "__main__":

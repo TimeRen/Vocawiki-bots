@@ -1,20 +1,24 @@
 name: Fill the VOCALOID collection translation sources
 
-# 这是 Toolforge 上 `translations` 任务的 GitHub Actions 兜底（Toolforge 故障时顶上）。
+# 这是 Toolforge 上 `translations`（每周填来源）与 `collection-prune`（每小时删行）
+# 两条任务的 GitHub Actions 兜底（Toolforge 故障时顶上）。
 #
-# 它填的是 [[User:周某不是轴某/VOCALOID collection搜集库]] 的「翻译来源」一栏：
-# 只填**空**格，逐首查 VOCALOID中文歌词wiki（AtWiki）/ 网易云音乐 / B站（简介、
-# 评论区、弹幕、笔记）/ 巴哈姆特。抓取很慢，所以每轮靠 data/ 里的缓存逐日补齐：
-# 一首歌查过之后 14 天内不再重复查，AtWiki 全ページ一覧缓存 7 天。
+# 它维护的是 [[User:周某不是轴某/VOCALOID collection搜集库]]：
+#   · fill  ：填「翻译来源」一栏（只填空格），逐首查网易云 / B站（简介、评论区、
+#             弹幕、笔记）/ 巴哈姆特（站内搜索 + 外链）。抓取慢，所以**每周一次**，
+#             缓存 7 天有效期；`--limit` 是每一届各自的预算。
+#   · prune ：把「已经有条目」的歌整行删掉。只看站内事实（贡献列表标了已创建、
+#             条目存在且 P主 一致），不联网问外站，所以**每小时一次**。
 #
 # Secrets 与 update-lyrics-completion 相同：USER_PASSWORD_PY（必填）、
-# VOCA_USERNAME（可选）。缓存必须跨运行保留，否则每轮都会把整页重查一遍。
+# VOCA_USERNAME（可选）。缓存必须跨运行保留，否则每次都会把整页重查一遍。
 #
 # 触发方式：
-#   · schedule 每天 06:43 UTC（Toolforge 的 translations 在 06:37，两处错开）
-#   · push 到 main 且改动到脚本或本工作流 -> 立即运行（改完即可验证）
+#   · schedule 两个 cron：每周一 06:43 填来源、每小时 :07 删行（Toolforge 分别是
+#     周一 03:37 与每小时 :07 之后错开 30 分钟）
+#   · push 到 main 且改动到脚本或本工作流 -> 立即跑一次「删行」（便宜，几十秒）
 #   · workflow_dispatch -> Actions 页面手动 Run workflow（可填额外参数，如 --limit 30）
-#   · repository_dispatch -> 外部心跳即时触发：
+#   · repository_dispatch -> 外部心跳即时触发（填来源那一档）：
 #       curl -X POST -H "Authorization: ******" \
 #            -H "Accept: application/vnd.github+json" \
 #            https://api.github.com/repos/TimeRen/Vocawiki-bots/dispatches \
@@ -25,7 +29,8 @@ name: Fill the VOCALOID collection translation sources
 
 on:
   schedule:
-    - cron: '43 6 * * *'
+    - cron: '43 6 * * 1'      # 每周一：填「翻译来源」
+    - cron: '7 * * * *'       # 每小时：删掉「已经有条目」的行
   push:
     branches: [main]
     paths:
@@ -34,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       args:
-        description: '额外参数（可留空），例如 --limit 30 或 --refresh'
+        description: '额外参数（可留空），例如 --limit 30 或 --refresh 或 --season 2022秋'
         required: false
         default: ''
   repository_dispatch:
@@ -48,9 +53,10 @@ permissions:
   contents: read
 
 jobs:
-  update:
+  fill:
+    # 填来源很慢：冷缓存时要把整页一百多首歌逐首抓一遍（每首几秒到十几秒）
+    if: github.event.schedule == '43 6 * * 1' || github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch'
     runs-on: ubuntu-latest
-    # 冷缓存时要把整页一百多首歌逐首抓一遍（每首几秒到十几秒），给足余量
     timeout-minutes: 90
     env:
       PYTHONIOENCODING: utf-8
@@ -87,8 +93,46 @@ jobs:
 
       - name: Fill the translation sources
         run: |
-          # 每轮最多查 60 首（与 Toolforge 的 translations 任务一致）：GitHub runner
-          # 出口到 AtWiki / B 站都慢，不限量时一轮可能跑到超时；被截住没查的歌
-          # 不进缓存，下一轮继续。workflow_dispatch 里可以用 args 覆盖。
-          python bots/vocaloid_collection_translations.py --write --limit 60 \
+          # 每一届最多查 80 首（与 Toolforge 的 translations 一致）：--limit 是每一届
+          # 的预算，十几届互不挤占；--refresh 保证每周真重查一遍（不受定时抖动影响）。
+          python bots/vocaloid_collection_translations.py --write --limit 80 --refresh \
             --add-missing --max-add 10 $EXTRA_ARGS
+
+  prune:
+    # 每小时删掉「已经有条目」的行；push 时也跑一次（改完就能验证，几十秒）
+    if: github.event.schedule == '7 * * * *' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONIOENCODING: utf-8
+      VOCA_USERNAME: ${{ secrets.VOCA_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pywikibot
+        run: pip install --disable-pip-version-check pywikibot
+
+      - name: Write user-password.py
+        env:
+          USER_PASSWORD_PY: ${{ secrets.USER_PASSWORD_PY }}
+        run: |
+          if [ -z "$USER_PASSWORD_PY" ]; then
+            echo "::error::请先在仓库 Secrets 中配置 USER_PASSWORD_PY"
+            exit 1
+          fi
+          printf '%s\n' "$USER_PASSWORD_PY" > user-password.py
+          chmod 600 user-password.py
+
+      - name: Restore the per-song lookup caches
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: voca-translations-cache-${{ github.run_id }}
+          restore-keys: voca-translations-cache-
+
+      - name: Delete rows whose song already has an article
+        run: python bots/vocaloid_collection_translations.py --write --prune-only

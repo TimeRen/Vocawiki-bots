@@ -203,10 +203,13 @@ fi
 
 # ---------------------------------------------------------------- 5. 可选：干跑
 if [[ "$VERIFY" == 1 ]]; then
-    step "干跑一轮 translations（不保存页面）"
-    run toolforge jobs run translations-check --image python3.13 --wait \
-        --command "./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --dry-run"
-    say "  日志：cat ~/translations-check.out"
+    step "干跑一轮删行（不保存页面，最便宜的一档）"
+    run toolforge jobs run prune-check --image python3.13 --wait \
+        --command "./Vocawiki-bots/deploy/toolforge/run-collection-prune.sh --dry-run"
+    say "  日志：cat ~/prune-check.out"
+    say "  想看填来源那一档（慢，一周才跑一次）："
+    say "  toolforge jobs run translations-check --image python3.13 --wait \\"
+    say "    --command \"./Vocawiki-bots/deploy/toolforge/run-collection-translations.sh --dry-run --limit 3\""
 fi
 
 say ""

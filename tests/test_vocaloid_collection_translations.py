@@ -391,6 +391,49 @@ class LookupTest(TestCase):
                 lyric_url: {"tlyric": {"lyric": ""}}})
         self.assertEqual([], tr.lookup_netease(fetcher, song))
 
+    def test_netease_uncredited_translation_is_not_a_source(self):
+        """用户 2026-10-28：``Self Decision``（id 1945588853）「根本就没有翻译」。
+
+        网易云给没有译者投稿的歌配了一条自己生成的译文：``/api/song/lyric`` 里
+        ``tlyric`` 非空，但既没有 ``transUser`` 也没有 ``lyricUser``（同一张专辑里
+        有人投稿的 ``EDEN`` / ``君に届け`` 都带 ``transUser``）。这种不算翻译来源。
+        """
+        song = Song(0, 0, "20", "Self Decision", "Self Decision", "{{lj|みつばちぼっち}}")
+        search_url = tr.NETEASE_SEARCH.format(kw="Self%20Decision")
+        lyric_url = tr.NETEASE_LYRIC.format(id="1945588853")
+        fetcher = self.FakeFetcher(
+            payloads={search_url: {"result": {"songs": [
+                {"id": 1945588853, "name": "Self Decision", "alias": [], "transNames": [],
+                 "artists": [{"name": "みつばちぼっち"}],
+                 "album": {"name": "Self Decision"}}]}},
+                lyric_url: {"sgc": False, "sfy": True, "qfy": False,
+                            "lrc": {"version": 7, "lyric": "[00:14.39]俄然、純真無垢な素振りをし出した"},
+                            "tlyric": {"version": 2, "lyric": "[00:09.11]突然摆出天真无邪的姿态"},
+                            "code": 200}})
+        self.assertEqual([], tr.lookup_netease(fetcher, song))
+
+    def test_netease_lyric_uploader_counts_as_the_credit(self):
+        """随歌词一起传的译文只有 ``lyricUser``（``エスケープアビス``）：仍按它署名。"""
+        song = Song(0, 0, "20", "エスケープアビス", "エスケープアビス", "みつばちぼっち")
+        search_url = tr.NETEASE_SEARCH.format(kw="%E3%82%A8%E3%82%B9%E3%82%B1%E3%83%BC%E3%83%97%E3%82%A2%E3%83%93%E3%82%B9")
+        lyric_url = tr.NETEASE_LYRIC.format(id="1945580203")
+        fetcher = self.FakeFetcher(
+            payloads={search_url: {"result": {"songs": [
+                {"id": 1945580203, "name": "エスケープアビス", "alias": [], "transNames": [],
+                 "artists": [{"name": "みつばちぼっち"}]}]}},
+                lyric_url: {"tlyric": {"lyric": "[00:01]逃逸深渊"},
+                            "lyricUser": {"nickname": "左右盲"}}})
+        self.assertEqual(["[https://music.163.com/#/song?id=1945580203 网易云音乐(by. 左右盲)]"],
+                         tr.lookup_netease(fetcher, song))
+
+    def test_netease_translator_ignores_placeholder_names(self):
+        """署名写成「暂无」这类占位词时等同没有署名。"""
+        self.assertEqual("白夜", tr.netease_translator({"transUser": {"nickname": "白夜"}}))
+        self.assertEqual("左右盲", tr.netease_translator({"lyricUser": {"nickname": "左右盲"}}))
+        self.assertEqual("", tr.netease_translator({"tlyric": {"lyric": "[00:01]译文"}}))
+        self.assertEqual("", tr.netease_translator({"transUser": {"nickname": "暂无"}}))
+        self.assertEqual("", tr.netease_translator({}))
+
     def test_netease_ignores_other_songs(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
         search_url = tr.NETEASE_SEARCH.format(kw="%E5%8D%83%E6%9C%AC%E6%A1%9C")

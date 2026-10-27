@@ -17,7 +17,10 @@
   ``翻譯：某人`` 作署名。这是最可靠的来源。
 * **网易云音乐**：`/api/search/get` 搜日文名 / 中文名，标题对上**且** P主 出现在
   歌手或专辑名里才用（只有标题对上不够：同名不同曲太多）；`/api/song/lyric` 里有
-  ``tlyric``（确实有译文）才记，译者取 ``transUser``（其次 ``lyricUser``）。
+  ``tlyric``（确实有译文）**且能署名**（``transUser``，其次 ``lyricUser``）才记。
+  没人署名的 ``tlyric`` 是网易云自己配的译文，站点上并不算这首歌有翻译 ——
+  用户 2026-10-28 指出的 ``Self Decision``（id 1945588853）就是这种：接口有
+  ``tlyric``、页面却没有翻译，也没有译者可写。
 * **B站**：先看 voca 条目 Songbox 里的 ``bb_id``（本家投稿），再用站内搜索找
   「歌名 翻译」的视频；**搜来的视频要标题 / 简介里同时出现歌名和 P主**，否则
   ``RITA`` 会搜到 TED 演讲的翻译视频、``亡灵`` 会搜到有声书。对上以后读简介、
@@ -127,7 +130,7 @@ ATWIKI_CACHE = DATA_DIR / "vocaloid_collection_translations_atwiki.pickle"
 CACHE_TTL = 14 * 24 * 3600          # 查到来源的歌：多久重新核对一次
 MISS_TTL = 3 * 24 * 3600            # 没查到来源的歌：3 天后再试（否则页面几周没动静）
 ATWIKI_TTL = 7 * 24 * 3600          # AtWiki 页面清单多久重建一次
-CACHE_VERSION = 5                   # 判定规则变了就 +1，旧缓存自动作废
+CACHE_VERSION = 6                   # 判定规则变了就 +1，旧缓存自动作废
 REQUEST_TIMEOUT = 25
 FAILURE_LIMIT = 5                   # 同一个站连错几次就整轮不再查
 MAX_SOURCES = 3
@@ -1127,6 +1130,21 @@ def netease_lyrics(fetcher: Fetcher, song_id: str) -> Optional[dict]:
     return fetcher.json(NETEASE_LYRIC.format(id=song_id))
 
 
+def netease_translator(payload: dict) -> str:
+    """这条译文的署名：``transUser``，其次 ``lyricUser``；空串 = 没人署名。
+
+    **没人署名的 ``tlyric`` 不算「这首歌有翻译」**（用户 2026-10-28 指出的
+    ``Self Decision``，``id=1945588853``）：网易云会给没有译者投稿的歌配一条自己生成的
+    译文，``/api/song/lyric`` 里照样有 ``tlyric``，但既没有 ``transUser`` 也没有
+    ``lyricUser`` —— 站点上并不算这首歌有翻译，页面上也没有可署名的译者。
+    同一张专辑里有人投稿的几首（``EDEN`` / ``君に届け``）都带着 ``transUser``，
+    ``エスケープアビス`` 这类随歌词一起传的至少还带着 ``lyricUser``，只有
+    ``Self Decision`` 一个署名都没有。
+    """
+    user = payload.get("transUser") or payload.get("lyricUser") or {}
+    return clean_name(user.get("nickname") or "")
+
+
 def netease_titles(candidate: dict) -> set:
     """搜索结果里的所有歌名写法（本名 / alias / transNames）。"""
     names = {title_key(candidate.get("name"))}
@@ -1176,7 +1194,7 @@ def netease_queries(song: Song) -> List[str]:
 
 
 def lookup_netease(fetcher: Fetcher, song: Song) -> List[str]:
-    """歌名对上**且** P主 出现在歌手 / 专辑里才记。
+    """歌名对上、P主 出现在歌手 / 专辑里、**译文有人署名**才记。
 
     只有歌名对上是不够的：``月之花`` 能搜到 Daoko 的 ``月の花``，``言灵`` 能搜到
     V.W.P 的 ``言霊``，都是同名不同曲。网易云上 Vocaloid 曲一般由 P主 自己上传，
@@ -1184,6 +1202,9 @@ def lookup_netease(fetcher: Fetcher, song: Song) -> List[str]:
 
     同一首歌的 remix / cover 不算（``Silver Lining`` 对上了 ``Silver Lining
     (Yandere VIP Remix)``）：歌词可能被改过，宁可不记。
+
+    译文光有 ``tlyric`` 也不算：没人署名的那种是网易云自己配的（见
+    `netease_translator`），站点上不算这首歌有翻译。
     """
     wanted = {title_key(song.title_target), title_key(song.title_display)}
     wanted.discard("")
@@ -1202,8 +1223,9 @@ def lookup_netease(fetcher: Fetcher, song: Song) -> List[str]:
             payload = netease_lyrics(fetcher, str(candidate.get("id")))
             if not payload or not (payload.get("tlyric") or {}).get("lyric"):
                 continue                    # 没有译文：不记（原歌词不是翻译来源）
-            user = payload.get("transUser") or payload.get("lyricUser") or {}
-            translator = clean_name(user.get("nickname") or "")
+            translator = netease_translator(payload)
+            if not translator:
+                continue                    # 没人署名的译文是网易云自己配的，站点上不算有翻译
             return [render_source(NETEASE_SONG.format(id=candidate.get("id")),
                                   "网易云音乐", translator)]
     return []

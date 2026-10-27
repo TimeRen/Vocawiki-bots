@@ -375,7 +375,8 @@ class LookupTest(TestCase):
             payloads={search_url: {"result": {"songs": [
                 {"id": 2386546, "name": "千本桜", "alias": [], "transNames": [],
                  "artists": [{"name": "黒うさP"}]}]}},
-                lyric_url: {"tlyric": {"lyric": "[00:01]千本樱"},
+                lyric_url: {"lrc": {"lyric": "[00:01.00]千本桜\n[00:02.00]夜ニ紛レ\n[00:03.00]君ノ声モ"},
+                            "tlyric": {"lyric": "[00:01.00]千本樱\n[00:02.00]隐于夜色\n[00:03.00]连你的声音"},
                             "transUser": {"nickname": "白夜"}}})
         self.assertEqual(["[https://music.163.com/#/song?id=2386546 网易云音乐(by. 白夜)]"],
                          tr.lookup_netease(fetcher, song))
@@ -391,12 +392,11 @@ class LookupTest(TestCase):
                 lyric_url: {"tlyric": {"lyric": ""}}})
         self.assertEqual([], tr.lookup_netease(fetcher, song))
 
-    def test_netease_uncredited_translation_is_not_a_source(self):
+    def test_netease_translation_must_follow_the_original_timeline(self):
         """用户 2026-10-28：``Self Decision``（id 1945588853）「根本就没有翻译」。
 
-        网易云给没有译者投稿的歌配了一条自己生成的译文：``/api/song/lyric`` 里
-        ``tlyric`` 非空，但既没有 ``transUser`` 也没有 ``lyricUser``（同一张专辑里
-        有人投稿的 ``EDEN`` / ``君に届け`` 都带 ``transUser``）。这种不算翻译来源。
+        网易云给它配了一条 ``tlyric``，但时间轴和原文各唱各的（原文 00:14 起、
+        译文 00:09 起，一路错开）—— 不是这首歌的翻译，不记。
         """
         song = Song(0, 0, "20", "Self Decision", "Self Decision", "{{lj|みつばちぼっち}}")
         search_url = tr.NETEASE_SEARCH.format(kw="Self%20Decision")
@@ -407,10 +407,42 @@ class LookupTest(TestCase):
                  "artists": [{"name": "みつばちぼっち"}],
                  "album": {"name": "Self Decision"}}]}},
                 lyric_url: {"sgc": False, "sfy": True, "qfy": False,
-                            "lrc": {"version": 7, "lyric": "[00:14.39]俄然、純真無垢な素振りをし出した"},
-                            "tlyric": {"version": 2, "lyric": "[00:09.11]突然摆出天真无邪的姿态"},
+                            "lrc": {"version": 7, "lyric": "\n".join([
+                                "[00:00.00] 作词 : みつばちぼっち",
+                                "[00:14.39]俄然、純真無垢な素振りをし出した",
+                                "[00:17.79]暁に燃える時代の号令が",
+                                "[00:20.56]身に余る産声と"])},
+                            "tlyric": {"version": 2, "lyric": "\n".join([
+                                "[00:09.11]突然摆出天真无邪的姿态",
+                                "[00:13.51]破晓时分燃烧的时代号令",
+                                "[00:16.89]与不堪重负的初啼"])},
                             "code": 200}})
         self.assertEqual([], tr.lookup_netease(fetcher, song))
+
+    def test_netease_aligned_translation_without_a_credit_is_a_source(self):
+        """``walker``（id 1914894430）：没有人署名，但 52 行译文和原文一一合上。
+
+        它的时间轴是早期写法 ``[mm:ss:cc]``（秒与百分秒之间是冒号），也要认。
+        """
+        song = Song(0, 0, "58", "walker", "walker", "Mizore")
+        search_url = tr.NETEASE_SEARCH.format(kw="walker")
+        lyric_url = tr.NETEASE_LYRIC.format(id="1914894430")
+        aligned = "\n".join([
+            "[00:00.00] 作词 : Mizore",
+            "[00:01:17]海辺で泣いた 僕らはもう",
+            "[00:03:54]街並みの一部のwalker",
+            "[00:05:88]立ち止まって 向こうの未知"])
+        fetcher = self.FakeFetcher(
+            payloads={search_url: {"result": {"songs": [
+                {"id": 1914894430, "name": "walker", "alias": [], "transNames": [],
+                 "artists": [{"name": "Mizore"}]}]}},
+                lyric_url: {"lrc": {"lyric": aligned},
+                            "tlyric": {"lyric": "\n".join([
+                                "[00:01:17]沉入梦境的我们早已",
+                                "[00:03:54]沦为街景的普通行者",
+                                "[00:05:88]驻足凝望 对岸的未知"])}}})
+        self.assertEqual(["[https://music.163.com/#/song?id=1914894430 网易云音乐]"],
+                         tr.lookup_netease(fetcher, song))
 
     def test_netease_lyric_uploader_counts_as_the_credit(self):
         """随歌词一起传的译文只有 ``lyricUser``（``エスケープアビス``）：仍按它署名。"""
@@ -421,7 +453,10 @@ class LookupTest(TestCase):
             payloads={search_url: {"result": {"songs": [
                 {"id": 1945580203, "name": "エスケープアビス", "alias": [], "transNames": [],
                  "artists": [{"name": "みつばちぼっち"}]}]}},
-                lyric_url: {"tlyric": {"lyric": "[00:01]逃逸深渊"},
+                lyric_url: {"lrc": {"lyric": "[00:01.00]逃げ出したい\n[00:02.00]ここじゃない\n"
+                                             "[00:03.00]まだ見ぬ場所へ"},
+                            "tlyric": {"lyric": "[00:01.00]想要逃开\n[00:02.00]不是这里\n"
+                                                "[00:03.00]去往未曾见过的地方"},
                             "lyricUser": {"nickname": "左右盲"}}})
         self.assertEqual(["[https://music.163.com/#/song?id=1945580203 网易云音乐(by. 左右盲)]"],
                          tr.lookup_netease(fetcher, song))
@@ -461,6 +496,54 @@ class LookupTest(TestCase):
             {"id": 1, "name": "月之花", "alias": [], "transNames": [],
              "artists": [{"name": "某人"}]}]}}})
         self.assertEqual([], tr.lookup_netease(fetcher, song))
+
+
+class TranslationAlignmentTest(TestCase):
+    """`timed_lyrics` / `translation_matches_original`：译文要和原文对照得上。"""
+
+    def test_timed_lyrics_reads_both_stamp_formats(self):
+        """``[mm:ss.xx]`` 与早期写法 ``[mm:ss:cc]`` 都要认（walker / Day Dreamer! 是后者）。"""
+        self.assertEqual(
+            [(14390, "俄然、純真無垢な素振りをし出した"), (1170, "海辺で泣いた"),
+             (5880, "立ち止まって")],
+            tr.timed_lyrics("[00:14.39]俄然、純真無垢な素振りをし出した\n"
+                            "[00:01:17]海辺で泣いた\n"
+                            "[00:05:88]立ち止まって"))
+
+    def test_timed_lyrics_skips_metadata_and_credits(self):
+        """``[by:]`` 这类元信息、以及「作词 : X」这种署名行都不是歌词。"""
+        text = ("[by:夏树遥]\n[ti:walker]\n[00:00.00] 作词 : Mizore\n"
+                "[00:00.58] 作曲 : Mizore\n[00:01.00]本当の歌詞")
+        self.assertEqual([(1000, "本当の歌詞")], tr.timed_lyrics(text))
+
+    def test_aligned_translation_matches(self):
+        self.assertTrue(tr.translation_matches_original({
+            "lrc": {"lyric": "[00:01.00]あ\n[00:02.00]い\n[00:03.00]う"},
+            "tlyric": {"lyric": "[00:01.00]啊\n[00:02.00]咿\n[00:03.00]呜"}}))
+
+    def test_shifted_translation_does_not_match(self):
+        """``Self Decision``：译文整体早了 5 秒、后面一路错开。"""
+        self.assertFalse(tr.translation_matches_original({
+            "lrc": {"lyric": "[00:14.39]あ\n[00:17.79]い\n[00:20.56]う\n[00:22.67]え"},
+            "tlyric": {"lyric": "[00:09.11]啊\n[00:13.51]咿\n[00:16.89]呜\n[00:19.42]诶"}}))
+
+    def test_merged_lines_are_allowed(self):
+        """译者把原文每两行并成一行译（对得上一半）仍算有译文。"""
+        self.assertTrue(tr.translation_matches_original({
+            "lrc": {"lyric": "[00:01.00]あ\n[00:02.00]い\n[00:03.00]う\n[00:04.00]え"},
+            "tlyric": {"lyric": "[00:01.00]啊咿\n[00:03.00]呜诶"}}))
+
+    def test_too_few_lines_does_not_match(self):
+        """纯音乐 / 只有署名行时没有可对照的东西。"""
+        self.assertFalse(tr.translation_matches_original({
+            "lrc": {"lyric": "[00:00.00] 作词 : 某人\n[00:01.00]あ"},
+            "tlyric": {"lyric": "[00:01.00]啊"}}))
+        self.assertFalse(tr.translation_matches_original({}))
+        self.assertFalse(tr.translation_matches_original({"tlyric": {"lyric": ""}}))
+
+    def test_missing_translation_does_not_match(self):
+        self.assertFalse(tr.translation_matches_original({
+            "lrc": {"lyric": "[00:01.00]あ\n[00:02.00]い\n[00:03.00]う"}}))
 
 
 class BilibiliTest(TestCase):

@@ -17,10 +17,12 @@
   ``翻譯：某人`` 作署名。这是最可靠的来源。
 * **网易云音乐**：`/api/search/get` 搜日文名 / 中文名，标题对上**且** P主 出现在
   歌手或专辑名里才用（只有标题对上不够：同名不同曲太多）；`/api/song/lyric` 里有
-  ``tlyric``（确实有译文）**且能署名**（``transUser``，其次 ``lyricUser``）才记。
-  没人署名的 ``tlyric`` 是网易云自己配的译文，站点上并不算这首歌有翻译 ——
-  用户 2026-10-28 指出的 ``Self Decision``（id 1945588853）就是这种：接口有
-  ``tlyric``、页面却没有翻译，也没有译者可写。
+  ``tlyric``、而且**译文和原文对得上**（同一句落在同一个时间点，
+  `translation_matches_original`）才记。网易云给没有译者投稿的歌也会配一条
+  ``tlyric``，但那和原文各唱各的 —— 用户 2026-10-28 指出的 ``Self Decision``
+  （id 1945588853）46 行没有一行对得上，站点上就是「没有翻译」；有译文的
+  ``walker`` / ``liar`` 虽然没人署名，52 行却一一合上。署名只用来写
+  ``(by. 译者)``，不参与判断。
 * **B站**：先看 voca 条目 Songbox 里的 ``bb_id``（本家投稿），再用站内搜索找
   「歌名 翻译」的视频；**搜来的视频要标题 / 简介里同时出现歌名和 P主**，否则
   ``RITA`` 会搜到 TED 演讲的翻译视频、``亡灵`` 会搜到有声书。对上以后读简介、
@@ -102,6 +104,7 @@ Everything is a dry run unless ``--write`` is given.
 from __future__ import annotations
 
 import argparse
+import bisect
 import http.cookiejar
 import json
 import pickle
@@ -131,7 +134,7 @@ ATWIKI_CACHE = DATA_DIR / "vocaloid_collection_translations_atwiki.pickle"
 CACHE_TTL = 14 * 24 * 3600          # 查到来源的歌：多久重新核对一次
 MISS_TTL = 3 * 24 * 3600            # 没查到来源的歌：3 天后再试（否则页面几周没动静）
 ATWIKI_TTL = 7 * 24 * 3600          # AtWiki 页面清单多久重建一次
-CACHE_VERSION = 6                   # 判定规则变了就 +1，旧缓存自动作废
+CACHE_VERSION = 7                   # 判定规则变了就 +1，旧缓存自动作废
 REQUEST_TIMEOUT = 25
 FAILURE_LIMIT = 5                   # 同一个站连错几次就整轮不再查
 MAX_SOURCES = 3
@@ -169,6 +172,17 @@ NICO_UPLOAD_RE = re.compile(r"<first_retrieve>(\d{4})-\d{2}-\d{2}")
 NETEASE_SEARCH = "https://music.163.com/api/search/get?s={kw}&type=1&limit=10"
 NETEASE_LYRIC = "https://music.163.com/api/song/lyric?os=pc&id={id}&lv=-1&kv=-1&tv=-1"
 NETEASE_SONG = "https://music.163.com/#/song?id={id}"
+
+# 译文是不是「和原文对得上」（同一句、同一个时间点）：网易云对没有译者投稿的歌也会配一条
+# `tlyric`，但它的时间轴和原文各唱各的（`Self Decision`，id 1945588853：46 行译文没有
+# 一行落得回去，开头就差了 5 秒）。有人投稿的 `walker` / `liar` 则 52 行全部合得上。
+LYRIC_STAMP_RE = re.compile(r"^\[(\d+):(\d+)(?:[.:](\d+))?\]\s*(.*)$")
+LYRIC_META_RE = re.compile(r"^\[(?:by|ti|ar|al|offset|length|re|ve|total)\s*[:：]", re.I)
+LYRIC_CREDIT_RE = re.compile(r"作\s*[词詞曲]|編\s*曲|编\s*曲|調\s*教|调\s*教|混\s*音|"
+                             r"曲\s*[绘繪]|母\s*带|演\s*唱|歌\s*[:：]")
+TRANSLATION_MATCH_RATIO = 0.5          # 译文行里至少一半要落在原文的时间点上
+TRANSLATION_MIN_LINES = 3              # 行数太少（纯音乐 / 只有署名行）判断不了
+TRANSLATION_MATCH_TOLERANCE = 200      # 同一时间点的允许误差（毫秒）
 
 BILIBILI_SEARCH = ("https://api.bilibili.com/x/web-interface/search/type"
                    "?search_type=video&keyword={kw}&page=1")
@@ -1145,18 +1159,75 @@ def netease_lyrics(fetcher: Fetcher, song_id: str) -> Optional[dict]:
 
 
 def netease_translator(payload: dict) -> str:
-    """这条译文的署名：``transUser``，其次 ``lyricUser``；空串 = 没人署名。
+    """这条译文的署名：``transUser``，其次 ``lyricUser``；空串 = 没有署名。
 
-    **没人署名的 ``tlyric`` 不算「这首歌有翻译」**（用户 2026-10-28 指出的
-    ``Self Decision``，``id=1945588853``）：网易云会给没有译者投稿的歌配一条自己生成的
-    译文，``/api/song/lyric`` 里照样有 ``tlyric``，但既没有 ``transUser`` 也没有
-    ``lyricUser`` —— 站点上并不算这首歌有翻译，页面上也没有可署名的译者。
-    同一张专辑里有人投稿的几首（``EDEN`` / ``君に届け``）都带着 ``transUser``，
-    ``エスケープアビス`` 这类随歌词一起传的至少还带着 ``lyricUser``，只有
-    ``Self Decision`` 一个署名都没有。
+    **署名只决定写不写 ``(by. 译者)``，不用来判断有没有译文**（用户 2026-10-28）：
+    ``walker`` / ``liar`` 这类早期投稿的译文没有 ``transUser``，却是一一对照的译文；
+    有没有译文看 `translation_matches_original()`。占位词（「暂无」等）由 `clean_name` 滤掉。
     """
     user = payload.get("transUser") or payload.get("lyricUser") or {}
     return clean_name(user.get("nickname") or "")
+
+
+def timed_lyrics(text: str) -> List[Tuple[int, str]]:
+    """LRC 文本 → ``[(毫秒, 歌词行)]``；``[by:]`` 这类元信息与「作词 : X」署名行不算。
+
+    网易云有两种时间轴写法，两种都要认：``[mm:ss.xx]``（多数）和 ``[mm:ss:cc]``
+    （``walker`` / ``Day Dreamer!`` 这类早期上传，秒与百分秒之间是**冒号**）——
+    只认一种的话，有译文的歌会被判成「译文对不上」。
+    """
+    rows: List[Tuple[int, str]] = []
+    for line in (text or "").split("\n"):
+        line = line.strip()
+        if not line or LYRIC_META_RE.match(line):
+            continue
+        match = LYRIC_STAMP_RE.match(line)
+        if not match:
+            continue
+        minutes, seconds, fraction, body = match.groups()
+        body = body.strip()
+        if not body or LYRIC_CREDIT_RE.search(body):
+            continue
+        millis = int(minutes) * 60000 + int(seconds) * 1000
+        fraction = (fraction or "")[:3]
+        if fraction:                                   # .39 = 390ms；:17 = 170ms
+            millis += int(fraction) * 10 ** (3 - len(fraction))
+        rows.append((millis, body))
+    return rows
+
+
+def _near_time(times: Sequence[int], value: int) -> bool:
+    """``value``（毫秒）附近 ``TRANSLATION_MATCH_TOLERANCE`` 内有没有原文的时间点。"""
+    index = bisect.bisect_left(times, value)
+    for probe in (index - 1, index):
+        if 0 <= probe < len(times) and abs(times[probe] - value) <= TRANSLATION_MATCH_TOLERANCE:
+            return True
+    return False
+
+
+def translation_matches_original(payload: dict) -> bool:
+    """``tlyric`` 是不是**和原文对照**的译文（用户 2026-10-28 定的口径）。
+
+    判定只看时间轴：译文行要落在原文某一行的同一时间点上（允许
+    ``TRANSLATION_MATCH_TOLERANCE`` 的误差），至少一半对得上才算。
+
+    * ``Self Decision``（1945588853）：46 行译文**没有一行**对得上原文（开头差 5 秒，
+      后面一路错开）—— 页面主人说「这首根本就没有翻译」，就该当没有；
+    * ``walker``（1914894430）/ ``liar``：52 行一一合上（旧格式 ``[mm:ss:cc]``），
+      虽然没人署名，但它们确实是翻译。
+
+    允许译者合并 / 拆分行，所以门槛是一半而不是全部；行数太少（纯音乐、只有署名行）
+    一律不算，因为没有可对照的东西。
+    """
+    original = timed_lyrics((payload.get("lrc") or {}).get("lyric", ""))
+    translated = timed_lyrics((payload.get("tlyric") or {}).get("lyric", ""))
+    # 原文太短（纯音乐、只有署名行）就没有可对照的东西；译文至少要两行，
+    # 一行的话对上对不上都说明不了什么（译者也可能几行并成一行译）。
+    if len(original) < TRANSLATION_MIN_LINES or len(translated) < 2:
+        return False
+    times = sorted(time for time, _ in original)
+    matched = sum(1 for time, _ in translated if _near_time(times, time))
+    return matched / len(translated) >= TRANSLATION_MATCH_RATIO
 
 
 def netease_titles(candidate: dict) -> set:
@@ -1208,7 +1279,7 @@ def netease_queries(song: Song) -> List[str]:
 
 
 def lookup_netease(fetcher: Fetcher, song: Song) -> List[str]:
-    """歌名对上、P主 出现在歌手 / 专辑里、**译文有人署名**才记。
+    """歌名对上、P主 出现在歌手 / 专辑里、**译文和原文对照得上**才记。
 
     只有歌名对上是不够的：``月之花`` 能搜到 Daoko 的 ``月の花``，``言灵`` 能搜到
     V.W.P 的 ``言霊``，都是同名不同曲。网易云上 Vocaloid 曲一般由 P主 自己上传，
@@ -1217,8 +1288,9 @@ def lookup_netease(fetcher: Fetcher, song: Song) -> List[str]:
     同一首歌的 remix / cover 不算（``Silver Lining`` 对上了 ``Silver Lining
     (Yandere VIP Remix)``）：歌词可能被改过，宁可不记。
 
-    译文光有 ``tlyric`` 也不算：没人署名的那种是网易云自己配的（见
-    `netease_translator`），站点上不算这首歌有翻译。
+    译文光有 ``tlyric`` 也不算：要看它和原文对不对得上（见
+    `translation_matches_original`）——``Self Decision`` 那种各唱各的不算，
+    ``walker`` 这种没人署名但一一对照的算。
     """
     wanted = {title_key(song.title_target), title_key(song.title_display)}
     wanted.discard("")
@@ -1237,11 +1309,10 @@ def lookup_netease(fetcher: Fetcher, song: Song) -> List[str]:
             payload = netease_lyrics(fetcher, str(candidate.get("id")))
             if not payload or not (payload.get("tlyric") or {}).get("lyric"):
                 continue                    # 没有译文：不记（原歌词不是翻译来源）
-            translator = netease_translator(payload)
-            if not translator:
-                continue                    # 没人署名的译文是网易云自己配的，站点上不算有翻译
+            if not translation_matches_original(payload):
+                continue                    # 译文和原文对不上：不是这首歌的翻译
             return [render_source(NETEASE_SONG.format(id=candidate.get("id")),
-                                  "网易云音乐", translator)]
+                                  "网易云音乐", netease_translator(payload))]
     return []
 
 

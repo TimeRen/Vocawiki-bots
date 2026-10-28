@@ -1688,6 +1688,90 @@ class SeasonHeadingTest(TestCase):
         self.assertTrue(any("2023春" in line for line in lines))
 
 
+class EmptyTableBootstrapTest(TestCase):
+    """表格只有表头的赛季（2022秋 就是这样）也要能补行。
+
+    2026-10-28 页面主人的截图：`== ボカコレ2022秋 ==` 下面只有 `colspan` 表头，
+    一行数据都没有 —— 机器人以前只在「已存在的行」里填来源，所以那一届永远是空的。
+    """
+
+    PAGE = """== ボカコレ2022秋 ==
+{| class="wikitable " style="text-align:center;"
+|-
+! colspan="6"|TOP100 !! colspan="6"|ROOKIE
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|}
+"""
+    CONTRIB = {"ボカコレ2022秋": {"TOP100": {5: ("千本桜", False), 6: ("某曲", False)},
+                                  "ROOKIE": {1: ("别曲", False)}}}
+
+    def test_the_empty_table_still_reports_both_tracks(self):
+        self.assertEqual(["TOP100", "ROOKIE"],
+                         tr.section_sides(tr.season_sections(self.PAGE)[0][1]))
+
+    def test_missing_songs_sees_the_candidates(self):
+        missing = tr.missing_songs(self.PAGE, self.CONTRIB)
+        self.assertEqual({"千本桜", "某曲", "别曲"},
+                         {song.title for song in missing})
+
+    def test_a_netease_hit_produces_a_row(self):
+        data = {"contrib": self.CONTRIB, "titles": {}}
+        with patch.object(tr, "netease_candidate",
+                          side_effect=lambda fetcher, title:
+                          ("[u 网易云音乐(by. 光明若叶睦)]", "buzzG")
+                          if title == "千本桜" else None):
+            text, added = tr.add_missing_entries(None, object(), self.PAGE, {},
+                                                 data, 10, False)
+        self.assertEqual(1, added)
+        self.assertIn("[[千本桜]]", text)
+        self.assertIn("buzzG", text)
+        self.assertIn("[u 网易云音乐(by. 光明若叶睦)]", text)
+        self.assertIn("未创建", text)
+
+    def test_a_song_without_a_producer_is_not_added(self):
+        data = {"contrib": self.CONTRIB, "titles": {}}
+        with patch.object(tr, "netease_candidate", return_value=None):
+            text, added = tr.add_missing_entries(None, object(), self.PAGE, {},
+                                                 data, 10, False)
+        self.assertEqual(0, added)
+        self.assertEqual(self.PAGE, text)
+
+    def test_the_season_filter_limits_what_gets_added(self):
+        contrib = {"ボカコレ2022秋": {"TOP100": {5: ("千本桜", False)}},
+                   "ボカコレ2023春": {"TOP100": {5: ("另一首", False)}}}
+        page = self.PAGE + "\n== ボカコレ2023春 ==\n" + self.PAGE.split("\n", 1)[1]
+        asked = []
+
+        def fake(fetcher, title):
+            asked.append(title)
+            return ("[u 网易云音乐]", "P主")
+
+        with patch.object(tr, "netease_candidate", side_effect=fake):
+            tr.add_missing_entries(None, object(), page, {},
+                                   {"contrib": contrib, "titles": {}}, 10, False,
+                                   ["2022秋"])
+        self.assertEqual(["千本桜"], asked)
+
+
+class VocalSynthTest(TestCase):
+    def test_vocal_synths_are_not_producers(self):
+        for name in ("初音ミク", "鏡音リン", "IA", "flower", "可不", "GUMI"):
+            self.assertTrue(tr.is_vocal_synth(name), name)
+
+    def test_real_producers_are_kept(self):
+        for name in ("歩く人", "Sohbana", "buzzG", "Mizore", "picco"):
+            self.assertFalse(tr.is_vocal_synth(name), name)
+
+    def test_a_netease_artist_list_with_a_synth_and_a_producer(self):
+        candidate = {"artists": [{"name": "初音ミク"}, {"name": "buzzG"}]}
+        self.assertEqual("buzzG", tr.producer_from_netease(candidate))
+
+    def test_a_netease_artist_list_with_only_synths_gives_nothing(self):
+        candidate = {"artists": [{"name": "初音ミク"}, {"name": "IA"}]}
+        self.assertEqual("", tr.producer_from_netease(candidate))
+
+
 class SeasonGroupsTest(TestCase):
     def test_groups_keep_the_page_order(self):
         songs = tr.songs_from(TWO_SEASONS)

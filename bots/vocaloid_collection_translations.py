@@ -883,7 +883,7 @@ def build_row(sides: int, side: int, values: Sequence[str]) -> str:
 def insert_row(text: str, season: str, track: str, rank: int, row: str) -> str:
     """把一行插进某赛季某赛道，按名次排序；找不到位置就插在表格末尾。"""
     marks = [(m.start(), m.end()) for m in SEASON_HEADING_RE.finditer(text)]
-    names = [m.group(1) for m in SEASON_HEADING_RE.finditer(text)]
+    names = [normalise_season(m.group(1)) for m in SEASON_HEADING_RE.finditer(text)]
     if season not in names:
         return text
     index = names.index(season)
@@ -2096,9 +2096,72 @@ def atwiki_song(fetcher: Fetcher, index: Dict[str, str],
     return pid, translator, producer
 
 
+# 歌姬 / 音源名：网易云的「歌手」位常常挂的是音源而不是 P主，遇到这些就不当 P主 用
+VOCAL_SYNTHS = (
+    "初音ミク", "初音未来", "初音未來", "鏡音リン", "鏡音レン", "巡音ルカ", "MEIKO",
+    "KAITO", "GUMI", "IA", "可不", "星界", "flower", "v flower", "鳴花ヒメ",
+    "鳴花ミコト", "裏声クリスタル", "ずんだもん", "東北ずん子", "重音テト", "重音teto",
+    "弱音ハク", "亞北ネル", "鏡音", "ミク", "リン", "レン", "ルカ", "ボカロ",
+    "vocaloid", "cevio", "ボイスロイド", "synthv", "synthesizer v",
+)
+
+
+def is_vocal_synth(name: str) -> bool:
+    """这个名字是不是音源 / 歌姬名（而不是 P主）。"""
+    key = person_key(name)
+    if not key:
+        return True
+    return any(key == person_key(item) or person_key(item) in key
+               for item in VOCAL_SYNTHS)
+
+
+def producer_from_netease(candidate: dict) -> str:
+    """网易云搜索结果里的 P主：取第一个不是音源的歌手名（没有就空）。"""
+    for artist in candidate.get("artists") or []:
+        name = clean_name(str(artist.get("name") or ""))
+        if name and not is_vocal_synth(name):
+            return name
+    return ""
+
+
+def netease_candidate(fetcher: Fetcher, title: str) -> Optional[Tuple[str, str]]:
+    """「搜集库没录入」的歌：网易云能不能确认它有译文、以及 P主 是谁 → ``(来源, P主)``。
+
+    这条是给**表格是空的**赛季补行用的：活动清单告诉我们「这一届第 N 名是这首歌」，
+    但没有 P主；网易云上这类投稿由 P主 自己上传，歌手位就是 P主，所以拿它当 P主。
+    判据一条都不放宽：歌名对上、译文和原文对得上、歌手不是音源名。
+    """
+    wanted = {title_key(title)}
+    wanted.discard("")
+    if not wanted or is_variant_title(title):
+        return None
+    for candidate in netease_search(fetcher, str(title or "")):
+        if not (netease_titles(candidate) & wanted):
+            continue
+        if is_variant_title(str(candidate.get("name") or "")):
+            continue
+        producer = producer_from_netease(candidate)
+        if not producer:
+            continue                    # 只有音源名：P主 说不清，不补这一行
+        payload = netease_lyrics(fetcher, str(candidate.get("id")))
+        if not payload or not (payload.get("tlyric") or {}).get("lyric"):
+            continue
+        if not translation_matches_original(payload):
+            continue
+        return (render_source(NETEASE_SONG.format(id=candidate.get("id")),
+                              "网易云音乐", netease_translator(payload)), producer)
+    return None
+
+
 def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str],
-                        data: Dict, max_add: int, write: bool) -> Tuple[str, int]:
-    """把「外站有翻译、搜集库没录入」的歌补进对应赛季的表格 → ``(新文本, 补了几行)``。"""
+                        data: Dict, max_add: int, write: bool,
+                        wanted: Sequence[str] = ()) -> Tuple[str, int]:
+    """把「外站有翻译、搜集库没录入」的歌补进对应赛季的表格 → ``(新文本, 补了几行)``。
+
+    表格是空的赛季（页面只有表头、一行数据都没有）也靠它补：``missing_songs`` 会说
+    这一届有 200 首没录入，逐首去核实哪些真的外站有译文。
+    ``wanted`` 给了就只补这几届。
+    """
     contrib = data.get("contrib") or {}
     season_titles = {season: set(titles) for season, titles
                      in (data.get("titles") or {}).items()}
@@ -2106,39 +2169,59 @@ def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str]
         pywikibot.warning("拿不到活动清单，本轮不补录")
         return text, 0
     missing = missing_songs(text, contrib)
+    if wanted:
+        tokens = {season_token(word) for word in wanted}
+        missing = [song for song in missing if season_token(song.season) in tokens]
     totals = overall_ranks(contrib)
     pywikibot.output(f"活动清单里有 {len(missing)} 首未录入搜集库（有条目 / 已录入的不算）")
     added = 0
     for song in missing:
         if added >= max_add:
             break
-        if title_key(song.title) not in season_titles.get(song.season, set()):
-            continue                    # 本赛季大家族模板里没有这首歌：不敢认
-        found = atwiki_song(fetcher, index, song.title, song.season)
-        if not found:
-            continue
-        pid, translator, producer = found
+        producer = ""
+        source = ""
+        translated = False
+        if USE_ATWIKI:
+            if title_key(song.title) not in season_titles.get(song.season, set()):
+                continue                # 本赛季大家族模板里没有这首歌：不敢认
+            found = atwiki_song(fetcher, index, song.title, song.season)
+            if found:
+                pid, translator, producer = found
+                if producer:
+                    source = render_source(ATWIKI_PAGE.format(pid=pid),
+                                           "VOCALOID中文歌词wiki", translator)
+                    translated = True
+        if not translated:
+            # 歌词wiki 暂停时改看网易云：确认有译文，并从歌手位拿到 P主
+            try:
+                hit = netease_candidate(fetcher, song.title)
+            except Exception as exc:    # noqa: BLE001 - 单首查不到不影响别的
+                pywikibot.warning(f"网易云核实失败（{song.title}）：{exc}")
+                hit = None
+            if not hit:
+                continue
+            source, producer = hit
         if not producer:
             continue                    # 没 P主 就没法补行（P主 那一列是必要的）
-        sides = section_sides(dict(season_sections(text))[song.season])
+        bodies = dict(season_sections(text))
+        if song.season not in bodies:
+            continue
+        body = bodies[song.season]
+        sides = section_sides(body)
         if song.track not in sides:
             continue
         side = sides.index(song.track)
-        body = dict(season_sections(text))[song.season]
         rank = str(song.rank)
         overall = totals.get((song.season, title_key(song.title)))
         if song.track == "ROOKIE" and overall and section_uses_note(body, side):
             rank = "{{注|%d|总榜为第%d}}" % (song.rank, overall)
         values = [rank, render_song_title(song.title), render_producer(producer),
-                  "{{color|#FF0000|未创建}}",
-                  render_source(ATWIKI_PAGE.format(pid=pid), "VOCALOID中文歌词wiki",
-                                translator),
-                  ""]
+                  "{{color|#FF0000|未创建}}", source, ""]
         row = build_row(len(sides), side, values)
         text = insert_row(text, song.season, song.track, song.rank, row)
         added += 1
         pywikibot.output(f"  + {song.season} {song.track} {song.rank} {song.title}"
-                         f"（{producer}，译文 {translator or '未署名'}）")
+                         f"（{producer}）← {source}")
     return text, added
 
 
@@ -2575,21 +2658,23 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     text = apply_fills(text, fills)
     added = 0
     dropped: List[str] = []
-    if add_missing and not wanted and fill:
+    if add_missing and fill:
         # 清理配错的旧行只做「证明它错」的核对（投稿年对不上），不新增任何内容，
         # 所以 ``USE_ATWIKI = False`` 时也照跑——那是删错，不是收录。
-        text, dropped = drop_wrong_rows(text, fetcher)
-        for note in dropped:
-            pywikibot.output(f"  - 配错的行：{note}")
+        if not wanted:
+            text, dropped = drop_wrong_rows(text, fetcher)
+            for note in dropped:
+                pywikibot.output(f"  - 配错的行：{note}")
+        # --add-missing 是显式要求补行，所以 --season 只限定范围、不取消这一步
+        # （2026-10-28：2022秋 的表格是空的，不补行那届永远没有可填的格子）。
+        try:
+            text, added = add_missing_entries(site, fetcher, text, index,
+                                              season_data(site, fetcher, refresh),
+                                              max_add, write, wanted)
+        except Exception as exc:        # noqa: BLE001 - 补录失败不影响填来源
+            pywikibot.warning(f"补录未录入的曲目失败：{exc}")
         if not USE_ATWIKI:
-            pywikibot.output("中文歌词wiki 已暂停收录：本轮不补录新行")
-        else:
-            try:
-                text, added = add_missing_entries(site, fetcher, text, index,
-                                                  season_data(site, fetcher, refresh),
-                                                  max_add, write)
-            except Exception as exc:    # noqa: BLE001 - 补录失败不影响填来源
-                pywikibot.warning(f"补录未录入的曲目失败：{exc}")
+            pywikibot.output("中文歌词wiki 已暂停收录：补行时只看网易云等外站")
     if prune and not wanted:
         # 只清了一侧的行会把那一侧空出半格：同侧后面的曲目上移补位，再把整行
         # 空白的空壳删掉，表格中间就不会留一条空白带（2026-10-25 反馈）。

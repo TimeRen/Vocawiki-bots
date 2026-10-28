@@ -2875,9 +2875,12 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
                 pywikibot.output(f"  - 配错的行：{note}")
         # --add-missing 是显式要求补行，所以 --season 只限定范围、不取消这一步
         # （2026-10-28：2022秋 的表格是空的，不补行那届永远没有可填的格子）。
+        # 补行要读大家族模板拿**日文原名**（中文译名搜网易云会撞同名歌），
+        # 所以这里显式要求 with_titles=True——USE_ATWIKI 停用时默认是不读的。
         try:
             text, added = add_missing_entries(site, fetcher, text, index,
-                                              season_data(site, fetcher, refresh),
+                                              season_data(site, fetcher, refresh,
+                                                          with_titles=True),
                                               max_add, write, wanted)
         except Exception as exc:        # noqa: BLE001 - 补录失败不影响填来源
             pywikibot.warning(f"补录未录入的曲目失败：{exc}")

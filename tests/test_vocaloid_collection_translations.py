@@ -2159,6 +2159,61 @@ class NavboxPairsTest(TestCase):
         self.assertNotIn(tr.title_key("ORDER"), pairs)
 
 
+class JapaneseNameWiringTest(TestCase):
+    """补行那条路要真的把日文原名交给网易云（2026-10-28：中文译名撞同名歌）。"""
+
+    PAGE = """== ボカコレ2022秋 ==
+{| class="wikitable"
+|-
+! colspan="6"|TOP100
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|}
+"""
+    CONTRIB = {"ボカコレ2022秋": {"TOP100": {41: ("想象", False)}}}
+    NAVBOX = "{{Navbox|list1 = {{lj|[[想象|想像]]}}}}"
+
+    def test_season_data_is_read_with_titles(self):
+        called = {}
+
+        def fake_season_data(site, fetcher, refresh=False, with_titles=None):
+            called["with_titles"] = with_titles
+            return {"contrib": self.CONTRIB, "titles": {}, "japanese": {}}
+
+        class FakePage:
+            def __init__(self, site, title):
+                self.text = JapaneseNameWiringTest.PAGE
+
+            def save(self, **kwargs):
+                pass
+
+        with patch.object(tr, "Page", FakePage), \
+                patch.object(tr, "load_cache", return_value={}), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "season_data", side_effect=fake_season_data), \
+                patch.object(tr, "add_missing_entries", return_value=(self.PAGE, 0)):
+            tr.run_once(type("S", (), {"logged_in": lambda self: True})(),
+                        write=False, fetcher=object(), add_missing=True,
+                        prune=False, fill=True)
+        self.assertTrue(called["with_titles"], "补行必须读大家族模板（日文原名在那里）")
+
+    def test_the_japanese_name_reaches_netease(self):
+        seen = []
+
+        def fake_candidate(fetcher, title, japanese=""):
+            seen.append((title, japanese))
+            return None
+
+        data = {"contrib": self.CONTRIB, "titles": {},
+                "japanese": {"ボカコレ2022秋":
+                             {tr.title_key("想象"): "想像"}}}
+        with patch.object(tr, "netease_candidate", side_effect=fake_candidate), \
+                patch.object(tr, "song_has_article", return_value=False):
+            tr.add_missing_entries(None, object(), self.PAGE, {}, data, 10, False)
+        self.assertEqual([("想象", "想像")], seen)
+
+
 class SeasonGroupsTest(TestCase):
     def test_groups_keep_the_page_order(self):
         songs = tr.songs_from(TWO_SEASONS)

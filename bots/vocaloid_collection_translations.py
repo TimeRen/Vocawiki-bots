@@ -191,18 +191,33 @@ BILIBILI_REPLY = "https://api.bilibili.com/x/v2/reply?type=1&oid={oid}&ps=20&pn=
 BILIBILI_DANMAKU = "https://api.bilibili.com/x/v1/dm/list.so?oid={cid}"
 BILIBILI_VIDEO = "https://www.bilibili.com/video/{bvid}"
 
-# 巴哈姆特：作品页写作 ``home.gamer.com.tw/artwork.php?sn=…``，站内搜索以前只能在
-# 浏览器里点（B站简介里的外链才带得进来）。搜索页可以按下面这些地址抓，谁先回出
-# 带 ``sn`` 的链接就用谁（``bahamut_search`` 会记住这一轮管用的那个）。
+# 巴哈姆特：作品页有两种写法——新的 ``home.gamer.com.tw/artwork.php?sn=…`` 与旧的
+# ``home.gamer.com.tw/creationDetail.php?sn=…``，两种都算（同一篇文章）。
+#
+# 站内搜索是「基址 × 参数名」的组合，不是单个固定地址：``search.gamer.com.tw`` 与
+# ``home.gamer.com.tw/search.php`` 这两套吃的参数名不一样（``q`` / ``keyword`` /
+# ``kw``），而且结果是不是服务端渲染出来的也会变。所以这里做成矩阵，谁先扫出
+# ``sn`` 链接就用谁，结论写进 ``data/bahamut_search.pickle``，之后不再乱试
+# （2026-10-28 实测：``?q=`` 只回 200 + 85KB 的空壳，一个链接都没有）。
 BAHAMUT_ARTWORK = "https://home.gamer.com.tw/artwork.php?sn={sn}"
-BAHAMUT_ARTWORK_RE = re.compile(r"home\.gamer\.com\.tw/artwork\.php\?sn=(\d+)")
-BAHAMUT_SEARCH_URLS = (
-    "https://search.gamer.com.tw/?q={kw}&p=1&t=3",       # 站内搜索 · 創作
-    "https://search.gamer.com.tw/?q={kw}&p=1",           # 站内搜索 · 全部
-    "https://search.gamer.com.tw/api/search?q={kw}&p=1&size=20",
-    "https://home.gamer.com.tw/search.php?q={kw}",       # 小屋创作搜索
+BAHAMUT_LINK_RE = re.compile(
+    r"home\.gamer\.com\.tw/(?:artwork|creationDetail)\.php\?sn=(\d+)")
+BAHAMUT_SEARCH_BASES = (
+    "https://search.gamer.com.tw/?{param}={kw}&p=1&t=3",     # 站内搜索 · 創作
+    "https://search.gamer.com.tw/?{param}={kw}&p=1",          # 站内搜索 · 全部
+    "https://home.gamer.com.tw/search.php?{param}={kw}",      # 小屋创作搜索
+    "https://home.gamer.com.tw/creationSearch.php?{param}={kw}",
 )
+BAHAMUT_SEARCH_PARAMS = ("q", "keyword", "kw")
 BAHAMUT_SEARCH_MAX = 4              # 站内搜索命中的作品页最多核对几个
+BAHAMUT_SEARCH_CACHE = DATA_DIR / "bahamut_search.pickle"
+BAHAMUT_SEARCH_TTL = 30 * 24 * 3600  # 记住的地址 30 天内不再重找
+# 站内搜索是前端渲染的：结果由 XHR 拉回来，接口地址只写在打包后的 JS 里。这两条
+# 正则用来「照页面引用的脚本找接口」（`bahamut_api_templates`）。
+SCRIPT_SRC_RE = re.compile(r"<script[^>]+src=[\"']([^\"']+)[\"']", re.I)
+API_HINT_RE = re.compile(
+    r"""["']((?:https?:)?//[^"'\s]*?(?:api|ajax)[^"'\s]*|/?[A-Za-z0-9_\-./]*(?:api|ajax)[A-Za-z0-9_\-./]*)["']""",
+    re.I)
 
 
 # 译者署名的写法：`翻譯：yanao`、`翻译: 某人`、`译 person`、`譯者：某人`
@@ -1578,58 +1593,180 @@ def bahamut_artwork_urls(markup: str) -> List[str]:
 
     搜索页的作品链接可能写成相对路径、``%3Fsn%3D`` 这种转义形式、或者包在 JSON
     字符串里（``"url":"https:\\/\\/home.gamer.com.tw\\/artwork.php?sn=6103400"``），
-    所以先整体反转义再扫一遍 ``artwork.php?sn=``。
+    所以先整体反转义再扫一遍；新旧两种地址（``artwork.php`` / ``creationDetail.php``）
+    都认。
     """
     text = urllib.parse.unquote(str(markup or "")).replace("\\/", "/")
     found: List[str] = []
-    for match in BAHAMUT_ARTWORK_RE.finditer(text):
+    for match in BAHAMUT_LINK_RE.finditer(text):
         url = BAHAMUT_ARTWORK.format(sn=match.group(1))
         if url not in found:
             found.append(url)
     return found
 
 
-# 这一轮里哪个搜索地址回得出作品链接（下一个进程重新试，命中率高的会记在这）
+def bahamut_search_templates() -> List[str]:
+    """「搜索基址 × 参数名」的全部组合（``{kw}`` 留给调用方填关键字）。"""
+    return [base.format(param=param, kw="{kw}")
+            for base in BAHAMUT_SEARCH_BASES
+            for param in BAHAMUT_SEARCH_PARAMS]
+
+
+def load_bahamut_search() -> str:
+    """上次管用的搜索地址（过期或没记录就返回空串）。"""
+    entry = load_cache(BAHAMUT_SEARCH_CACHE)
+    template = str(entry.get("url") or "") if isinstance(entry, dict) else ""
+    if not template or not is_fresh(entry.get("at"), BAHAMUT_SEARCH_TTL):
+        return ""
+    return template
+
+
+def save_bahamut_search(template: str) -> None:
+    save_cache({"url": template, "at": time.time(), "v": 1}, BAHAMUT_SEARCH_CACHE)
+
+
+# 这一轮里哪个搜索地址回得出作品链接（存进 data/，下一个进程直接用）
 _BAHAMUT_SEARCH_WORKING = ""
+# 全部组合都扫不出链接：这一轮别再为每首歌白试十来次
+_BAHAMUT_SEARCH_DEAD = False
 
 
-def bahamut_search(fetcher: Fetcher, keyword: str) -> List[str]:
-    """巴哈姆特站内搜索 → 作品页 URL 列表（最多 ``BAHAMUT_SEARCH_MAX`` 条）。
+def _try_bahamut_templates(fetcher: Fetcher, templates: Sequence[str], quoted: str
+                           ) -> Tuple[str, List[str], str]:
+    """按顺序试模板 → ``(命中的模板, 作品链接, 最后读到的页面)``。
 
-    搜索页是 JS 渲染的，但结果链接在**初始 HTML 或它的 JSON 接口**里就能拿到，
-    所以这里按 ``BAHAMUT_SEARCH_URLS`` 逐个试：谁回出带 ``sn`` 的链接就记住谁，
-    后面的歌直接用那个地址。全都拿不到就返回空（退回「从 B站简介里找外链」）。
+    「最后读到的页面」留着给 ``bahamut_api_templates`` 用：静态组合全是 JS 空壳时，
+    要照着那一页引用的脚本去找真正的接口。
     """
-    global _BAHAMUT_SEARCH_WORKING
-    if not str(keyword or "").strip():
-        return []
-    keyword = urllib.parse.quote(keyword)
-    templates = list(BAHAMUT_SEARCH_URLS)
-    if _BAHAMUT_SEARCH_WORKING in templates:
-        templates.remove(_BAHAMUT_SEARCH_WORKING)
-        templates.insert(0, _BAHAMUT_SEARCH_WORKING)
+    page = ""
     for template in templates:
-        url = template.replace("{kw}", keyword)
+        url = template.replace("{kw}", quoted)
         if fetcher.is_blocked(url):
             continue
         markup = fetcher.text(url, attempts=1)
         if not markup:
             continue
         found = bahamut_artwork_urls(markup)
+        if found:
+            return template, found, markup
+        # 留着「引了脚本」的那一页去找接口：前面的组合可能只回一句错误页
+        if SCRIPT_SRC_RE.search(markup) or not page:
+            page = markup
+    return "", [], page
+
+
+def bahamut_api_templates(fetcher: Fetcher, page: str) -> List[str]:
+    """从搜索页引用的 JS 里找出结果接口，拼成 ``…?参数={kw}`` 模板。
+
+    站内搜索是前端渲染的，结果由 XHR 拉回来；接口地址只写在打包后的 JS 里。
+    这里读前几个 bundle、把像接口的路径挑出来，交给调用方挨个试（挑错也无所谓：
+    试不出作品链接就丢掉）。只在这首歌别的来源都没结果、且静态组合全失败时才做。
+    """
+    host = "https://search.gamer.com.tw"
+    templates: List[str] = []
+    for src in SCRIPT_SRC_RE.findall(page or "")[:4]:
+        bundle = fetcher.text(urllib.parse.urljoin(host + "/", src), attempts=1)
+        if not bundle:
+            continue
+        for hint in API_HINT_RE.findall(bundle):
+            hint = hint.replace("\\/", "/")
+            if hint.startswith("/"):
+                base = host + hint
+            elif "gamer.com.tw" in hint:
+                base = hint
+            elif re.fullmatch(r"[A-Za-z0-9_\-./]+", hint):
+                base = host + "/" + hint          # 少了前导斜杠的相对路径
+            else:
+                continue
+            base = base.split("?")[0]
+            if not base or base.endswith("/"):
+                continue
+            for param in BAHAMUT_SEARCH_PARAMS:
+                template = f"{base}?{param}={{kw}}"
+                if template not in templates:
+                    templates.append(template)
+    return templates[:12]
+
+
+def bahamut_search(fetcher: Fetcher, keyword: str) -> List[str]:
+    """巴哈姆特站内搜索 → 作品页 URL 列表（最多 ``BAHAMUT_SEARCH_MAX`` 条）。
+
+    站内搜索不是一个固定地址：两套基址（``search.gamer.com.tw`` /
+    ``home.gamer.com.tw/search.php``）× 三个参数名（``q`` / ``keyword`` / ``kw``）
+    里，只有一个组合能扫出 ``artwork.php?sn=``。逐个试，命中就记进
+    ``data/bahamut_search.pickle``（30 天），后面的歌直接用那个组合。
+    静态组合全是 JS 空壳时，再照页面引用的 JS 找出的接口试一轮。
+    都不行就本轮作罢（退回「从 B站简介里找外链」+ 搜索引擎兜底）。
+    """
+    global _BAHAMUT_SEARCH_WORKING, _BAHAMUT_SEARCH_DEAD
+    if not str(keyword or "").strip() or _BAHAMUT_SEARCH_DEAD:
+        return []
+    quoted = urllib.parse.quote(keyword)
+    if not _BAHAMUT_SEARCH_WORKING:
+        _BAHAMUT_SEARCH_WORKING = load_bahamut_search()
+    templates = bahamut_search_templates()
+    if _BAHAMUT_SEARCH_WORKING in templates:
+        templates.remove(_BAHAMUT_SEARCH_WORKING)
+        templates.insert(0, _BAHAMUT_SEARCH_WORKING)
+    winner, urls, page = _try_bahamut_templates(fetcher, templates, quoted)
+    if not winner:
+        winner, urls, _ = _try_bahamut_templates(
+            fetcher, bahamut_api_templates(fetcher, page), quoted)
+    if winner:
+        if winner != _BAHAMUT_SEARCH_WORKING:
+            _BAHAMUT_SEARCH_WORKING = winner
+            save_bahamut_search(winner)
+            pywikibot.output(f"巴哈姆特站内搜索可用：{winner}")
+        return urls[:BAHAMUT_SEARCH_MAX]
+    _BAHAMUT_SEARCH_DEAD = True
+    pywikibot.warning("巴哈姆特站内搜索扫不出作品链接（各地址都是 JS 空壳），"
+                      "本轮只用 B站简介里的外链与搜索引擎兜底；"
+                      "想复查请跑 --probe-bahamut 歌名")
+    return []
+
+
+# 站内搜索扫不出东西时的兜底：用搜索引擎限定站点，拿到作品页 URL 再逐个核对。
+# 只在这首歌别的来源都没结果时才问一次，且失败的站会被 Fetcher 记下来整轮不再敲。
+WEB_SEARCH_URLS = (
+    "https://html.duckduckgo.com/html/?q=site%3Ahome.gamer.com.tw+{kw}",
+    "https://www.bing.com/search?q=site%3Ahome.gamer.com.tw+{kw}",
+)
+_WEB_SEARCH_WORKING = ""
+_WEB_SEARCH_DEAD = False
+
+
+def web_search_bahamut(fetcher: Fetcher, keyword: str) -> List[str]:
+    """搜索引擎兜底：``site:home.gamer.com.tw`` 搜出作品页链接。"""
+    global _WEB_SEARCH_WORKING, _WEB_SEARCH_DEAD
+    if not str(keyword or "").strip() or _WEB_SEARCH_DEAD:
+        return []
+    quoted = urllib.parse.quote(keyword)
+    templates = list(WEB_SEARCH_URLS)
+    if _WEB_SEARCH_WORKING in templates:
+        templates.remove(_WEB_SEARCH_WORKING)
+        templates.insert(0, _WEB_SEARCH_WORKING)
+    for template in templates:
+        url = template.replace("{kw}", quoted)
+        markup = fetcher.text(url, attempts=1)
+        if not markup:
+            continue
+        found = bahamut_artwork_urls(markup)
         if not found:
             continue
-        if template != _BAHAMUT_SEARCH_WORKING:
-            _BAHAMUT_SEARCH_WORKING = template
-            pywikibot.output(f"巴哈姆特站内搜索可用：{template}")
+        if template != _WEB_SEARCH_WORKING:
+            _WEB_SEARCH_WORKING = template
+            pywikibot.output(f"巴哈姆特兜底搜索可用：{template}")
         return found[:BAHAMUT_SEARCH_MAX]
+    _WEB_SEARCH_DEAD = True
     return []
 
 
 def lookup_bahamut_search(fetcher: Fetcher, song: Song) -> List[str]:
-    """站内搜索 + 逐个核对（标题要对得上、正文要有译文署名）。"""
+    """站内搜索（不行就用搜索引擎兜底）+ 逐个核对（标题对得上、正文有署名）。"""
     sources: List[str] = []
     keyword = song.title_target or song.title_display
-    for url in bahamut_search(fetcher, keyword):
+    urls = bahamut_search(fetcher, keyword) or web_search_bahamut(fetcher, keyword)
+    for url in urls:
         try:
             found = lookup_bahamut(fetcher, url, song)
         except Exception as exc:        # noqa: BLE001 - 单个页面出错不影响别的
@@ -1644,14 +1781,16 @@ def lookup_bahamut_search(fetcher: Fetcher, song: Song) -> List[str]:
 
 
 def probe_bahamut(keyword: str) -> None:
-    """``--probe-bahamut 歌名``：逐个试搜索地址，打印状态与抓到的作品链接。
+    """``--probe-bahamut 歌名``：把每个搜索组合都试一遍，打印状态与作品链接数。
 
-    站内搜索的地址一旦变了，用它一次就能看出该改哪一个（机器人只认能扫出
-    ``artwork.php?sn=`` 的那个地址）。
+    全都扫不出链接时会顺手看一眼搜索页里引了哪些 JS、里面又写了哪些 API 地址——
+    站内搜索换成新的 XHR 接口时，照着这些行改 ``BAHAMUT_SEARCH_BASES`` 就行。
     """
     fetcher = Fetcher()
     quoted = urllib.parse.quote(keyword)
-    for template in BAHAMUT_SEARCH_URLS:
+    page = ""
+    winner = ""
+    for template in bahamut_search_templates():
         url = template.replace("{kw}", quoted)
         try:
             with fetcher.opener.open(url, timeout=REQUEST_TIMEOUT) as response:
@@ -1660,10 +1799,51 @@ def probe_bahamut(keyword: str) -> None:
         except Exception as exc:        # noqa: BLE001 - 探测就是把失败打出来
             pywikibot.output(f"✗ {url}\n    {type(exc).__name__}: {exc}")
             continue
+        page = page or raw
         found = bahamut_artwork_urls(raw)
         pywikibot.output(f"{'✓' if found else '·'} {url}\n"
                          f"    HTTP {status}、{len(raw)} 字节、作品链接 {len(found)} 个"
                          + (f"：{found[0]} …" if found else ""))
+        if found and not winner:
+            winner = template
+
+    for template in WEB_SEARCH_URLS:
+        url = template.replace("{kw}", quoted)
+        try:
+            with fetcher.opener.open(url, timeout=REQUEST_TIMEOUT) as response:
+                status = getattr(response, "status", 200)
+                raw = response.read().decode("utf-8", "replace")
+        except Exception as exc:        # noqa: BLE001
+            pywikibot.output(f"✗ {url}\n    {type(exc).__name__}: {exc}")
+            continue
+        found = bahamut_artwork_urls(raw)
+        pywikibot.output(f"{'✓' if found else '·'} {url}\n"
+                         f"    HTTP {status}、{len(raw)} 字节、作品链接 {len(found)} 个"
+                         + (f"：{found[0]} …" if found else ""))
+        if found and not winner:
+            winner = f"搜索引擎兜底：{template}"
+
+    if winner:
+        pywikibot.output(f"结论：用 {winner}")
+        return
+    pywikibot.output("结论：全部扫不出作品链接。下面是搜索页引用的 JS 里出现的接口地址，"
+                     "把能返回结果的地址发给维护者即可加进 BAHAMUT_SEARCH_BASES：")
+    scripts = [urllib.parse.urljoin("https://search.gamer.com.tw/", src)
+               for src in SCRIPT_SRC_RE.findall(page)][:6]
+    for script in scripts:
+        pywikibot.output(f"  · {script}")
+        try:
+            with fetcher.opener.open(script, timeout=REQUEST_TIMEOUT) as response:
+                bundle = response.read().decode("utf-8", "replace")
+        except Exception as exc:        # noqa: BLE001
+            pywikibot.output(f"      读不到：{exc}")
+            continue
+        hints: List[str] = []
+        for hint in API_HINT_RE.findall(bundle):
+            if hint not in hints:
+                hints.append(hint)
+        for hint in hints[:12]:
+            pywikibot.output(f"      {hint}")
 
 
 # ---------------------------------------------------------------- voca 条目

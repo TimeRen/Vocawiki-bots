@@ -3,6 +3,7 @@
 import time
 import urllib.error
 import urllib.parse
+from contextlib import contextmanager
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -1670,7 +1671,11 @@ class PruneOnlyTest(TestCase):
 
 
 class BahamutSearchTest(TestCase):
-    """巴哈姆特站内搜索：从搜索页（或它的 JSON）里扫出 ``artwork.php?sn=``。"""
+    """站内搜索是「基址 × 参数名」的矩阵，命中后要记住。
+
+    2026-10-28 实测：`search.gamer.com.tw/?q=…` 回 200 + 85KB 的空壳、0 个作品链接，
+    所以不能只认一个地址；管用的组合还要落盘，别每首歌都把 12 个组合试一遍。
+    """
 
     class FakeFetcher:
         def __init__(self, pages):
@@ -1687,6 +1692,26 @@ class BahamutSearchTest(TestCase):
     HTML = ('<a href="https://home.gamer.com.tw/artwork.php?sn=6103400">译文</a>'
             '<a href="//home.gamer.com.tw/artwork.php?sn=6097695">另一个</a>'
             '<a href="https://home.gamer.com.tw/artwork.php?sn=6103400">重复</a>')
+    OLD_HTML = '<a href="https://home.gamer.com.tw/creationDetail.php?sn=6111">旧地址</a>'
+
+    @contextmanager
+    def sandbox(self, working="", dead=False, store=None):
+        """把模块级状态与 data/ 缓存都换成内存里的假货。"""
+        store = {} if store is None else store
+        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", working), \
+                patch.object(tr, "_BAHAMUT_SEARCH_DEAD", dead), \
+                patch.object(tr, "load_cache", side_effect=lambda *a, **k: dict(store)), \
+                patch.object(tr, "save_cache",
+                             side_effect=lambda value, path=None: store.update(value)):
+            yield store
+
+    def test_the_matrix_covers_both_bases_and_every_param(self):
+        templates = tr.bahamut_search_templates()
+        self.assertEqual(len(tr.BAHAMUT_SEARCH_BASES) * len(tr.BAHAMUT_SEARCH_PARAMS),
+                         len(templates))
+        for base in tr.BAHAMUT_SEARCH_BASES:
+            for param in tr.BAHAMUT_SEARCH_PARAMS:
+                self.assertIn(base.format(param=param, kw="{kw}"), templates)
 
     def test_extracts_and_dedupes_artwork_links(self):
         self.assertEqual(
@@ -1694,44 +1719,144 @@ class BahamutSearchTest(TestCase):
              "https://home.gamer.com.tw/artwork.php?sn=6097695"],
             tr.bahamut_artwork_urls(self.HTML))
 
+    def test_reads_the_old_creation_detail_links(self):
+        """旧地址写成 ``creationDetail.php?sn=``，还是同一篇文章。"""
+        self.assertEqual(["https://home.gamer.com.tw/artwork.php?sn=6111"],
+                         tr.bahamut_artwork_urls(self.OLD_HTML))
+
     def test_reads_json_escaped_links(self):
-        """JSON 接口把链接写成 ``https:\/\/…`` 或百分号转义，也要认出来。"""
-        payload = '{"list":[{"url":"https:\/\/home.gamer.com.tw\/artwork.php?sn=6111"}]}'
+        """JSON 接口把链接写成 ``https:\\/\\/…`` 或百分号转义，也要认出来。"""
+        payload = '{"list":[{"url":"https:\\/\\/home.gamer.com.tw\\/artwork.php?sn=6111"}]}'
         self.assertEqual(["https://home.gamer.com.tw/artwork.php?sn=6111"],
                          tr.bahamut_artwork_urls(payload))
         escaped = "https%3A%2F%2Fhome.gamer.com.tw%2Fartwork.php%3Fsn%3D6222"
         self.assertEqual(["https://home.gamer.com.tw/artwork.php?sn=6222"],
                          tr.bahamut_artwork_urls(escaped))
 
-    def test_falls_back_to_the_next_endpoint(self):
-        fetcher = self.FakeFetcher(["<html>JS 渲染，什么都没有</html>", self.HTML])
-        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", ""):
+    def test_the_first_working_combination_wins_and_is_saved(self):
+        fetcher = self.FakeFetcher(["<html>JS 空壳，什么都没有</html>", self.HTML])
+        with self.sandbox() as store:
             found = tr.bahamut_search(fetcher, "千本桜")
-            self.assertEqual(tr.BAHAMUT_SEARCH_URLS[1], tr._BAHAMUT_SEARCH_WORKING,
-                             "第一个地址扫不出链接，第二个可以：要记住第二个")
+            self.assertEqual(
+                tr.BAHAMUT_SEARCH_BASES[0].format(param="keyword", kw="{kw}"),
+                tr._BAHAMUT_SEARCH_WORKING, "第一个组合（?q=）是空壳，第二个顶上")
+            self.assertEqual(tr._BAHAMUT_SEARCH_WORKING, store.get("url"),
+                             "管用的组合要落盘，别每首歌都试 12 遍")
         self.assertEqual(2, len(found), "两个不同的 sn，重复的那个不算")
 
-    def test_the_working_endpoint_is_tried_first_next_time(self):
-        working = tr.BAHAMUT_SEARCH_URLS[1]
+    def test_the_saved_combination_is_tried_first_next_time(self):
+        working = tr.BAHAMUT_SEARCH_BASES[3].format(param="kw", kw="{kw}")
         fetcher = self.FakeFetcher([self.HTML])
-        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", working):
+        with self.sandbox(working=working):
             tr.bahamut_search(fetcher, "千本桜")
         self.assertTrue(fetcher.asked[0].startswith(working.split("{kw}")[0]))
 
-    def test_no_result_means_no_links(self):
-        fetcher = self.FakeFetcher([""] * len(tr.BAHAMUT_SEARCH_URLS))
-        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", ""):
+    def test_a_stale_saved_combination_is_ignored(self):
+        fetcher = self.FakeFetcher([""] * len(tr.bahamut_search_templates()))
+        with self.sandbox(store={"url": tr.BAHAMUT_SEARCH_BASES[0],
+                                 "at": time.time() - tr.BAHAMUT_SEARCH_TTL - 1}):
+            self.assertEqual("", tr.load_bahamut_search())
+
+    def test_no_result_means_no_links_and_marks_the_round_dead(self):
+        """全都扫不出东西时，这一轮别再为每首歌白试十来次。"""
+        fetcher = self.FakeFetcher([""] * len(tr.bahamut_search_templates()))
+        with self.sandbox():
             self.assertEqual([], tr.bahamut_search(fetcher, "千本桜"))
+            self.assertTrue(tr._BAHAMUT_SEARCH_DEAD)
+            asked = len(fetcher.asked)
+            self.assertEqual([], tr.bahamut_search(fetcher, "另一首"))
+            self.assertEqual(asked, len(fetcher.asked), "死掉之后不再发请求")
 
     def test_searched_pages_are_verified_before_being_recorded(self):
         song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
         fetcher = self.FakeFetcher([self.HTML])
-        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", ""), \
+        with self.sandbox(), \
                 patch.object(tr, "lookup_bahamut",
                              return_value=["[u 巴哈姆特(by. 月勳)]"]) as verify:
             sources = tr.lookup_bahamut_search(fetcher, song)
         self.assertEqual(["[u 巴哈姆特(by. 月勳)]"], sources)
         verify.assert_called()
+
+    def test_the_web_search_takes_over_when_the_site_search_is_empty(self):
+        """站内搜索扫不出东西时，用 ``site:home.gamer.com.tw`` 兜底，拿到链接照样核对。"""
+        song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
+        fetcher = self.FakeFetcher([""] * len(tr.bahamut_search_templates()) + [self.HTML])
+        with self.sandbox(), \
+                patch.object(tr, "_WEB_SEARCH_WORKING", ""), \
+                patch.object(tr, "_WEB_SEARCH_DEAD", False), \
+                patch.object(tr, "lookup_bahamut",
+                             return_value=["[u 巴哈姆特(by. 月勳)]"]):
+            sources = tr.lookup_bahamut_search(fetcher, song)
+        self.assertEqual(["[u 巴哈姆特(by. 月勳)]"], sources)
+        self.assertIn("duckduckgo", fetcher.asked[-1])
+
+    def test_the_web_search_is_not_asked_twice_a_round(self):
+        fetcher = self.FakeFetcher([""] * (len(tr.bahamut_search_templates())
+                                           + len(tr.WEB_SEARCH_URLS)))
+        with self.sandbox(), \
+                patch.object(tr, "_WEB_SEARCH_WORKING", ""), \
+                patch.object(tr, "_WEB_SEARCH_DEAD", False):
+            tr.web_search_bahamut(fetcher, "甲")
+            asked = len(fetcher.asked)
+            tr.web_search_bahamut(fetcher, "乙")
+            self.assertEqual(asked, len(fetcher.asked))
+
+
+class BahamutApiDiscoveryTest(TestCase):
+    """静态组合全是 JS 空壳时，照页面引用的脚本找出真正的接口（2026-10-28 的情形）。"""
+
+    PAGE = ('<html><script src="/js/app.3f2a.js"></script>'
+            '<script src="https://cdn.example.com/vendor.js"></script></html>')
+    BUNDLE = ('var a={url:"/api/v1/search/general",type:"creation"};'
+              'x("ajax/getList")')
+
+    class FakeFetcher:
+        def __init__(self, map_):
+            self.map = map_
+            self.asked = []
+
+        def is_blocked(self, url):
+            return False
+
+        def text(self, url, attempts=3):
+            self.asked.append(url)
+            return self.map.get(url, "")
+
+    def test_templates_are_built_from_the_bundle(self):
+        fetcher = self.FakeFetcher({
+            "https://search.gamer.com.tw/js/app.3f2a.js": self.BUNDLE,
+        })
+        templates = tr.bahamut_api_templates(fetcher, self.PAGE)
+        self.assertIn("https://search.gamer.com.tw/api/v1/search/general?q={kw}",
+                      templates)
+        self.assertIn("https://search.gamer.com.tw/api/v1/search/general?keyword={kw}",
+                      templates)
+        self.assertIn("https://search.gamer.com.tw/ajax/getList?q={kw}", templates)
+
+    def test_a_page_without_scripts_yields_nothing(self):
+        self.assertEqual([], tr.bahamut_api_templates(self.FakeFetcher({}), "<html></html>"))
+
+    def test_the_discovered_endpoint_is_used_when_the_static_ones_are_empty(self):
+        answer = ('<a href="https://home.gamer.com.tw/artwork.php?sn=6103400">译文</a>')
+        keyword = urllib.parse.quote("千本桜")
+        pages = {}
+        templates = tr.bahamut_search_templates()
+        for template in templates:
+            pages[template.replace("{kw}", keyword)] = "<html>空壳</html>"
+        pages[templates[0].replace("{kw}", keyword)] = self.PAGE
+        pages["https://search.gamer.com.tw/js/app.3f2a.js"] = self.BUNDLE
+        pages["https://search.gamer.com.tw/api/v1/search/general?q=" + keyword] = answer
+        fetcher = self.FakeFetcher(pages)
+
+        with patch.object(tr, "_BAHAMUT_SEARCH_WORKING", ""), \
+                patch.object(tr, "_BAHAMUT_SEARCH_DEAD", False), \
+                patch.object(tr, "load_cache", return_value={}), \
+                patch.object(tr, "save_cache") as save:
+            found = tr.bahamut_search(fetcher, "千本桜")
+            self.assertIn("/api/v1/search/general", tr._BAHAMUT_SEARCH_WORKING)
+            save.assert_called()
+
+        self.assertEqual(["https://home.gamer.com.tw/artwork.php?sn=6103400"], found)
 
 
 class BahamutSearchWiringTest(TestCase):

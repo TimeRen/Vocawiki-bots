@@ -449,7 +449,7 @@ Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `sched
 | ~~VOCALOID中文歌词wiki~~ | **暂停**（`USE_ATWIKI = False`）：2026-10-22 页面主人看到 4 笔同名不同曲后要求「暂时不收录中文歌词wiki」 | 恢复时还要过「投稿年 = 赛季年」那一关，见下 |
 | 网易云音乐 | 歌名（含 `alias` / `transNames`）对上**且** P主 出现在歌手 / 专辑名里，`tlyric` 非空**且和原文对照得上**（译文行落在原文的时间点上） | 只有歌名对上一定不够（见下）；没有对照的 `tlyric` 不算（见下）；歌名搜不到时再搜「P主 歌名」 |
 | B站 | 条目里的 `{{BilibiliVideo}}` 优先，否则关键词搜索；搜来的视频要标题 / 简介里**同时**有歌名和 P主 | 读视频简介、评论区、弹幕里的「`翻译：某人`」+ 中文歌词；弹幕只在别的来源都空着时才读 |
-| 巴哈姆特 | 站内搜索（`bahamut_search`）扫出 `artwork.php?sn=` 链接再逐个核对；外加顺着 B站简介里的外链进入 | 搜索页是 JS 渲染的，但结果链接在初始 HTML 或它的 JSON 里就有；地址变了用 `--probe-bahamut 歌名` 试一遍 |
+| 巴哈姆特 | 站内搜索（`bahamut_search`，见下）+ 顺着 B站简介里的外链进入；搜到的页面要标题对得上、正文有译文署名 | 站内搜索是前端渲染的：结果链接藏在 XHR 里，静态地址回的是空壳（`?q=` 200 + 85KB、0 个链接）。所以按「基址 × 参数名」逐个试，再不行就照页面引用的 JS 找接口，最后用 `site:home.gamer.com.tw` 搜索引擎兜底 |
 
 几点实现细节：
 
@@ -509,8 +509,33 @@ Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `sched
 * 只跑某几届：`--season 2022秋`，可以写多个（`--season 2022秋 --season 2023春`
   或 `--season 2022秋,2023春`）。这一轮只查、只写这几届，删行与补录也一并跳过
   （别的赛季一个字都不动），用来单独收尾或验证某一届到底卡在哪。
-* 巴哈姆特站内搜索的地址变了，先用 `--probe-bahamut 歌名` 打一遍（逐个试
-  `BAHAMUT_SEARCH_URLS`，打印 HTTP 状态与扫到的作品链接数），再把管用的那个放进常量。
+
+### 巴哈姆特：站内搜索是怎么抓的
+
+站内搜索不是「一个地址」：它是前端渲染的，结果由 XHR 拉回来，静态地址回的是空壳
+（2026-10-28 实测 `search.gamer.com.tw/?q=…` → HTTP 200、85 444 字节、**0** 个作品
+链接）。所以按三层来找：
+
+1. **矩阵**：`BAHAMUT_SEARCH_BASES`（`search.gamer.com.tw` 两套 + `home.gamer.com.tw`
+   的 `search.php` / `creationSearch.php`）× `BAHAMUT_SEARCH_PARAMS`（`q` /
+   `keyword` / `kw`）共 12 个组合，谁先扫出 `artwork.php?sn=`（旧写法
+   `creationDetail.php?sn=` 也认）就用谁；命中的组合写进
+   `data/bahamut_search.pickle`（30 天），之后只试这一个。
+2. **照 JS 找接口**（`bahamut_api_templates`）：静态组合全是空壳时，读搜索页引用的
+   前 4 个 bundle，把里面像接口的路径（含 `api` / `ajax`）挑出来拼成
+   `…?参数={kw}` 再试。
+3. **搜索引擎兜底**（`web_search_bahamut`）：`site:home.gamer.com.tw 歌名` 用
+   DuckDuckGo HTML / Bing 各问一次，拿到的作品页链接照样要过核对。
+
+三层都失败时整轮只报一次 `WARNING` 并停手（不会为每首歌白试二十来个地址）。查具体
+情况：
+
+```bash
+python bots/vocaloid_collection_translations.py --probe-bahamut 千本桜
+```
+
+每个组合打印 `HTTP 状态 / 字节数 / 作品链接数`；全都不行时还会把搜索页引用的 JS 与
+其中出现的接口地址列出来——照着把能返回结果的地址加进 `BAHAMUT_SEARCH_BASES` 即可。
 
 ### 删掉「已经有条目」的行（每小时，`--prune-only`）
 

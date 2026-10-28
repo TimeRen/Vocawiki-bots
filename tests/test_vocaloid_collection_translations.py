@@ -1388,6 +1388,27 @@ class PruneEntriesTest(TestCase):
         self.assertEqual(PRUNE_PAGE, text)
         self.assertEqual([], notes)
 
+    def test_a_parenthetical_row_matches_the_plain_article(self):
+        """``[[烏滸の沙汰（なきそ）]]`` 对上条目 ``烏滸の沙汰``（P主 一致）→ 删行。
+
+        2026-10-28：这类行是 `--add-missing` 补进来的，而条目本来就有；只按完整
+        标题查会漏掉，这一行就一直挂在页面上。
+        """
+        page = PRUNE_PAGE.replace(
+            "[[Equivalent]]", "[[烏滸の沙汰（なきそ）|烏滸の沙汰]]")
+        page = page.replace("{{lj|きっと、ずっと、ぼっち。}}", "なきそ")
+
+        def fake_lookup(site, titles):
+            # 完整标题查不到；只去掉括注的名字才有条目
+            return {tr.strict_key(title) for title in titles if "（" not in title}
+
+        with patch.object(tr, "season_data", return_value={"contrib": {}, "titles": {}}):
+            text, notes = tr.prune_entries(
+                self.FakeSite(), object(), page, lookup=fake_lookup,
+                ours=lambda site, title, producer: title == "烏滸の沙汰")
+        self.assertNotIn("烏滸の沙汰", text)
+        self.assertEqual(1, len(notes))
+
 
 class CollectSourcesTest(TestCase):
     def test_caps_at_three_and_dedups(self):
@@ -1848,6 +1869,90 @@ class EmptySeasonRoundTest(TestCase):
         said = " ".join(str(call) for call in warning.call_args_list)
         self.assertIn("表格是空的", said)
         self.assertIn("--add-missing", said)
+
+
+class SongHasArticleTest(TestCase):
+    """补行前的「这首歌是不是已经有条目」判断（2026-10-28：烏滸の沙汰 被重复补行）。"""
+
+    def _check(self, existing, producers, title, producer):
+        class Site:
+            def simple_request(self, **kwargs):
+                self.titles = kwargs["titles"].split("|")
+                return self
+
+            def submit(self):
+                pages = {name: {"title": name, "pageid": 1}
+                         for name in self.titles if name in existing}
+                return {"query": {"pages": pages}}
+
+        with patch.object(tr, "article_producer",
+                          side_effect=lambda site, name: producers.get(name, "")):
+            return tr.song_has_article(Site(), title, producer)
+
+    def test_an_exact_title_match_counts(self):
+        self.assertTrue(self._check({"烏滸の沙汰"}, {"烏滸の沙汰": "なきそ"},
+                                    "烏滸の沙汰", "なきそ"))
+
+    def test_the_parenthetical_form_finds_the_plain_article(self):
+        """清单写 ``烏滸の沙汰（なきそ）``，条目叫 ``烏滸の沙汰``，P主 一致 → 有条目。"""
+        self.assertTrue(self._check({"烏滸の沙汰"}, {"烏滸の沙汰": "なきそ"},
+                                    "烏滸の沙汰（なきそ）", "なきそ"))
+
+    def test_a_same_named_song_by_another_producer_is_not_ours(self):
+        """``EDEN`` 是 みつばちぼっち 写的：P主 不同就是另一首歌，可以补。"""
+        self.assertFalse(self._check({"EDEN"}, {"EDEN": "みつばちぼっち"},
+                                     "EDEN(酔シグレ)", "酔シグレ"))
+
+    def test_an_article_without_a_producer_is_treated_as_existing(self):
+        self.assertTrue(self._check({"烏滸の沙汰"}, {"烏滸の沙汰": ""},
+                                    "烏滸の沙汰（なきそ）", "なきそ"))
+
+    def test_nothing_found_means_no_article(self):
+        self.assertFalse(self._check(set(), {},
+                                     "オリフィスに殉ず（すこやか大聖堂）", "すこやか大聖堂"))
+
+
+class AddMissingSkipsExistingTest(TestCase):
+    """补行时必须放过「已经有条目」的歌（只信活动清单的标记不够）。"""
+
+    PAGE = """== ボカコレ2022秋 ==
+{| class="wikitable"
+|-
+! colspan="6"|TOP100
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|}
+"""
+    CONTRIB = {"ボカコレ2022秋": {"TOP100": {33: ("烏滸の沙汰（なきそ）", False),
+                                             47: ("オリフィスに殉ず（すこやか大聖堂）", False),
+                                             58: ("404ルサンチガール（MINO-U）", False)}}}
+
+    def test_an_existing_article_blocks_the_row(self):
+        def fake_has_article(site, title, producer="", existing=None):
+            return "烏滸の沙汰" in title
+
+        with patch.object(tr, "netease_candidate",
+                          side_effect=lambda f, t: ("[u 网易云音乐]", "なきそ")), \
+                patch.object(tr, "song_has_article", side_effect=fake_has_article):
+            text, added = tr.add_missing_entries(None, object(), self.PAGE, {},
+                                                 {"contrib": self.CONTRIB, "titles": {}},
+                                                 10, False)
+        self.assertEqual(2, added, "只有两条该补：烏滸の沙汰 被拦下")
+        self.assertNotIn("烏滸の沙汰", text)
+
+    def test_the_producer_is_passed_to_the_check(self):
+        seen = []
+
+        def fake_has_article(site, title, producer="", existing=None):
+            seen.append((title, producer))
+            return False
+
+        with patch.object(tr, "netease_candidate",
+                          side_effect=lambda f, t: ("[u 网易云音乐]", "MINO-U")), \
+                patch.object(tr, "song_has_article", side_effect=fake_has_article):
+            tr.add_missing_entries(None, object(), self.PAGE, {},
+                                   {"contrib": self.CONTRIB, "titles": {}}, 1, False)
+        self.assertEqual("MINO-U", seen[0][1], "要用网易云给的 P主 去核对条目")
 
 
 class SeasonGroupsTest(TestCase):

@@ -2153,6 +2153,46 @@ def netease_candidate(fetcher: Fetcher, title: str) -> Optional[Tuple[str, str]]
     return None
 
 
+def strip_parenthetical(title: str) -> str:
+    """``烏滸の沙汰（なきそ）`` → ``烏滸の沙汰``（去掉末尾的消歧义括注）。"""
+    return re.sub(r"\s*[（(][^()（）]*[)）]\s*$", "", str(title or "")).strip()
+
+
+def song_has_article(site, title: str, producer: str = "",
+                     existing: Optional[Set[str]] = None) -> bool:
+    """这首歌是不是已经有条目了（搜集库只收**没有条目**的歌）。
+
+    先按完整标题查；再按去掉末尾括注的名字查一次——清单里写作
+    ``烏滸の沙汰（なきそ）``、条目却叫 ``烏滸の沙汰`` 的情况很常见。第二种有撞名的
+    风险（``EDEN`` 是别人写的），所以还要核对条目的 ``|P主 =``：
+
+    * 条目的 P主 和这首歌的 P主 一致 → 同一首歌，有条目 → 不补；
+    * 条目没写 P主 → 无法确认，宁可不补（重复行比缺行更难发现）；
+    * P主 明确不同 → 是另一首歌 → 照常补。
+
+    ``existing``：已经批量查好的「存在条目的 strict_key 集合」（省掉逐首查站内）。
+    2026-10-28：`--add-missing` 给 `烏滸の沙汰`、`オリフィスに殉ず` 补了行，
+    而这两首本来就有条目——就是因为只看活动清单里那个「已创建」标记，没去查站内。
+    """
+    exact = strict_key(title)
+    keys = existing if existing is not None else article_keys(site, [title])
+    if exact and exact in keys:
+        return True
+    base = strip_parenthetical(title)
+    if not base or base == str(title or "").strip():
+        return False
+    if existing is None:
+        keys = set(keys) | article_keys(site, [base])
+    if strict_key(base) not in keys:
+        return False
+    if not str(producer or "").strip():
+        return True                     # 有同名条目、但说不清 P主：不补，宁可漏
+    found = article_producer(site, base)
+    if not found:
+        return True                     # 条目没写 P主：同样不补
+    return person_key(found) == person_key(producer)
+
+
 def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str],
                         data: Dict, max_add: int, write: bool,
                         wanted: Sequence[str] = ()) -> Tuple[str, int]:
@@ -2174,6 +2214,17 @@ def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str]
         missing = [song for song in missing if season_token(song.season) in tokens]
     totals = overall_ranks(contrib)
     pywikibot.output(f"活动清单里有 {len(missing)} 首未录入搜集库（有条目 / 已录入的不算）")
+    # 一次性批量查「这些歌是不是已经有条目」（完整标题 + 去掉括注的名字都查），
+    # 免得逐首打两次 API：200 个候选就是 400 次请求。
+    existing: Optional[Set[str]] = None
+    if site is not None and missing:
+        try:
+            existing = article_keys(site, [title for song in missing
+                                           for title in (song.title,
+                                                         strip_parenthetical(song.title))])
+        except Exception as exc:        # noqa: BLE001 - 查不到就退回逐首查
+            pywikibot.warning(f"批量查条目是否存在失败：{exc}")
+            existing = None
     added = 0
     for song in missing:
         if added >= max_add:
@@ -2203,6 +2254,16 @@ def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str]
             source, producer = hit
         if not producer:
             continue                    # 没 P主 就没法补行（P主 那一列是必要的）
+        # 已经有条目的歌不属于搜集库（2026-10-28：烏滸の沙汰 / オリフィスに殉ず
+        # 明明写过条目却被补了行——只信活动清单的「已创建」标记不够，要查站内）
+        try:
+            exists = song_has_article(site, song.title, producer, existing)
+        except Exception as exc:        # noqa: BLE001 - 查不到就当没有，照常补
+            pywikibot.warning(f"查条目是否存在失败（{song.title}）：{exc}")
+            exists = False
+        if exists:
+            pywikibot.output(f"  · {song.season} {song.title}：已经有条目，不补")
+            continue
         bodies = dict(season_sections(text))
         if song.season not in bodies:
             continue
@@ -2463,6 +2524,30 @@ def prune_entries(site, fetcher: Fetcher, text: str, refresh: bool = False,
                     keys.add(key)
             except Exception as exc:    # noqa: BLE001
                 pywikibot.warning(f"核对条目 P主 失败（{target}）：{exc}")
+        # 括注写法对不上的情况：清单/页面写 ``烏滸の沙汰（なきそ）``，条目叫
+        # ``烏滸の沙汰``。用去掉括注的名字再查一次，条目的 P主 一致才算同一首
+        # （``EDEN`` 那种同名不同曲的，P主 对不上就不动）。
+        bases: Dict[str, Tuple[str, str]] = {}
+        for key, (target, producer) in pending.items():
+            if key in keys:
+                continue
+            base = strip_parenthetical(target)
+            if base and base != target.strip():
+                bases.setdefault(base, (key, producer))
+        if bases:
+            try:
+                found = lookup(site, list(bases))
+            except Exception as exc:    # noqa: BLE001
+                pywikibot.warning(f"查条目是否存在失败：{exc}")
+                found = set()
+            for base, (key, producer) in bases.items():
+                if strict_key(base) not in found:
+                    continue
+                try:
+                    if ours(site, base, producer):
+                        keys.add(key)
+                except Exception as exc:    # noqa: BLE001
+                    pywikibot.warning(f"核对条目 P主 失败（{base}）：{exc}")
     return prune_created_rows(text, keys)
 
 

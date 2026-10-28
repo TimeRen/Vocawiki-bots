@@ -1772,6 +1772,84 @@ class VocalSynthTest(TestCase):
         self.assertEqual("", tr.producer_from_netease(candidate))
 
 
+class EmptySeasonRoundTest(TestCase):
+    """`--season 2022秋 --add-missing` 在空表上要能跑通（2026-10-28 报「没有匹配的赛季」）。
+
+    判「这一届在不在」以前是按「有没有歌」算的：空表没有歌 → 直接报错退出，
+    而这正是唯一需要补行的情形。
+    """
+
+    PAGE = """== ボカコレ2022春 ==
+{| class="wikitable"
+|-
+! colspan="6"|TOP100
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 1 || [[有歌的那届]] || P || 未创建 || ||
+|}
+
+== ボカコレ2022秋 ==
+{| class="wikitable " style="text-align:center;"
+|-
+! colspan="6"|TOP100 !! colspan="6"|ROOKIE
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|}
+"""
+
+    class FakePage:
+        def __init__(self, site, title):
+            self.text = EmptySeasonRoundTest.PAGE
+            self.saved = []
+            self.summaries = []
+
+        def save(self, **kwargs):
+            self.saved.append(self.text)
+            self.summaries.append(kwargs.get("summary", ""))
+
+    class FakeSite:
+        def logged_in(self):
+            return True
+
+    def _run(self, **kwargs):
+        page = self.FakePage(None, None)
+        contrib = {"ボカコレ2022秋": {"TOP100": {5: ("千本桜", False)}}}
+        with patch.object(tr, "Page", return_value=page), \
+                patch.object(tr, "load_cache", return_value={}), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries",
+                             side_effect=lambda s, f, t, r=False: (t, [])), \
+                patch.object(tr, "collect_sources", return_value=[]), \
+                patch.object(tr, "season_data",
+                             return_value={"contrib": contrib, "titles": {}}), \
+                patch.object(tr, "netease_candidate",
+                             return_value=("[u 网易云音乐]", "buzzG")):
+            changed = tr.run_once(self.FakeSite(), write=True, fetcher=object(),
+                                  **kwargs)
+        return changed, page
+
+    def test_the_empty_season_is_not_reported_as_missing(self):
+        changed, page = self._run(season=["2022秋"], add_missing=True)
+        self.assertTrue(changed)
+        self.assertIn("千本桜", page.saved[0], "空的那届要真的补出行来")
+        self.assertIn("2022春", page.saved[0], "别的届一个字都不动")
+
+    def test_a_purely_unknown_season_still_errors(self):
+        with patch.object(tr.pywikibot, "error") as error:
+            changed, _ = self._run(season=["2024夏"], add_missing=True)
+        self.assertFalse(changed)
+        self.assertIn("没有匹配的赛季", " ".join(str(c) for c in error.call_args_list))
+
+    def test_an_empty_season_is_announced(self):
+        with patch.object(tr.pywikibot, "warning") as warning:
+            self._run(season=["2022秋"], add_missing=False)
+        said = " ".join(str(call) for call in warning.call_args_list)
+        self.assertIn("表格是空的", said)
+        self.assertIn("--add-missing", said)
+
+
 class SeasonGroupsTest(TestCase):
     def test_groups_keep_the_page_order(self):
         songs = tr.songs_from(TWO_SEASONS)

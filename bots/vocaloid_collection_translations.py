@@ -2575,16 +2575,28 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
             pywikibot.warning(f"{name}：有 {count} 行却认不出任何曲名，"
                               f"表格结构可能变了，这一节不会被补充")
     groups = season_groups(songs, seasons, wanted)
-    if wanted and not groups:
-        # 静默 0 行最坑：用户以为在补 2022秋，其实那个标题没被认出来。
-        detected = "、".join(name for name, _ in season_groups(songs, seasons)) or "（无）"
-        pywikibot.error(f"没有匹配的赛季：{'、'.join(wanted)}。"
-                        f"页面里的赛季是：{detected}；"
-                        f"跑 --list-seasons 看看标题到底怎么写的。")
-        return False
+    sections: List[str] = [name for name, _ in season_sections(text)]
     if wanted:
-        pywikibot.output("只查 " + "、".join(name for name, _ in groups)
-                         + f"：{sum(len(group) for _, group in groups)} 行")
+        # 判「这一届在不在页面里」要看**标题**，不是「有没有歌」：2022秋 这种空表
+        # （只有表头、一行数据都没有）正是要靠 --add-missing 补行的情形，
+        # 按歌判断会把它当成不存在而直接报错退出。
+        known = {season_token(name) for name in sections}
+        unknown = [word for word in wanted if season_token(word) not in known]
+        if unknown:
+            pywikibot.error(f"没有匹配的赛季：{'、'.join(unknown)}。"
+                            f"页面里的赛季是：{'、'.join(sections) or '（无）'}；"
+                            f"跑 --list-seasons 看看标题到底怎么写的。")
+            return False
+        filled = {name for name, _ in groups}
+        empties = [name for name in sections
+                   if season_token(name) in {season_token(word) for word in wanted}
+                   and name not in filled]
+        if empties:
+            pywikibot.warning(f"{'、'.join(empties)}：表格是空的（只有表头），没有可填的行；"
+                              f"要补行请加 --add-missing")
+        if groups:
+            pywikibot.output("只查 " + "、".join(name for name, _ in groups)
+                             + f"：{sum(len(group) for _, group in groups)} 行")
 
     rows, _ = parse_rows(text)
     current: Dict[Tuple[int, int], str] = {}

@@ -524,8 +524,10 @@ SEASONS_CACHE = DATA_DIR / "vocaloid_collection_seasons.pickle"
 SEASONS_TTL = 7 * 24 * 3600         # 活动清单多久重新抓一次
 SEASONS_VERSION = 2                 # 缓存结构变了就 +1（旧格式会自动重建）
 
-SEASON_HEADING_RE = re.compile(r"^==\s*(ボカコレ[^=\n]+?)\s*==\s*$", re.M)
+SEASON_HEADING_RE = re.compile(
+    r"^={2,4}\s*([^=\n]*?(?:ボカコレ|VOCALOID\s*Collection)[^=\n]*?)\s*={2,4}\s*$", re.M)
 SEASON_YEAR_RE = re.compile(r"(20\d{2})")
+SEASON_LABEL_RE = re.compile(r"(20\d{2})\s*([春夏秋冬])")
 # 「原曲页面上挂着译文」的改曲条目：不做投稿年核对
 VARIANT_RE = re.compile(r"remix|リミックス|cover|カバー|再解釈|アレンジ", re.I)
 CONTRIB_HEADING_RE = re.compile(r"^===\s*([^=\n]+?)\s*===\s*$", re.M)
@@ -557,6 +559,36 @@ def split_sections(text: str, pattern: re.Pattern) -> List[Tuple[str, str]]:
         stop = marks[index + 1][1] if index + 1 < len(marks) else len(text)
         sections.append((name, text[end:stop]))
     return sections
+
+
+def season_token(name: str) -> str:
+    """任意写法 → ``2022秋``（``[[…|ボカコレ2022秋]]`` / ``2022 秋`` 都行）。"""
+    match = SEASON_LABEL_RE.search(str(name or ""))
+    return f"{match.group(1)}{match.group(2)}" if match else str(name or "").strip()
+
+
+def normalise_season(name: str) -> str:
+    """标题 → 规范赛季名 ``ボカコレ2022秋``。
+
+    页面的小节标题写法并不统一：``== ボカコレ2022秋 ==``、``=== ボカコレ2022秋 ===``、
+    ``== [[某条目|ボカコレ2022秋]] ==`` 都可能出现。以前只认第一种，认不出的那些小节
+    会被算进**上一个**小节——2026-10-28 就是这样：``--season 2022秋`` 匹配到 0 行，
+    而 2021秋 莫名其妙有 91 行。
+    """
+    text = str(name or "")
+    link = LINK_PAIR_RE.search(text)
+    if link:
+        text = link.group("alias") or link.group("target")
+    text = text.replace("[", "").replace("]", "").strip()
+    if SEASON_LABEL_RE.search(text):
+        return f"ボカコレ{season_token(text)}"
+    return text
+
+
+def season_sections(text: str) -> List[Tuple[str, str]]:
+    """页面 → ``[(规范赛季名, 正文)]``（标题写法随便）。"""
+    return [(normalise_season(name), body)
+            for name, body in split_sections(text, SEASON_HEADING_RE)]
 
 
 def section_sides(body: str) -> List[str]:
@@ -612,7 +644,7 @@ def navbox_titles(text: str) -> Set[str]:
 def page_season_songs(text: str) -> Dict[str, Dict[str, Set[int]]]:
     """搜集库页面 → ``{赛季: {赛道: {已录入的名次}}}``。"""
     result: Dict[str, Dict[str, Set[int]]] = {}
-    for name, body in split_sections(text, SEASON_HEADING_RE):
+    for name, body in season_sections(text):
         sides = section_sides(body)
         if not sides:
             continue
@@ -641,7 +673,7 @@ def page_overall_ranks(text: str) -> Dict[str, Set[int]]:
     TOP100 的名次已经在页面上时，不该再补一行 TOP100 的重复条目。
     """
     result: Dict[str, Set[int]] = {}
-    for name, body in split_sections(text, SEASON_HEADING_RE):
+    for name, body in season_sections(text):
         found = {int(value) for value in NOTE_OVERALL_RE.findall(body)}
         if found:
             result[name] = found
@@ -1974,15 +2006,54 @@ def is_variant_title(title: str) -> bool:
 
 
 def season_of_lines(text: str) -> Dict[int, str]:
-    """每一行属于哪个赛季（按它上方最近的 ``== ボカコレ… ==`` 标题）。"""
+    """每一行属于哪个赛季（按它上方最近的赛季标题，标题写法随便）。"""
     result: Dict[int, str] = {}
     season = ""
     for index, line in enumerate(text.split("\n")):
         heading = SEASON_HEADING_RE.search(line)
         if heading:
-            season = heading.group(1)
+            season = normalise_season(heading.group(1))
         result[index] = season
     return result
+
+
+def list_seasons(text: str) -> List[str]:
+    """``--list-seasons``：把页面里的赛季标题与行数打出来（排查「为什么这届查不到」）。
+
+    同时列出**没被认出**的可疑标题（标题里有「2022秋」这类年份季节、却没被当成赛季），
+    以及像子页面引用的行——那两种都是「这一节对机器人隐形」的常见原因。
+    """
+    lines = text.split("\n")
+    seasons = season_of_lines(text)
+    rows, _ = parse_rows(text)
+    row_counts: Counter = Counter()
+    filled: Counter = Counter()
+    for row in rows:
+        name = seasons.get(row.line, "") or "（无赛季）"
+        if any(row.text(side, column).strip()
+               for side in range(row.sides) for column in range(PER_SIDE)):
+            row_counts[name] += 1
+        for side in range(row.sides):
+            if row.text(side, COLUMNS.index("source")).strip():
+                filled[name] += 1
+    out: List[str] = []
+    for index, line in enumerate(lines):
+        heading = SEASON_HEADING_RE.search(line)
+        if heading:
+            name = normalise_season(heading.group(1))
+            level = len(line.strip()) - len(line.strip().lstrip("="))
+            out.append(f"第 {index + 1} 行  {'=' * level} {heading.group(1)} → {name}："
+                       f"{row_counts.get(name, 0)} 行、已填来源 {filled.get(name, 0)}")
+            continue
+        if line.lstrip().startswith("=") and SEASON_LABEL_RE.search(line):
+            out.append(f"第 {index + 1} 行  ⚠ 标题里有年份季节但没被认成赛季："
+                       f"{line.strip()[:60]}")
+        elif SEASON_LABEL_RE.search(line) and ("{{" in line or "}}" in line
+                                               or line.lstrip().startswith(("#", "*"))):
+            out.append(f"第 {index + 1} 行  ⚠ 可能是子页面引用：{line.strip()[:60]}")
+    if not out:
+        out.append("页面里没有找到任何赛季标题")
+    return out
 
 
 def atwiki_song(fetcher: Fetcher, index: Dict[str, str],
@@ -2049,11 +2120,11 @@ def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str]
         pid, translator, producer = found
         if not producer:
             continue                    # 没 P主 就没法补行（P主 那一列是必要的）
-        sides = section_sides(dict(split_sections(text, SEASON_HEADING_RE))[song.season])
+        sides = section_sides(dict(season_sections(text))[song.season])
         if song.track not in sides:
             continue
         side = sides.index(song.track)
-        body = dict(split_sections(text, SEASON_HEADING_RE))[song.season]
+        body = dict(season_sections(text))[song.season]
         rank = str(song.rank)
         overall = totals.get((song.season, title_key(song.title)))
         if song.track == "ROOKIE" and overall and section_uses_note(body, side):
@@ -2354,12 +2425,14 @@ def season_groups(songs: Sequence[Song], seasons: Dict[int, str],
                   wanted: Sequence[str] = ()) -> List[Tuple[str, List[Song]]]:
     """按赛季分组（保持页面顺序）→ ``[(赛季名, [歌…]), …]``。
 
-    ``wanted`` 给定时只留名字里含其中任一子串的赛季（``--season 2022秋``）。
+    ``wanted`` 给定时只留匹配的赛季：``--season 2022秋`` 与 ``--season ボカコレ2022秋``
+    等价（比 ``2022秋`` 这个标记，标题写法不同也认得）。
     """
+    tokens = {season_token(word) for word in wanted if str(word or "").strip()}
     groups: Dict[str, List[Song]] = {}
     for song in songs:
         name = seasons.get(song.line, "") or "（无赛季）"
-        if wanted and not any(word in name for word in wanted):
+        if tokens and season_token(name) not in tokens:
             continue
         groups.setdefault(name, []).append(song)
     return list(groups.items())
@@ -2419,6 +2492,13 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
             pywikibot.warning(f"{name}：有 {count} 行却认不出任何曲名，"
                               f"表格结构可能变了，这一节不会被补充")
     groups = season_groups(songs, seasons, wanted)
+    if wanted and not groups:
+        # 静默 0 行最坑：用户以为在补 2022秋，其实那个标题没被认出来。
+        detected = "、".join(name for name, _ in season_groups(songs, seasons)) or "（无）"
+        pywikibot.error(f"没有匹配的赛季：{'、'.join(wanted)}。"
+                        f"页面里的赛季是：{detected}；"
+                        f"跑 --list-seasons 看看标题到底怎么写的。")
+        return False
     if wanted:
         pywikibot.output("只查 " + "、".join(name for name, _ in groups)
                          + f"：{sum(len(group) for _, group in groups)} 行")
@@ -2582,10 +2662,18 @@ def main() -> None:
                              "（也可写成 --season 2022秋,2023春）；默认每一届都查")
     parser.add_argument("--probe-bahamut", default="",
                         help="试一试各个巴哈姆特搜索地址能不能扫出作品链接，然后退出")
+    parser.add_argument("--list-seasons", action="store_true",
+                        help="打印页面里认出来的赛季标题与行数，然后退出（排查某届查不到）")
     args = parser.parse_args()
 
     if args.probe_bahamut:
         probe_bahamut(args.probe_bahamut)
+        return
+    if args.list_seasons:
+        text = Page(pywikibot.Site(), PAGE_TITLE).text or ""
+        pywikibot.output(f"{PAGE_TITLE} 里的赛季（共 {len(text.splitlines())} 行）：")
+        for line in list_seasons(text):
+            pywikibot.output("  " + line)
         return
 
     wanted: List[str] = []

@@ -1601,6 +1601,93 @@ class SilentSectionTest(TestCase):
 
         self.assertTrue(any("认不出任何曲名" in str(call) for call in warning.call_args_list))
 
+class SeasonHeadingTest(TestCase):
+    """标题写法不统一时也要认得出（2026-10-28：`--season 2022秋` 匹配到 0 行）。"""
+
+    PAGE = """== ボカコレ2021秋 ==
+{| class="wikitable"
+|-
+! colspan="6"|TOP100
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 1 || [[甲]] || P甲 || 未创建 || ||
+|}
+
+=== ボカコレ2022秋 ===
+{| class="wikitable"
+|-
+! colspan="6"|TOP100
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 1 || [[乙]] || P乙 || 未创建 || ||
+|}
+
+== [[The VOCALOID Collection2023春|ボカコレ2023春]] ==
+{| class="wikitable"
+|-
+! colspan="6"|TOP100
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 1 || [[丙]] || P丙 || 未创建 || ||
+|}
+"""
+
+    def test_level_three_and_linked_headings_are_recognised(self):
+        names = [name for name, _ in tr.season_sections(self.PAGE)]
+        self.assertEqual(["ボカコレ2021秋", "ボカコレ2022秋", "ボカコレ2023春"], names)
+
+    def test_rows_are_not_folded_into_the_previous_season(self):
+        seasons = tr.season_of_lines(self.PAGE)
+        groups = dict(tr.season_groups(tr.songs_from(self.PAGE), seasons))
+        self.assertEqual(["甲"], [s.title_display for s in groups["ボカコレ2021秋"]])
+        self.assertEqual(["乙"], [s.title_display for s in groups["ボカコレ2022秋"]])
+
+    def test_the_short_season_form_matches(self):
+        songs = tr.songs_from(self.PAGE)
+        seasons = tr.season_of_lines(self.PAGE)
+        groups = tr.season_groups(songs, seasons, ["2022秋"])
+        self.assertEqual(["ボカコレ2022秋"], [name for name, _ in groups])
+
+    def test_the_full_season_form_matches_too(self):
+        songs = tr.songs_from(self.PAGE)
+        seasons = tr.season_of_lines(self.PAGE)
+        groups = tr.season_groups(songs, seasons, ["ボカコレ2023春"])
+        self.assertEqual(["ボカコレ2023春"], [name for name, _ in groups])
+
+    def test_a_filter_that_matches_nothing_is_reported(self):
+        class FakePage:
+            def __init__(self, site, title):
+                self.text = self_page
+
+            def save(self, **kwargs):
+                pass
+
+        self_page = self.PAGE
+        with patch.object(tr, "Page", FakePage), \
+                patch.object(tr, "load_cache", return_value={}), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries",
+                             side_effect=lambda s, f, t, r=False: (t, [])), \
+                patch.object(tr.pywikibot, "error") as error:
+            changed = tr.run_once(type("S", (), {"logged_in": lambda self: True})(),
+                                  write=False, fetcher=object(),
+                                  season=["2024夏"], prune=True)
+        self.assertFalse(changed)
+        message = " ".join(str(call) for call in error.call_args_list)
+        self.assertIn("没有匹配的赛季", message)
+        self.assertIn("ボカコレ2021秋", message, "要把认出来的赛季列出来")
+
+    def test_list_seasons_prints_each_heading(self):
+        lines = tr.list_seasons(self.PAGE)
+        self.assertTrue(any("2021秋" in line and "→ ボカコレ2021秋" in line for line in lines))
+        self.assertTrue(any("2022秋" in line for line in lines))
+        self.assertTrue(any("2023春" in line for line in lines))
+
+
 class SeasonGroupsTest(TestCase):
     def test_groups_keep_the_page_order(self):
         songs = tr.songs_from(TWO_SEASONS)

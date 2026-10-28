@@ -2149,14 +2149,16 @@ class NeteaseCandidateGuardTest(TestCase):
 
 
 class NavboxPairsTest(TestCase):
-    def test_reads_the_japanese_original_name(self):
+    def test_reads_the_original_name_from_the_alias(self):
         pairs = tr.navbox_pairs(NAVBOX)
         self.assertEqual("こころもとなく", pairs[tr.title_key("心不在焉")])
         self.assertEqual("メゾン", pairs[tr.title_key("maison")])
 
-    def test_entries_without_a_japanese_name_are_skipped(self):
+    def test_an_entry_without_an_alias_maps_to_itself(self):
+        """``{{lj|[[無題 ep.01]]}}``：没有 alias，模板写的就是原名。"""
         pairs = tr.navbox_pairs(NAVBOX)
-        self.assertNotIn(tr.title_key("ORDER"), pairs)
+        self.assertEqual("無題 ep.01", pairs[tr.title_key("無題 ep.01")])
+        self.assertEqual("ORDER", pairs[tr.title_key("ORDER")])
 
 
 class JapaneseNameWiringTest(TestCase):
@@ -2212,6 +2214,85 @@ class JapaneseNameWiringTest(TestCase):
                 patch.object(tr, "song_has_article", return_value=False):
             tr.add_missing_entries(None, object(), self.PAGE, {}, data, 10, False)
         self.assertEqual([("想象", "想像")], seen)
+
+
+class NeteaseRecallTest(TestCase):
+    """新守卫不能把本该收的译文挡住（2026-10-28 追问）。
+
+    规则：对上**原名**就算够具体，不要求音源名；只有「只对上笼统的列表名」时才收紧。
+    """
+
+    PAYLOAD = {"lrc": {"lyric": "[00:01.00]a\n[00:02.00]b\n[00:03.00]c"},
+               "tlyric": {"lyric": "[00:01.00]甲\n[00:02.00]乙"}}
+
+    def _candidate(self, name, artists, album=""):
+        return {"id": 9, "name": name,
+                "artists": [{"name": artist} for artist in artists],
+                "album": {"name": album}}
+
+    def _run(self, results, title, japanese=""):
+        with patch.object(tr, "netease_search",
+                          side_effect=lambda f, kw: results.get(kw, [])), \
+                patch.object(tr, "netease_lyrics", return_value=self.PAYLOAD), \
+                patch.object(tr, "translation_matches_original", return_value=True):
+            return tr.netease_candidate(None, title, japanese)
+
+    def test_a_match_on_the_original_name_needs_no_synth(self):
+        """``想像`` 对上原名就够了：网易云没挂音源名（只有 P主）也照收。"""
+        results = {"想像": [self._candidate("想像", ["なきそ"])]}
+        hit = self._run(results, "想象", "想像")
+        self.assertIsNotNone(hit)
+        self.assertEqual("なきそ", hit[1])
+
+    def test_a_match_only_on_the_listed_name_needs_a_synth(self):
+        results = {"想象": [self._candidate("想象", ["鲜于贞娥"])]}
+        self.assertIsNone(self._run(results, "想象", "想像"))
+
+    def test_a_match_on_the_listed_name_with_a_synth_is_accepted(self):
+        """没有原名可依时，挂着音源名仍然算数（别把这类整片挡掉）。"""
+        results = {"曲名": [self._candidate("曲名", ["初音ミク", "歩く人"])]}
+        hit = self._run(results, "曲名")
+        self.assertIsNotNone(hit)
+        self.assertEqual("歩く人", hit[1])
+
+    def test_the_original_name_is_searched_first(self):
+        searched = []
+        results = {"想像": [self._candidate("想像", ["なきそ"])]}
+        with patch.object(tr, "netease_search",
+                          side_effect=lambda f, kw: searched.append(kw) or results.get(kw, [])), \
+                patch.object(tr, "netease_lyrics", return_value=self.PAYLOAD), \
+                patch.object(tr, "translation_matches_original", return_value=True):
+            tr.netease_candidate(None, "想象", "想像")
+        self.assertEqual("想像", searched[0])
+
+    def test_it_falls_back_to_the_listed_name(self):
+        """原名搜不到时，再拿列表里的名字试一次（别直接放弃）。"""
+        searched = []
+        results = {"想像": [], "想象": [self._candidate("想象", ["初音ミク", "なきそ"])]}
+        with patch.object(tr, "netease_search",
+                          side_effect=lambda f, kw: searched.append(kw) or results.get(kw, [])), \
+                patch.object(tr, "netease_lyrics", return_value=self.PAYLOAD), \
+                patch.object(tr, "translation_matches_original", return_value=True):
+            hit = tr.netease_candidate(None, "想象", "想像")
+        self.assertEqual(["想像", "想象"], searched)
+        self.assertEqual("なきそ", hit[1])
+
+    def test_an_entry_whose_template_name_equals_the_listed_name(self):
+        """模板就写 ``[[想象]]``（没有原名可比）时，等同「只有列表名」→ 要音源名。"""
+        results = {"想象": [self._candidate("想象", ["鲜于贞娥"])]}
+        self.assertIsNone(self._run(results, "想象", "想象"))
+
+    def test_the_main_fill_path_is_unaffected(self):
+        """已经存在的行的填来源（``lookup_netease``）完全没动过，仍按 P主 核对。"""
+        song = Song(0, 0, "11", "hubble", "hubble", "歩く人")
+        candidate = self._candidate("hubble", ["歩く人"], "")
+        with patch.object(tr, "netease_search",
+                          side_effect=lambda f, kw: [candidate] if kw == "hubble" else []), \
+                patch.object(tr, "netease_lyrics", return_value=self.PAYLOAD), \
+                patch.object(tr, "translation_matches_original", return_value=True):
+            sources = tr.lookup_netease(None, song)
+        self.assertEqual(1, len(sources))
+        self.assertIn("网易云音乐", sources[0])
 
 
 class SeasonGroupsTest(TestCase):

@@ -642,25 +642,27 @@ def navbox_titles(text: str) -> Set[str]:
 
 
 def navbox_pairs(text: str) -> Dict[str, str]:
-    """大家族模板里的 ``[[条目名|日文原名]]`` → ``{条目名/日文名的 key: 日文原名}``。
+    """大家族模板里的曲名 → **模板上写的原名** ``{任一写法的 key: 原名}``。
 
-    贡献列表里写的是中文译名（``想象``、``受害者``），拿它去网易云搜会撞上同名的
-    非 Vocaloid 歌曲（2026-10-28：``想象`` 搜到 鲜于贞娥 的韩国歌）。模板里通常
-    带着**日文原名**（``{{lj|[[心不在焉|こころもとなく]]}}``），用它搜才找得准，
-    所以这里把对应关系留下来。
+    约定是 ``[[条目名|原名]]``（``{{lj|[[心不在焉|こころもとなく]]}}``、
+    ``[[maison|メゾン]]``），没建条目的歌直接写原名（``{{lj|[[無題 ep.01]]}}``），
+    所以「原名」取 alias，没有 alias 就是 target。
+
+    这件事的意义：贡献列表里写的是中文译名（``想象``、``受害者``），拿它去网易云搜会
+    撞上同名的非 Vocaloid 歌（2026-10-28：``想象`` 搜到 鲜于贞娥 的韩国歌）。
+    模板里的原名（``想像``）才是能对上音乐平台的检索词。
     """
     pairs: Dict[str, str] = {}
     for match in LINK_PAIR_RE.finditer(text):
         target = (match.group("target") or "").strip()
         alias = (match.group("alias") or "").strip()
-        japanese = alias if has_kana(alias) else (
-            target if has_kana(target) and not has_kana(alias) else "")
-        if not japanese:
+        original = alias or target
+        if not original:
             continue
         for name in (target, alias):
             key = title_key(name)
             if key:
-                pairs.setdefault(key, japanese)
+                pairs.setdefault(key, original)
     return pairs
 
 
@@ -2181,26 +2183,40 @@ def netease_candidate(fetcher: Fetcher, title: str,
     这条是给**表格是空的**赛季补行用的：活动清单告诉我们「这一届第 N 名是这首歌」，
     但没有 P主；网易云上这类投稿由 P主 自己上传，歌手位就是 P主，所以拿它当 P主。
 
-    判据（一条都不放宽）：
+    ``japanese``：大家族模板上写的**原名**。贡献列表用的是中文译名（``想象``），
+    拿它搜会撞同名的非 Vocaloid 歌（2026-10-28：``想象`` → 鲜于贞娥 的韩国歌、
+    ``受害者`` → 乐队 TEENAGE DISASTER），所以原名优先搜、优先认。
 
-    * 歌名对上（贡献列表写的是中文译名时，``japanese`` 给了日文原名，两个都试）；
-    * 结果里**必须出现音源名**（``candidate_has_synth``）——否则就是同名别的歌；
+    判据：
+
+    * 歌名要对上（原名或列表里的名字，任一）；
+    * **对上的是原名**（且原名和列表里的名字不同）→ 够具体，直接认；
+      只对上列表里的名字 → 名字太笼统，还要求结果里出现音源名
+      （``candidate_has_synth``），否则就是同名别的歌。这样「有原名的歌照收、
+      只有中文名的才收紧」，不会把本该收的译文挡在外面；
     * 译文和原文对得上（``translation_matches_original``）；
     * 歌手位除了音源名之外还要有 P主（``producer_from_netease``）。
     """
-    wanted = {title_key(title), title_key(japanese)}
-    wanted.discard("")
+    title_key_ = title_key(title)
+    original_key = title_key(japanese)
+    wanted = {key for key in (title_key_, original_key) if key}
     if not wanted or is_variant_title(title):
         return None
+    # 原名和列表里的名字一样（模板直接写的就是这个名字）时，它并不比列表名更具体
+    specific_key = original_key if original_key and original_key != title_key_ else ""
     keywords = [str(word).strip() for word in (japanese, title) if str(word or "").strip()]
     for keyword in dict.fromkeys(keywords):
         for candidate in netease_search(fetcher, keyword):
-            if not (netease_titles(candidate) & wanted):
+            matched = netease_titles(candidate) & wanted
+            if not matched:
                 continue
             if is_variant_title(str(candidate.get("name") or "")):
                 continue
-            if not candidate_has_synth(candidate):
-                continue                # 没有音源名：多半是同名的非 Vocaloid 歌
+            if not (specific_key and specific_key in matched):
+                # 只对上了笼统的名字：必须有音源名才敢认
+                if not candidate_has_synth(candidate):
+                    pywikibot.output(f"  · {title}：网易云只搜到同名的非 Vocaloid 歌，跳过")
+                    continue
             producer = producer_from_netease(candidate)
             if not producer:
                 continue                # 只有音源名：P主 说不清，不补这一行

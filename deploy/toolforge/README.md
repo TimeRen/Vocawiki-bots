@@ -449,7 +449,7 @@ Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `sched
 | ~~VOCALOID中文歌词wiki~~ | **暂停**（`USE_ATWIKI = False`）：2026-10-22 页面主人看到 4 笔同名不同曲后要求「暂时不收录中文歌词wiki」 | 恢复时还要过「投稿年 = 赛季年」那一关，见下 |
 | 网易云音乐 | 歌名（含 `alias` / `transNames`）对上**且** P主 出现在歌手 / 专辑名里，`tlyric` 非空**且和原文对照得上**（译文行落在原文的时间点上） | 只有歌名对上一定不够（见下）；没有对照的 `tlyric` 不算（见下）；歌名搜不到时再搜「P主 歌名」 |
 | B站 | 条目里的 `{{BilibiliVideo}}` 优先，否则关键词搜索；搜来的视频要标题 / 简介里**同时**有歌名和 P主 | 读视频简介、评论区、弹幕里的「`翻译：某人`」+ 中文歌词；弹幕只在别的来源都空着时才读 |
-| 巴哈姆特 | 站内搜索（`bahamut_search`，见下）+ 顺着 B站简介里的外链进入；搜到的页面要标题对得上、正文有译文署名 | 站内搜索是前端渲染的：结果链接藏在 XHR 里，静态地址回的是空壳（`?q=` 200 + 85KB、0 个链接）。所以按「基址 × 参数名」逐个试，再不行就照页面引用的 JS 找接口，最后用 `site:home.gamer.com.tw` 搜索引擎兜底 |
+| 巴哈姆特 | `bahamut_search`（见下）+ 顺着 B站简介里的外链进入；搜到的页面要标题对得上、正文有译文署名 | 站内搜索是前端渲染的空壳（0 个链接），改用 `site:home.gamer.com.tw` 搜索引擎拿作品页（实测 10 个链接），站内矩阵与「照 JS 找接口」作后备 |
 
 几点实现细节：
 
@@ -509,33 +509,54 @@ Toolforge 恢复后如果想停掉某一路，删掉对应工作流里的 `sched
 * 只跑某几届：`--season 2022秋`，可以写多个（`--season 2022秋 --season 2023春`
   或 `--season 2022秋,2023春`）。这一轮只查、只写这几届，删行与补录也一并跳过
   （别的赛季一个字都不动），用来单独收尾或验证某一届到底卡在哪。
+* 只跑某个来源：`--only-source bahamut`（也可 `netease` / `bilibili` / `atwiki`，
+  可叠加）。新结论会和缓存里已有的来源**合并**，不会把别处查到的更全的结果冲掉。
+  巴哈姆特这条刚打通时，用它一轮就能把「只差巴哈姆特译文」的格子补上，不用重查
+  网易云与 B站：
 
-### 巴哈姆特：站内搜索是怎么抓的
+  ```bash
+  python bots/vocaloid_collection_translations.py --only-source bahamut            # 干跑
+  python bots/vocaloid_collection_translations.py --only-source bahamut --write     # 写页面
+  ```
 
-站内搜索不是「一个地址」：它是前端渲染的，结果由 XHR 拉回来，静态地址回的是空壳
-（2026-10-28 实测 `search.gamer.com.tw/?q=…` → HTTP 200、85 444 字节、**0** 个作品
-链接）。所以按三层来找：
+### 巴哈姆特：作品页是怎么找到的
 
-1. **矩阵**：`BAHAMUT_SEARCH_BASES`（`search.gamer.com.tw` 两套 + `home.gamer.com.tw`
-   的 `search.php` / `creationSearch.php`）× `BAHAMUT_SEARCH_PARAMS`（`q` /
-   `keyword` / `kw`）共 12 个组合，谁先扫出 `artwork.php?sn=`（旧写法
-   `creationDetail.php?sn=` 也认）就用谁；命中的组合写进
-   `data/bahamut_search.pickle`（30 天），之后只试这一个。
-2. **照 JS 找接口**（`bahamut_api_templates`）：静态组合全是空壳时，读搜索页引用的
-   前 4 个 bundle，把里面像接口的路径（含 `api` / `ajax`）挑出来拼成
-   `…?参数={kw}` 再试。
-3. **搜索引擎兜底**（`web_search_bahamut`）：`site:home.gamer.com.tw 歌名` 用
-   DuckDuckGo HTML / Bing 各问一次，拿到的作品页链接照样要过核对。
+搜索结果页是前端渲染的，**静态地址全是空壳**（2026-10-28 用
+`--probe-bahamut 千本桜` 逐个试出来的）：
 
-三层都失败时整轮只报一次 `WARNING` 并停手（不会为每首歌白试二十来个地址）。查具体
-情况：
+| 地址 | 结果 |
+| --- | --- |
+| `html.duckduckgo.com` + `site:home.gamer.com.tw` | **200、31 534 字节、10 个作品链接** ✓ |
+| `search.gamer.com.tw/?q=…`（`q` / `keyword` / `kw` × 带不带 `t=3`） | SSL EOF（TLS 握手被掐） |
+| `home.gamer.com.tw/search.php?…` | 200，但 58–77 KB 全是 JS 空壳、0 个链接 |
+| `home.gamer.com.tw/creationSearch.php?…` | 200、1 968 字节、0 个链接 |
+| `www.bing.com/search` | 200、122 238 字节、0 个链接 |
+
+所以 `bahamut_search_chain()` 的顺序是：**搜索引擎 → 站内矩阵 → 照 JS 找接口**。
+
+1. **搜索引擎**（`WEB_SEARCH_URLS`）：DuckDuckGo HTML 优先、Bing 次之，查询写成
+   `site:home.gamer.com.tw 歌名`。拿到的是 `home.gamer.com.tw/artwork.php?sn=…`，
+   正是要的作品页。DDG 的结果链接是 `//duckduckgo.com/l/?uddg=…` 这种转义形式，
+   `bahamut_artwork_urls()` 会先整体反转义再扫，所以照样认得出。
+2. **站内矩阵**（`bahamut_search_templates`）：`BAHAMUT_SEARCH_BASES`（4 个基址）×
+   `BAHAMUT_SEARCH_PARAMS`（`q` / `keyword` / `kw`）共 12 个组合。现在一个都不通，
+   但留着当后备——哪天对方改成服务端渲染就自动接上。
+3. **照 JS 找接口**（`bahamut_api_templates`）：站内那一页回的是空壳时，读它引用的
+   前 4 个 bundle、把像接口的路径挑出来拼成 `…?参数={kw}` 再试（应对对方换 XHR 接口）。
+
+命中的地址写进 `data/bahamut_search.pickle`（30 天），之后只先试它；三层都失败时
+整轮只报一次 `WARNING` 并停手（不会为每首歌白试二十来个地址）。旧写法
+`creationDetail.php?sn=…` 也认。
+
+查具体情况：
 
 ```bash
 python bots/vocaloid_collection_translations.py --probe-bahamut 千本桜
 ```
 
-每个组合打印 `HTTP 状态 / 字节数 / 作品链接数`；全都不行时还会把搜索页引用的 JS 与
-其中出现的接口地址列出来——照着把能返回结果的地址加进 `BAHAMUT_SEARCH_BASES` 即可。
+每个地址打印 `HTTP 状态 / 字节数 / 作品链接数`，最后给出结论（`结论：用 …`）；全都不行
+时还会把搜索页引用的 JS 与其中出现的接口地址列出来——照着把能返回结果的地址加进
+`BAHAMUT_SEARCH_BASES` 即可。
 
 ### 删掉「已经有条目」的行（每小时，`--prune-only`）
 

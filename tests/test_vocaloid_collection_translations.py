@@ -1490,7 +1490,7 @@ class LimitedRoundTest(TestCase):
         page = self.FakePage(None, None)
         page.text = page_text
 
-        def fake_sources(fetcher, song, index, site=None, season=""):
+        def fake_sources(fetcher, song, index, site=None, season="", only=()):
             asked.append(song.title_display)
             return []
 
@@ -1671,10 +1671,11 @@ class PruneOnlyTest(TestCase):
 
 
 class BahamutSearchTest(TestCase):
-    """站内搜索是「基址 × 参数名」的矩阵，命中后要记住。
+    """找巴哈姆特作品页：搜索引擎优先（实测唯一能扫出链接的），站内矩阵做后备。
 
-    2026-10-28 实测：`search.gamer.com.tw/?q=…` 回 200 + 85KB 的空壳、0 个作品链接，
-    所以不能只认一个地址；管用的组合还要落盘，别每首歌都把 12 个组合试一遍。
+    2026-10-28 实测 `search.gamer.com.tw` 是 SSL EOF、`home.gamer.com.tw/search.php`
+    回 200 但 0 个链接、`creationSearch.php` 只有 1968 字节，只有
+    `html.duckduckgo.com` + `site:home.gamer.com.tw` 给了 10 个作品链接。
     """
 
     class FakeFetcher:
@@ -1705,13 +1706,20 @@ class BahamutSearchTest(TestCase):
                              side_effect=lambda value, path=None: store.update(value)):
             yield store
 
-    def test_the_matrix_covers_both_bases_and_every_param(self):
-        templates = tr.bahamut_search_templates()
+    def test_the_search_engine_comes_first(self):
+        chain = tr.bahamut_search_chain()
+        self.assertEqual(list(tr.WEB_SEARCH_URLS), chain[:len(tr.WEB_SEARCH_URLS)])
+        self.assertIn("duckduckgo", chain[0])
+        self.assertIn("site:home.gamer.com.tw", urllib.parse.unquote(chain[0]),
+                      "限定站点，否则搜到的是别人的文章")
+
+    def test_the_station_matrix_is_kept_as_the_backup(self):
+        chain = tr.bahamut_search_chain()
         self.assertEqual(len(tr.BAHAMUT_SEARCH_BASES) * len(tr.BAHAMUT_SEARCH_PARAMS),
-                         len(templates))
+                         len(chain) - len(tr.WEB_SEARCH_URLS))
         for base in tr.BAHAMUT_SEARCH_BASES:
             for param in tr.BAHAMUT_SEARCH_PARAMS:
-                self.assertIn(base.format(param=param, kw="{kw}"), templates)
+                self.assertIn(base.format(param=param, kw="{kw}"), chain)
 
     def test_extracts_and_dedupes_artwork_links(self):
         self.assertEqual(
@@ -1733,33 +1741,39 @@ class BahamutSearchTest(TestCase):
         self.assertEqual(["https://home.gamer.com.tw/artwork.php?sn=6222"],
                          tr.bahamut_artwork_urls(escaped))
 
-    def test_the_first_working_combination_wins_and_is_saved(self):
-        fetcher = self.FakeFetcher(["<html>JS 空壳，什么都没有</html>", self.HTML])
+    def test_the_first_working_address_wins_and_is_saved(self):
+        fetcher = self.FakeFetcher(["<html>没有链接</html>", self.HTML])
         with self.sandbox() as store:
             found = tr.bahamut_search(fetcher, "千本桜")
-            self.assertEqual(
-                tr.BAHAMUT_SEARCH_BASES[0].format(param="keyword", kw="{kw}"),
-                tr._BAHAMUT_SEARCH_WORKING, "第一个组合（?q=）是空壳，第二个顶上")
+            self.assertEqual(tr.WEB_SEARCH_URLS[1], tr._BAHAMUT_SEARCH_WORKING,
+                             "第一个地址（DuckDuckGo）没给链接，Bing 给了就用 Bing")
             self.assertEqual(tr._BAHAMUT_SEARCH_WORKING, store.get("url"),
-                             "管用的组合要落盘，别每首歌都试 12 遍")
+                             "管用的地址要落盘，别每首歌都试十来个")
         self.assertEqual(2, len(found), "两个不同的 sn，重复的那个不算")
 
-    def test_the_saved_combination_is_tried_first_next_time(self):
-        working = tr.BAHAMUT_SEARCH_BASES[3].format(param="kw", kw="{kw}")
+    def test_the_saved_address_is_tried_first_next_time(self):
+        working = tr.WEB_SEARCH_URLS[0]
         fetcher = self.FakeFetcher([self.HTML])
         with self.sandbox(working=working):
             tr.bahamut_search(fetcher, "千本桜")
         self.assertTrue(fetcher.asked[0].startswith(working.split("{kw}")[0]))
 
-    def test_a_stale_saved_combination_is_ignored(self):
-        fetcher = self.FakeFetcher([""] * len(tr.bahamut_search_templates()))
-        with self.sandbox(store={"url": tr.BAHAMUT_SEARCH_BASES[0],
+    def test_a_stale_saved_address_is_ignored(self):
+        with self.sandbox(store={"url": tr.WEB_SEARCH_URLS[0],
                                  "at": time.time() - tr.BAHAMUT_SEARCH_TTL - 1}):
             self.assertEqual("", tr.load_bahamut_search())
 
+    def test_the_saved_address_wins_even_if_it_is_a_station_one(self):
+        """以前记住的是站内组合时也要先试它（万一那天它恢复服务端渲染）。"""
+        station = tr.BAHAMUT_SEARCH_BASES[0].format(param="q", kw="{kw}")
+        fetcher = self.FakeFetcher([self.HTML])
+        with self.sandbox(working=station):
+            tr.bahamut_search(fetcher, "千本桜")
+        self.assertTrue(fetcher.asked[0].startswith("https://search.gamer.com.tw/?q="))
+
     def test_no_result_means_no_links_and_marks_the_round_dead(self):
         """全都扫不出东西时，这一轮别再为每首歌白试十来次。"""
-        fetcher = self.FakeFetcher([""] * len(tr.bahamut_search_templates()))
+        fetcher = self.FakeFetcher([""] * (len(tr.bahamut_search_chain()) + 4))
         with self.sandbox():
             self.assertEqual([], tr.bahamut_search(fetcher, "千本桜"))
             self.assertTrue(tr._BAHAMUT_SEARCH_DEAD)
@@ -1776,30 +1790,6 @@ class BahamutSearchTest(TestCase):
             sources = tr.lookup_bahamut_search(fetcher, song)
         self.assertEqual(["[u 巴哈姆特(by. 月勳)]"], sources)
         verify.assert_called()
-
-    def test_the_web_search_takes_over_when_the_site_search_is_empty(self):
-        """站内搜索扫不出东西时，用 ``site:home.gamer.com.tw`` 兜底，拿到链接照样核对。"""
-        song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
-        fetcher = self.FakeFetcher([""] * len(tr.bahamut_search_templates()) + [self.HTML])
-        with self.sandbox(), \
-                patch.object(tr, "_WEB_SEARCH_WORKING", ""), \
-                patch.object(tr, "_WEB_SEARCH_DEAD", False), \
-                patch.object(tr, "lookup_bahamut",
-                             return_value=["[u 巴哈姆特(by. 月勳)]"]):
-            sources = tr.lookup_bahamut_search(fetcher, song)
-        self.assertEqual(["[u 巴哈姆特(by. 月勳)]"], sources)
-        self.assertIn("duckduckgo", fetcher.asked[-1])
-
-    def test_the_web_search_is_not_asked_twice_a_round(self):
-        fetcher = self.FakeFetcher([""] * (len(tr.bahamut_search_templates())
-                                           + len(tr.WEB_SEARCH_URLS)))
-        with self.sandbox(), \
-                patch.object(tr, "_WEB_SEARCH_WORKING", ""), \
-                patch.object(tr, "_WEB_SEARCH_DEAD", False):
-            tr.web_search_bahamut(fetcher, "甲")
-            asked = len(fetcher.asked)
-            tr.web_search_bahamut(fetcher, "乙")
-            self.assertEqual(asked, len(fetcher.asked))
 
 
 class BahamutApiDiscoveryTest(TestCase):
@@ -1857,6 +1847,82 @@ class BahamutApiDiscoveryTest(TestCase):
             save.assert_called()
 
         self.assertEqual(["https://home.gamer.com.tw/artwork.php?sn=6103400"], found)
+
+
+class OnlySourceTest(TestCase):
+    """``--only-source bahamut``：只敲巴哈姆特，且不冲掉缓存里更全的结论。"""
+
+    def _collect(self, only):
+        song = Song(0, 0, "11", "千本桜", "千本樱", "黒うさP")
+        with patch.object(tr, "USE_ATWIKI", True), \
+                patch.object(tr, "lookup_atwiki", return_value=["[a 甲]"]), \
+                patch.object(tr, "lookup_netease", return_value=["[b 乙]"]), \
+                patch.object(tr, "lookup_bilibili", return_value=([], [], [])), \
+                patch.object(tr, "lookup_bahamut_search",
+                             return_value=["[u 巴哈姆特(by. 月勳)]"]):
+            return tr.collect_sources(object(), song, {}, only=only)
+
+    def test_bahamut_only_skips_the_other_sites(self):
+        self.assertEqual(["[u 巴哈姆特(by. 月勳)]"], self._collect(["bahamut"]))
+
+    def test_no_filter_asks_every_source(self):
+        self.assertEqual(["[a 甲]", "[b 乙]"], self._collect(()))
+
+    def test_bahamut_is_skipped_when_another_source_is_named(self):
+        with patch.object(tr, "lookup_netease", return_value=["[b 乙]"]), \
+                patch.object(tr, "lookup_bilibili", return_value=([], [], [])), \
+                patch.object(tr, "lookup_bahamut_search") as search:
+            sources = tr.collect_sources(object(), Song(0, 0, "1", "曲", "曲", "P"),
+                                         {}, only=("netease",))
+        search.assert_not_called()
+        self.assertEqual(["[b 乙]"], sources)
+
+    class FakePage:
+        def __init__(self, site, title):
+            self.text = TWO_SEASONS
+
+        def save(self, **kwargs):
+            pass
+
+    class FakeSite:
+        def logged_in(self):
+            return True
+
+    def test_a_bahamut_only_round_keeps_the_sources_already_cached(self):
+        cached = {tr.title_key("甲"): {"at": time.time() - 10, "v": tr.CACHE_VERSION,
+                                       "sources": ["[b 乙]"], "written": ""}}
+        with patch.object(tr, "Page", self.FakePage), \
+                patch.object(tr, "load_cache", return_value=cached), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries",
+                             side_effect=lambda s, f, t, r=False: (t, [])), \
+                patch.object(tr, "collect_sources",
+                             return_value=["[u 巴哈姆特(by. 月勳)]"]):
+            tr.run_once(self.FakeSite(), write=False, fetcher=object(),
+                        only=("bahamut",))
+
+        self.assertEqual(["[b 乙]", "[u 巴哈姆特(by. 月勳)]"],
+                         cached[tr.title_key("甲")]["sources"],
+                         "只有巴哈姆特时，以前网易云查到的不能丢")
+
+    def test_a_bahamut_only_round_ignores_the_cache_validity(self):
+        """刚查过网易云的歌也要再用巴哈姆特查一遍（否则 --only-source 白跑）。"""
+        fresh = {tr.title_key("甲"): {"at": time.time(), "v": tr.CACHE_VERSION,
+                                      "sources": ["[b 乙]"], "written": ""}}
+        asked = []
+        with patch.object(tr, "Page", self.FakePage), \
+                patch.object(tr, "load_cache", return_value=fresh), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries",
+                             side_effect=lambda s, f, t, r=False: (t, [])), \
+                patch.object(tr, "collect_sources",
+                             side_effect=lambda f, song, index, site=None,
+                             season="", only=(): asked.append(song.title_display) or []):
+            tr.run_once(self.FakeSite(), write=False, fetcher=object(),
+                        only=("bahamut",))
+        self.assertIn("甲", asked)
 
 
 class BahamutSearchWiringTest(TestCase):

@@ -1799,7 +1799,7 @@ def probe_bahamut(keyword: str) -> None:
         except Exception as exc:        # noqa: BLE001 - 探测就是把失败打出来
             pywikibot.output(f"✗ {url}\n    {type(exc).__name__}: {exc}")
             continue
-        page = page or raw
+        page = raw if SCRIPT_SRC_RE.search(raw) else (page or raw)
         found = bahamut_artwork_urls(raw)
         pywikibot.output(f"{'✓' if found else '·'} {url}\n"
                          f"    HTTP {status}、{len(raw)} 字节、作品链接 {len(found)} 个"

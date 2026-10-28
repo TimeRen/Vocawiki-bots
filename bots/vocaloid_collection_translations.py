@@ -2344,6 +2344,51 @@ def _row_blocks(text: str) -> List[List[Row]]:
     return blocks
 
 
+def pack_rows(text: str, wanted: Sequence[str] = ()) -> Tuple[str, int]:
+    """把「只有左半边」「只有右半边」的行配成一行（两侧各一首）→ ``(新文本, 并了几行)``。
+
+    补行时一行只填一侧（`build_row`），于是每加一首就另起一行：2026-10-28 的
+    2022秋 就这样堆出三十多行「左栏全空」。这里把同一张表里
+    「左侧有、右侧空」与「左侧空、右侧有」的行按出现顺序配对合并：两侧各自的顺序
+    不变、曲目一个不丢，行数减半，左栏不再是一片空白。
+
+    ``wanted`` 给了就只处理这几届的表格（``--season`` 时别动别的届）。
+    """
+    tokens = {season_token(word) for word in wanted if str(word or "").strip()}
+    lines = text.split("\n")
+    seasons = season_of_lines(text)
+    hosts: Dict[int, Row] = {}
+    doomed: List[int] = []
+    for block in _row_blocks(text):
+        if any(row.sides != 2 for row in block):
+            continue
+        name = seasons.get(block[0].line, "")
+        if tokens and season_token(name) not in tokens:
+            continue
+        lefts: List[Row] = []
+        rights: List[Row] = []
+        for row in block:
+            left = any(row.text(0, column).strip() for column in range(PER_SIDE))
+            right = any(row.text(1, column).strip() for column in range(PER_SIDE))
+            if left and not right:
+                lefts.append(row)
+            elif right and not left:
+                rights.append(row)
+        # 按出现顺序配对：左侧的每一首配一首右侧的（页面本来就是两首一行）
+        for host, donor in zip(lefts, rights):
+            _put_side_cells(host, 1, _side_cells(donor, 1))
+            hosts[host.line] = host
+            doomed.append(donor.line)
+    if not doomed:
+        return text, 0
+    for line, row in hosts.items():
+        lines[line] = join_row(row.cells)
+    text = "\n".join(lines)
+    for line in sorted(doomed, reverse=True):
+        text = remove_row(text, line)
+    return text, len(doomed)
+
+
 def compact_sides(text: str) -> Tuple[str, int]:
     """每侧的空位挪到表尾，别在表格中间留一块空白 → ``(新文本, 挪动的行数)``。
 
@@ -2772,6 +2817,21 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
             pywikibot.warning(f"补录未录入的曲目失败：{exc}")
         if not USE_ATWIKI:
             pywikibot.output("中文歌词wiki 已暂停收录：补行时只看网易云等外站")
+
+    # 结构收尾：把「只填了一侧」的行配成两侧各一首。补行时每首另起一行，会堆出一长条
+    # 空白栏（2026-10-28：2022秋 左栏三十多行空着），这一步把行数减半。
+    text, packed = pack_rows(text, wanted)
+    if packed:
+        pywikibot.output(f"  {packed} 行只是半边有内容：已与另一侧配成一行")
+    if prune:
+        # 只清了一侧的行会把那一侧空出半格：同侧后面的曲目上移补位，再把整行
+        # 空白的空壳删掉，表格中间就不会留一条空白带（2026-10-25 反馈）。
+        text, moved = compact_sides(text)
+        if moved:
+            pywikibot.output(f"  {moved} 行的曲目上移补位")
+        text, blanks = remove_blank_rows(text)
+        if blanks:
+            pywikibot.output(f"  删掉 {blanks} 个整行空白的行")
     if prune and not wanted:
         # 只清了一侧的行会把那一侧空出半格：同侧后面的曲目上移补位，再把整行
         # 空白的空壳删掉，表格中间就不会留一条空白带（2026-10-25 反馈）。

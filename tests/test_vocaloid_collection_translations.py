@@ -1955,6 +1955,124 @@ class AddMissingSkipsExistingTest(TestCase):
         self.assertEqual("MINO-U", seen[0][1], "要用网易云给的 P主 去核对条目")
 
 
+class PackRowsTest(TestCase):
+    """补行时每首另起一行 → 左栏堆出一长条空白（2026-10-28 反馈）。
+
+    `pack_rows` 把「只有左半边」「只有右半边」的行按顺序配成两侧各一首。
+    """
+
+    PAGE = """== ボカコレ2022秋 ==
+{| class="wikitable "
+|-
+! colspan="6"|TOP100 !! colspan="6"|ROOKIE
+|-
+! 名次 !! 曲名 !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名 !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| || || || || || || 12 || [[右甲]] || P || 未创建 || [u 源] || 
+|-
+| || || || || || || 21 || [[右乙]] || P || 未创建 || [u 源] || 
+|-
+| 42 || [[左甲]] || P || 未创建 || [u 源] || || || || || || || 
+|-
+| 47 || [[左乙]] || P || 未创建 || [u 源] || || || || || || || 
+|}
+"""
+
+    def test_two_half_rows_become_one(self):
+        text, packed = tr.pack_rows(self.PAGE)
+        self.assertEqual(2, packed)
+        rows, _ = tr.parse_rows(text)
+        self.assertEqual(2, len(rows), "4 行 → 2 行")
+        for row in rows:
+            self.assertTrue(row.text(0, tr.COLUMNS.index("title")).strip())
+            self.assertTrue(row.text(1, tr.COLUMNS.index("title")).strip())
+
+    def test_nothing_is_lost(self):
+        text, _ = tr.pack_rows(self.PAGE)
+        for title in ("左甲", "左乙", "右甲", "右乙"):
+            self.assertIn(title, text)
+
+    def test_each_side_keeps_its_order(self):
+        text, _ = tr.pack_rows(self.PAGE)
+        rows, _ = tr.parse_rows(text)
+        left = [tr.link_display(row.text(0, tr.COLUMNS.index("title"))) for row in rows]
+        right = [tr.link_display(row.text(1, tr.COLUMNS.index("title"))) for row in rows]
+        self.assertEqual(["左甲", "左乙"], [item for item in left if item])
+        self.assertEqual(["右甲", "右乙"], [item for item in right if item])
+
+    def test_a_balanced_table_is_untouched(self):
+        page = """{| class="wikitable"
+|-
+! colspan="6"|TOP100 !! colspan="6"|ROOKIE
+|-
+! 名次 !! 曲名 !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名 !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|-
+| 1 || [[左]] || P || 未创建 || || || 2 || [[右]] || P || 未创建 || ||
+|}"""
+        self.assertEqual((page, 0), tr.pack_rows(page))
+
+    def test_the_season_filter_leaves_other_seasons_alone(self):
+        page = self.PAGE + "\n" + self.PAGE.replace("2022秋", "2023春")
+        text, packed = tr.pack_rows(page, ["2022秋"])
+        self.assertEqual(2, packed, "只并 2022秋 的那两行")
+        rows, _ = tr.parse_rows(text)
+        seasons = tr.season_of_lines(text)
+        per = {}
+        for row in rows:
+            per.setdefault(seasons[row.line], []).append(row)
+        self.assertEqual(2, len(per["ボカコレ2022秋"]), "指定的那届并成两行")
+        self.assertEqual(4, len(per["ボカコレ2023春"]), "别的那届原样不动")
+
+
+class HalfRowsAfterAddMissingTest(TestCase):
+    """补完行以后，页面上不该再出现「整行只有一侧」的堆叠。"""
+
+    PAGE = """== ボカコレ2022秋 ==
+{| class="wikitable "
+|-
+! colspan="6"|TOP100 !! colspan="6"|ROOKIE
+|-
+! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注 !! 名次 !! 曲名(无翻译则原名字) !! P主 !! 条目状态 !! 翻译来源 !! 备注
+|}
+"""
+    CONTRIB = {"ボカコレ2022秋": {"TOP100": {42: ("左甲", False)},
+                                  "ROOKIE": {12: ("右甲", False), 21: ("右乙", False)}}}
+
+    class FakePage:
+        def __init__(self, site, title):
+            self.text = HalfRowsAfterAddMissingTest.PAGE
+            self.saved = []
+
+        def save(self, **kwargs):
+            self.saved.append(self.text)
+
+    class FakeSite:
+        def logged_in(self):
+            return True
+
+    def test_the_round_packs_the_half_rows(self):
+        page = self.FakePage(None, None)
+        with patch.object(tr, "Page", return_value=page), \
+                patch.object(tr, "load_cache", return_value={}), \
+                patch.object(tr, "save_cache"), \
+                patch.object(tr, "atwiki_page_index", return_value={}), \
+                patch.object(tr, "prune_entries",
+                             side_effect=lambda s, f, t, r=False: (t, [])), \
+                patch.object(tr, "collect_sources", return_value=[]), \
+                patch.object(tr, "season_data",
+                             return_value={"contrib": self.CONTRIB, "titles": {}}), \
+                patch.object(tr, "netease_candidate",
+                             side_effect=lambda f, t: ("[u 网易云音乐]", "P")):
+            tr.run_once(self.FakeSite(), write=True, fetcher=object(), add_missing=True)
+
+        rows, _ = tr.parse_rows(page.saved[0])
+        self.assertEqual(2, len(rows), "三首补完并成两行（一行两侧、一行只有右侧）")
+        both = [row for row in rows
+                if row.text(0, tr.COLUMNS.index("title")).strip()
+                and row.text(1, tr.COLUMNS.index("title")).strip()]
+        self.assertEqual(1, len(both), "至少配成一整行，左栏不再是一条空白")
+
+
 class SeasonGroupsTest(TestCase):
     def test_groups_keep_the_page_order(self):
         songs = tr.songs_from(TWO_SEASONS)

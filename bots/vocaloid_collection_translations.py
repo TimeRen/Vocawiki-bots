@@ -2832,15 +2832,6 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
         text, blanks = remove_blank_rows(text)
         if blanks:
             pywikibot.output(f"  删掉 {blanks} 个整行空白的行")
-    if prune and not wanted:
-        # 只清了一侧的行会把那一侧空出半格：同侧后面的曲目上移补位，再把整行
-        # 空白的空壳删掉，表格中间就不会留一条空白带（2026-10-25 反馈）。
-        text, moved = compact_sides(text)
-        if moved:
-            pywikibot.output(f"  {moved} 行的曲目上移补位")
-        text, blanks = remove_blank_rows(text)
-        if blanks:
-            pywikibot.output(f"  删掉 {blanks} 个整行空白的行")
     if text == original:
         pywikibot.output("页面无需更新。")
         return False

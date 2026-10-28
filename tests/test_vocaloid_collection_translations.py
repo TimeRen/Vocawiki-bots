@@ -5,7 +5,7 @@ import urllib.error
 import urllib.parse
 from contextlib import contextmanager
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import bots.vocaloid_collection_translations as tr
 
@@ -1739,7 +1739,7 @@ class EmptyTableBootstrapTest(TestCase):
     def test_a_netease_hit_produces_a_row(self):
         data = {"contrib": self.CONTRIB, "titles": {}}
         with patch.object(tr, "netease_candidate",
-                          side_effect=lambda fetcher, title:
+                          side_effect=lambda fetcher, title, japanese="":
                           ("[u 网易云音乐(by. 光明若叶睦)]", "buzzG")
                           if title == "千本桜" else None):
             text, added = tr.add_missing_entries(None, object(), self.PAGE, {},
@@ -1764,7 +1764,7 @@ class EmptyTableBootstrapTest(TestCase):
         page = self.PAGE + "\n== ボカコレ2023春 ==\n" + self.PAGE.split("\n", 1)[1]
         asked = []
 
-        def fake(fetcher, title):
+        def fake(fetcher, title, japanese=""):
             asked.append(title)
             return ("[u 网易云音乐]", "P主")
 
@@ -1932,7 +1932,7 @@ class AddMissingSkipsExistingTest(TestCase):
             return "烏滸の沙汰" in title
 
         with patch.object(tr, "netease_candidate",
-                          side_effect=lambda f, t: ("[u 网易云音乐]", "なきそ")), \
+                          side_effect=lambda f, t, j="": ("[u 网易云音乐]", "なきそ")), \
                 patch.object(tr, "song_has_article", side_effect=fake_has_article):
             text, added = tr.add_missing_entries(None, object(), self.PAGE, {},
                                                  {"contrib": self.CONTRIB, "titles": {}},
@@ -1948,7 +1948,7 @@ class AddMissingSkipsExistingTest(TestCase):
             return False
 
         with patch.object(tr, "netease_candidate",
-                          side_effect=lambda f, t: ("[u 网易云音乐]", "MINO-U")), \
+                          side_effect=lambda f, t, j="": ("[u 网易云音乐]", "MINO-U")), \
                 patch.object(tr, "song_has_article", side_effect=fake_has_article):
             tr.add_missing_entries(None, object(), self.PAGE, {},
                                    {"contrib": self.CONTRIB, "titles": {}}, 1, False)
@@ -2062,7 +2062,7 @@ class HalfRowsAfterAddMissingTest(TestCase):
                 patch.object(tr, "season_data",
                              return_value={"contrib": self.CONTRIB, "titles": {}}), \
                 patch.object(tr, "netease_candidate",
-                             side_effect=lambda f, t: ("[u 网易云音乐]", "P")):
+                             side_effect=lambda f, t, j="": ("[u 网易云音乐]", "P")):
             tr.run_once(self.FakeSite(), write=True, fetcher=object(), add_missing=True)
 
         rows, _ = tr.parse_rows(page.saved[0])
@@ -2071,6 +2071,92 @@ class HalfRowsAfterAddMissingTest(TestCase):
                 if row.text(0, tr.COLUMNS.index("title")).strip()
                 and row.text(1, tr.COLUMNS.index("title")).strip()]
         self.assertEqual(1, len(both), "至少配成一整行，左栏不再是一条空白")
+
+
+class NeteaseCandidateGuardTest(TestCase):
+    """补行用网易云核实时的两道新守卫（2026-10-28：想象 / 受害者 被配错）。
+
+    贡献列表写的是中文译名，拿它搜会撞上同名的非 Vocaloid 歌：
+    ``想象`` → 鲜于贞娥 的韩国歌、``受害者`` → 乐队 TEENAGE DISASTER。
+    所以 (1) 结果里必须出现音源名，(2) 有日文原名时优先用它搜。
+    """
+
+    class FakeFetcher:
+        def __init__(self, results, lyrics):
+            self.results = results
+            self.lyrics = lyrics
+            self.asked = []
+
+        def json(self, url, attempts=3):
+            return None
+
+    def _patch(self, results, payload):
+        return patch.multiple(
+            tr,
+            netease_search=Mock(side_effect=lambda fetcher, keyword: results.get(keyword, [])),
+            netease_lyrics=Mock(return_value=payload),
+            translation_matches_original=Mock(return_value=True))
+
+    def test_a_non_vocaloid_same_titled_song_is_rejected(self):
+        """``想象`` 搜到 鲜于贞娥：没有音源名 → 不认。"""
+        candidate = {"id": 1, "name": "想象", "artists": [{"name": "鲜于贞娥"}],
+                     "album": {"name": "想象"}}
+        payload = {"lrc": {"lyric": "[00:01.00]a\n[00:02.00]b\n[00:03.00]c"},
+                   "tlyric": {"lyric": "[00:01.00]甲\n[00:02.00]乙"}}
+        with self._patch({"想象": [candidate]}, payload):
+            self.assertIsNone(tr.netease_candidate(None, "想象"))
+
+    def test_a_vocaloid_song_is_accepted(self):
+        candidate = {"id": 2, "name": "想象", "artists": [{"name": "初音ミク"},
+                                                          {"name": "なきそ"}],
+                     "album": {"name": "想象"}}
+        payload = {"lrc": {"lyric": "[00:01.00]a\n[00:02.00]b\n[00:03.00]c"},
+                   "tlyric": {"lyric": "[00:01.00]甲\n[00:02.00]乙"}}
+        with self._patch({"想象": [candidate]}, payload):
+            hit = tr.netease_candidate(None, "想象")
+        self.assertIn("id=2", hit[0])
+        self.assertIn("网易云音乐", hit[0])
+        self.assertEqual("なきそ", hit[1])
+
+    def test_the_japanese_title_is_searched_first(self):
+        """给日文原名时先按它搜（中文译名会撞同名歌）。"""
+        searched = []
+        candidate = {"id": 3, "name": "想像", "artists": [{"name": "初音ミク"},
+                                                          {"name": "なきそ"}],
+                     "album": {"name": "想像"}}
+        payload = {"lrc": {"lyric": "[00:01.00]a\n[00:02.00]b\n[00:03.00]c"},
+                   "tlyric": {"lyric": "[00:01.00]甲\n[00:02.00]乙"}}
+        with patch.object(tr, "netease_search",
+                          side_effect=lambda f, kw: searched.append(kw) or (
+                              [candidate] if kw == "想像" else [])), \
+                patch.object(tr, "netease_lyrics", return_value=payload), \
+                patch.object(tr, "translation_matches_original", return_value=True):
+            hit = tr.netease_candidate(None, "想象", "想像")
+        self.assertEqual("想像", searched[0])
+        self.assertEqual("なきそ", hit[1])
+
+    def test_the_album_may_carry_the_synth(self):
+        candidate = {"id": 4, "name": "某曲", "artists": [{"name": "なきそ"}],
+                     "album": {"name": "初音ミク"}}
+        self.assertTrue(tr.candidate_has_synth(candidate))
+
+    def test_short_synth_names_need_an_exact_match(self):
+        """``リン`` 只认完全相同，别把 ``カタリン`` 这种 P主 名当音源。"""
+        self.assertTrue(tr.is_vocal_synth("リン"))
+        self.assertFalse(tr.is_vocal_synth("カタリン"))
+        self.assertFalse(tr.candidate_has_synth(
+            {"artists": [{"name": "カタリン"}], "album": {"name": ""}}))
+
+
+class NavboxPairsTest(TestCase):
+    def test_reads_the_japanese_original_name(self):
+        pairs = tr.navbox_pairs(NAVBOX)
+        self.assertEqual("こころもとなく", pairs[tr.title_key("心不在焉")])
+        self.assertEqual("メゾン", pairs[tr.title_key("maison")])
+
+    def test_entries_without_a_japanese_name_are_skipped(self):
+        pairs = tr.navbox_pairs(NAVBOX)
+        self.assertNotIn(tr.title_key("ORDER"), pairs)
 
 
 class SeasonGroupsTest(TestCase):

@@ -522,7 +522,7 @@ CONTRIB_PAGE = "Vocawiki:贡献列表/The VOCALOID Collection"
 NAVBOX_TEMPLATE = "Template:The VOCALOID Collection{season}"
 SEASONS_CACHE = DATA_DIR / "vocaloid_collection_seasons.pickle"
 SEASONS_TTL = 7 * 24 * 3600         # 活动清单多久重新抓一次
-SEASONS_VERSION = 2                 # 缓存结构变了就 +1（旧格式会自动重建）
+SEASONS_VERSION = 3                 # 缓存结构变了就 +1（旧格式会自动重建；v3 加了日文原名）
 
 SEASON_HEADING_RE = re.compile(
     r"^={2,4}\s*([^=\n]*?(?:ボカコレ|VOCALOID\s*Collection)[^=\n]*?)\s*={2,4}\s*$", re.M)
@@ -639,6 +639,29 @@ def navbox_titles(text: str) -> Set[str]:
             if key:
                 titles.add(key)
     return titles
+
+
+def navbox_pairs(text: str) -> Dict[str, str]:
+    """大家族模板里的 ``[[条目名|日文原名]]`` → ``{条目名/日文名的 key: 日文原名}``。
+
+    贡献列表里写的是中文译名（``想象``、``受害者``），拿它去网易云搜会撞上同名的
+    非 Vocaloid 歌曲（2026-10-28：``想象`` 搜到 鲜于贞娥 的韩国歌）。模板里通常
+    带着**日文原名**（``{{lj|[[心不在焉|こころもとなく]]}}``），用它搜才找得准，
+    所以这里把对应关系留下来。
+    """
+    pairs: Dict[str, str] = {}
+    for match in LINK_PAIR_RE.finditer(text):
+        target = (match.group("target") or "").strip()
+        alias = (match.group("alias") or "").strip()
+        japanese = alias if has_kana(alias) else (
+            target if has_kana(target) and not has_kana(alias) else "")
+        if not japanese:
+            continue
+        for name in (target, alias):
+            key = title_key(name)
+            if key:
+                pairs.setdefault(key, japanese)
+    return pairs
 
 
 def page_season_songs(text: str) -> Dict[str, Dict[str, Set[int]]]:
@@ -1963,6 +1986,7 @@ def season_data(site, fetcher: Fetcher, refresh: bool = False,
     except Exception as exc:            # noqa: BLE001
         pywikibot.warning(f"读取贡献列表失败：{exc}")
     titles: Dict[str, List[str]] = {}
+    japanese: Dict[str, Dict[str, str]] = {}
     if with_titles:
         for season in data["contrib"]:
             template = NAVBOX_TEMPLATE.format(season=season.replace("ボカコレ", ""))
@@ -1972,7 +1996,9 @@ def season_data(site, fetcher: Fetcher, refresh: bool = False,
                 pywikibot.warning(f"读取大家族模板失败（{template}）：{exc}")
                 continue
             titles[season] = sorted(navbox_titles(markup))
+            japanese[season] = navbox_pairs(markup)
     data["titles"] = titles
+    data["japanese"] = japanese
     if data["contrib"]:
         save_cache({"v": SEASONS_VERSION, "built": time.time(), "data": data},
                    SEASONS_CACHE)
@@ -2107,12 +2133,23 @@ VOCAL_SYNTHS = (
 
 
 def is_vocal_synth(name: str) -> bool:
-    """这个名字是不是音源 / 歌姬名（而不是 P主）。"""
+    """这个名字是不是音源 / 歌姬名（而不是 P主）。
+
+    短名（``リン``、``IA``）只认**完全相同**，否则 ``カタリン`` 这种 P主 名会被误杀；
+    长名（``初音ミク``、``vocaloid``）才允许作为子串出现（``初音ミクV4X``）。
+    """
     key = person_key(name)
     if not key:
         return True
-    return any(key == person_key(item) or person_key(item) in key
-               for item in VOCAL_SYNTHS)
+    for item in VOCAL_SYNTHS:
+        token = person_key(item)
+        if not token:
+            continue
+        if key == token:
+            return True
+        if len(token) >= 3 and token in key:
+            return True
+    return False
 
 
 def producer_from_netease(candidate: dict) -> str:
@@ -2124,32 +2161,56 @@ def producer_from_netease(candidate: dict) -> str:
     return ""
 
 
-def netease_candidate(fetcher: Fetcher, title: str) -> Optional[Tuple[str, str]]:
+def candidate_has_synth(candidate: dict) -> bool:
+    """这条结果里有没有出现音源 / 歌姬名（歌手或专辑名）。
+
+    VCC 的参赛曲都是 Vocaloid / CeVIO 曲，网易云上的条目基本都会挂上音源名。
+    非 Vocaloid 的同名歌（2026-10-28：``想象`` 撞上 鲜于贞娥 的韩国歌、
+    ``受害者`` 撞上乐队 TEENAGE DISASTER）既没有音源名，也不该进搜集库——
+    所以「必须出现音源名」这条把它们挡在外面。
+    """
+    names = [str(artist.get("name") or "") for artist in candidate.get("artists") or []]
+    names.append(str((candidate.get("album") or {}).get("name") or ""))
+    return any(name.strip() and is_vocal_synth(name) for name in names)
+
+
+def netease_candidate(fetcher: Fetcher, title: str,
+                      japanese: str = "") -> Optional[Tuple[str, str]]:
     """「搜集库没录入」的歌：网易云能不能确认它有译文、以及 P主 是谁 → ``(来源, P主)``。
 
     这条是给**表格是空的**赛季补行用的：活动清单告诉我们「这一届第 N 名是这首歌」，
     但没有 P主；网易云上这类投稿由 P主 自己上传，歌手位就是 P主，所以拿它当 P主。
-    判据一条都不放宽：歌名对上、译文和原文对得上、歌手不是音源名。
+
+    判据（一条都不放宽）：
+
+    * 歌名对上（贡献列表写的是中文译名时，``japanese`` 给了日文原名，两个都试）；
+    * 结果里**必须出现音源名**（``candidate_has_synth``）——否则就是同名别的歌；
+    * 译文和原文对得上（``translation_matches_original``）；
+    * 歌手位除了音源名之外还要有 P主（``producer_from_netease``）。
     """
-    wanted = {title_key(title)}
+    wanted = {title_key(title), title_key(japanese)}
     wanted.discard("")
     if not wanted or is_variant_title(title):
         return None
-    for candidate in netease_search(fetcher, str(title or "")):
-        if not (netease_titles(candidate) & wanted):
-            continue
-        if is_variant_title(str(candidate.get("name") or "")):
-            continue
-        producer = producer_from_netease(candidate)
-        if not producer:
-            continue                    # 只有音源名：P主 说不清，不补这一行
-        payload = netease_lyrics(fetcher, str(candidate.get("id")))
-        if not payload or not (payload.get("tlyric") or {}).get("lyric"):
-            continue
-        if not translation_matches_original(payload):
-            continue
-        return (render_source(NETEASE_SONG.format(id=candidate.get("id")),
-                              "网易云音乐", netease_translator(payload)), producer)
+    keywords = [str(word).strip() for word in (japanese, title) if str(word or "").strip()]
+    for keyword in dict.fromkeys(keywords):
+        for candidate in netease_search(fetcher, keyword):
+            if not (netease_titles(candidate) & wanted):
+                continue
+            if is_variant_title(str(candidate.get("name") or "")):
+                continue
+            if not candidate_has_synth(candidate):
+                continue                # 没有音源名：多半是同名的非 Vocaloid 歌
+            producer = producer_from_netease(candidate)
+            if not producer:
+                continue                # 只有音源名：P主 说不清，不补这一行
+            payload = netease_lyrics(fetcher, str(candidate.get("id")))
+            if not payload or not (payload.get("tlyric") or {}).get("lyric"):
+                continue
+            if not translation_matches_original(payload):
+                continue
+            return (render_source(NETEASE_SONG.format(id=candidate.get("id")),
+                                  "网易云音乐", netease_translator(payload)), producer)
     return None
 
 
@@ -2243,9 +2304,14 @@ def add_missing_entries(site, fetcher: Fetcher, text: str, index: Dict[str, str]
                                            "VOCALOID中文歌词wiki", translator)
                     translated = True
         if not translated:
-            # 歌词wiki 暂停时改看网易云：确认有译文，并从歌手位拿到 P主
+            # 歌词wiki 暂停时改看网易云：确认有译文，并从歌手位拿到 P主。
+            # 贡献列表上写的是中文译名，拿它搜会撞上同名的非 Vocaloid 歌
+            # （2026-10-28：想象 → 鲜于贞娥、受害者 → TEENAGE DISASTER），
+            # 所以优先用大家族模板里的**日文原名**去搜。
+            japanese = ((data.get("japanese") or {}).get(song.season) or {}).get(
+                title_key(song.title), "")
             try:
-                hit = netease_candidate(fetcher, song.title)
+                hit = netease_candidate(fetcher, song.title, japanese)
             except Exception as exc:    # noqa: BLE001 - 单首查不到不影响别的
                 pywikibot.warning(f"网易云核实失败（{song.title}）：{exc}")
                 hit = None

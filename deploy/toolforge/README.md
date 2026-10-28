@@ -631,8 +631,14 @@ python bots/vocaloid_collection_translations.py --write --no-prune  # 只填来�
 
 1. **译文确实存在**：`USE_ATWIKI = False` 时看**网易云**——歌名对上（含 alias）、
    `tlyric` 和原文对得上（`translation_matches_original`）。
+   贡献列表写的是**中文译名**，拿它搜会撞上同名的非 Vocaloid 歌
+   （2026-10-28：`想象` → 鲜于贞娥 的韩国歌、`受害者` → 乐队 TEENAGE DISASTER，
+   两行都被配错了 P主）。现在先用大家族模板里的**日文原名**搜（`navbox_pairs`），
+   并且结果里**必须出现音源名**（`candidate_has_synth`：`初音ミク` / `vocaloid` …
+   见 `VOCAL_SYNTHS`）——没有音源名的一律不认。短名（`リン`）只认完全相同，
+   `カタリン` 这种 P主 名不会被误判成音源。
 2. **P主 说得清**：网易云这类投稿由 P主 自己上传，歌手位就是 P主；若歌手位只有音源名
-   （`初音ミク` / `IA` / `flower` … 见 `VOCAL_SYNTHS`），**不补这一行**（`P主` 那列不能瞎填）。
+   （`初音ミク` / `IA` / `flower` …），**不补这一行**（`P主` 那列不能瞎填）。
 3. **站内确实还没有条目**（`song_has_article`）：活动清单里那个「已创建」标记会过期，
    不能只信它。先按完整标题查；查不到再按去掉末尾括注的名字查一次（清单写
    `烏滸の沙汰（なきそ）`、条目叫 `烏滸の沙汰`），这次要核对条目的 `|P主 =`：

@@ -17,6 +17,12 @@
 # 每天维护「VOCALOID中文歌词wiki补完计划」清单（AtWiki 歌词页 ↔ voca.wiki 条目比对）。
 # 单独一条 job：它要抓上千个 AtWiki 页面、还要读一遍 voca.wiki 的 Songbox，
 # 别和每小时的榜单维护挤在一起。第一次跑最慢（几分钟），之后只补新页面。
+#
+# 缓存策略跟 GitHub Actions 不同，两边别写成一样：
+# * AtWiki 页面清单 12 小时有效（--max-age 默认值）。这里每天 04:23 跑，间隔 24h
+#   一定超过 12h，所以每轮都重建——不会像 Actions 那样一直复用旧清单。
+# * 歌名索引 1 小时有效（--index-max-age），旧了先用 list=recentchanges 增量补齐。
+# * 本轮算出的「已匹配」比页面上写的少时不写页面（--allow-shrink 才能强写）。
 - name: lyrics-plan
   image: python3.13
   command: ./Vocawiki-bots/deploy/toolforge/run-lyrics-completion.sh

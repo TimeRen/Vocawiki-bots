@@ -10,9 +10,14 @@ name: Update the VOCALOID lyrics wiki completion plan
 #
 # 与 update-vocaloid-collection 不同的是：这个任务**必须**跨运行保留 data/ 下的缓存
 # （AtWiki 页面清单、voca 歌名索引、逐页判定）。没有缓存时要把几千个 AtWiki 页面
-# 重新抓一遍；用 actions/cache 恢复上一次运行留下的 data/，并用 --max-age 让清单在
-# 25 小时内直接复用。实测（2026-10-21，冷缓存）：清单 23 秒、歌名索引 2.5 分钟、
+# 重新抓一遍；用 actions/cache 恢复上一次运行留下的 data/，AtWiki 清单用 --max-age
+# 允许 25 小时内直接复用。实测（2026-10-21，冷缓存）：清单 23 秒、歌名索引 2.5 分钟、
 # 逐页判定 3.4 分钟，整轮约 6.5 分钟。
+#
+# 注意 --max-age 只管 **AtWiki 页面清单**。歌名索引有自己的 1 小时 TTL（--index-max-age），
+# 缓存旧了会先用 list=recentchanges 增量补齐：本工作流的实际间隔正好 ~24 小时，
+# 以前索引跟着 25 小时复用，于是每轮都在用昨天的索引，把前一天刚建的条目当成
+# 「还没有条目」（rev 277313 把 AGE / Sr.Wonderland 加回来就是这个原因）。
 #
 # 触发方式：
 #   · schedule 每天 05:13 UTC；Toolforge 的 lyrics-plan 在 04:23 UTC，两处错开
@@ -83,6 +88,7 @@ jobs:
 
       - name: Update the completion plan
         run: |
-          # --max-age 25 小时：每天跑一次时直接复用上一次的页面清单与歌名索引，
-          # 只重新比对；Toolforge 上仍是 12 小时的默认值（它每小时都更新缓存文件）。
+          # --max-age 25 小时：每天跑一次时直接复用上一次的 AtWiki 页面清单；
+          # 歌名索引不跟着走 25 小时——它 1 小时就过期，旧了先用 recentchanges
+          # 补上新建 / 移动过的条目（补不动再整体重建）。Toolforge 上两个值都是默认。
           python bots/vocaloid_lyrics_completion.py --write --max-age 90000

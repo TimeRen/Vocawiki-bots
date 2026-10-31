@@ -9,15 +9,25 @@ from unittest.mock import patch
 import bots.vocaloid_lyrics_completion as completion
 
 from bots.vocaloid_lyrics_completion import (
+    build_alias_index,
     build_name_index,
     classify,
+    hint_tokens,
     is_song_page,
+    is_song_pid,
     link_text,
+    linked_exclusions,
+    match_song,
     name_key,
     page_plaintext,
+    page_stats,
     parse_page_list,
+    producer_matches,
     render_page,
     song_names,
+    song_producer,
+    strip_trailing_paren,
+    title_splits,
 )
 
 # 真实的 AtWiki 消歧义页（pages/667「Alice in Dreamland」）：正文只有两个链接
@@ -187,7 +197,7 @@ class RenderPageTest(TestCase):
         lines = text.splitlines()
         self.assertEqual("<!-- 比對日期：2026-10-17；來源共 8554 個不同頁面；"
                          "已匹配 3200 個 Vocawiki 歌曲條目；"
-                         "排除 120 個消歧義／站務／目錄／測試頁。 -->", lines[0])
+                         "排除 120 個消歧義／站務／目錄／非歌曲翻譯頁。 -->", lines[0])
         self.assertIn("共 '''2''' 頁", lines[1])
         self.assertEqual("* [https://w.atwiki.jp/vocaloidchly/pages/441.html "
                          "卑怯戦隊うろたんだー！]", lines[3])
@@ -331,12 +341,12 @@ class ClassifyTest(TestCase):
         self.assertEqual(1, len(calls))
 
     def test_listing_is_sorted_by_title(self):
-        pages = {"3": "あ", "1": "B", "2": "a"}
+        pages = {"13": "あ", "11": "B", "12": "a"}
         verdicts = {pid: {"song": True, "at": time.time()} for pid in pages}
         listed, _matched, _excluded, _ = classify(
             pages, {}, verdicts, fetcher=self._fetcher({}))
         # 大小写不敏感、其余按码位：「a」<「B」<「あ」
-        self.assertEqual(["2", "1", "3"], [pid for pid, _ in listed])
+        self.assertEqual(["12", "11", "13"], [pid for pid, _ in listed])
 
 
 class FakeSite:
@@ -423,3 +433,310 @@ class RunOnceTest(TestCase):
         changed, page = self._run(text, write=True)
         self.assertFalse(changed)
         self.assertEqual([], page.saved, "页面没变时不该再保存一次")
+
+
+# 站务页：正文只剩导航，26 个链接 / 68 字（实测 pages/2「メニュー」）
+MENU_HTML = (
+    '<div id="wikibody" class="box">\n<!--@@@@@--><div>目錄中文歌詞庫歌名五十音順'
+    + "".join('<a href="//w.atwiki.jp/vocaloidchly/pages/%d.html">%d</a>\n<br />\n' % (i, i)
+              for i in range(100, 126))
+    + '</div><div class="atwiki-page-keyword">檢索</div></div>'
+)
+# 歌页也可能带几个链接，但不是「只有链接」
+SONG_WITH_LINKS_HTML = (
+    '<div id="wikibody" class="box">\n<!--@@@@@--><div>作詞：すんｚりヴぇｒ<br />'
+    '作曲：すんｚりヴぇｒ<br />歌：鏡音リン・鏡音レン<br />翻譯：夜明晴月<br /><br />'
+    + "想一眼就看穿那橙色之物吧<br />" * 12
+    + '<a href="//w.atwiki.jp/vocaloidchly/pages/441.html">卑怯戦隊うろたんだー</a>'
+    '</div><div class="atwiki-page-keyword">檢索</div></div>'
+)
+# 「歌曲以外的翻譯」（pages/448）的正文：列出的都是广播剧 / 小剧场 / 散文
+NON_SONG_LIST_HTML = (
+    '<div id="wikibody" class="box">\n<!--@@@@@--><div>'
+    '<a href="//w.atwiki.jp/vocaloidchly/pages/3970.html">あなたの不在は</a>\n<br />\n'
+    '<a href="//w.atwiki.jp/vocaloidchly/pages/638.html">雪見姫</a>\n'
+    '<a href="//w.atwiki.jp/vocaloidchly/pages/1.html">首頁</a>\n'
+    '</div><div class="atwiki-page-keyword">檢索</div></div>'
+)
+
+# Songbox 都照线上抄：歌名用 {{lj|…}}，P主 有纯链接、也有 {{lj|[[a|b]]}}
+ECHO_SONGS = {
+    "ECHO(Crusher-P)": {
+        "redirects": [],
+        "lead": "{{VOCALOID Songbox\n|歌曲名称 = ECHO\n|P主 = [[Crusher-P]]\n}}",
+    },
+}
+SEKAI_SONGS = {
+    "世界(初音未来)": {
+        "redirects": [],
+        "lead": ("{{VOCALOID Songbox\n|歌曲名称 = {{lj|セカイ}}<br/>世界\n"
+                 "|P主      = [[DECO*27]]、[[堀江晶太]](kemu)\n}}"),
+    },
+}
+CINDERELLA_SONGS = {
+    "灰姑娘(DECO*27)": {
+        "redirects": [],
+        "lead": ("{{VOCALOID Songbox\n|歌曲名称 = {{lj|シンデレラ}}<br>灰姑娘\n"
+                 "|P主      = [[DECO*27]]\n}}"),
+    },
+    "灰姑娘(zig)": {
+        "redirects": [],
+        "lead": ("{{VOCALOID Songbox\n|歌曲名称 = {{lj|シンデレラ}}<br>Cinderella<br>灰姑娘\n"
+                 "|P主      = {{lj|[[zig|ジグ]]}}\n}}"),
+    },
+}
+
+
+class NonSongPidTest(TestCase):
+    def test_whitelisted_pids_never_reach_the_list(self):
+        pages = {"2": "メニュー", "1557": "LOG下半年", "1999": "まだない曲"}
+        verdicts = {pid: {"song": True, "at": time.time()} for pid in pages}
+        listed, matched, excluded, _ = classify(pages, {}, verdicts,
+                                               fetcher=lambda url: "")
+        self.assertEqual([("1999", "まだない曲")], listed)
+        self.assertEqual(0, matched)
+        self.assertEqual(2, excluded)
+
+    def test_a_song_that_looks_like_paperwork_is_kept(self):
+        """3518「合唱コンクール」、3609「未完成人間」是真歌，只按 pid 排不按关键词排。"""
+        self.assertTrue(is_song_pid("3518"))
+        self.assertTrue(is_song_pid("3609"))
+        self.assertFalse(is_song_pid("1557"))
+        self.assertFalse(is_song_pid("448"))
+
+
+class LinkedExclusionTest(TestCase):
+    def test_pages_listed_by_the_source_are_excluded(self):
+        self.assertEqual(["3970", "638"], linked_exclusions(lambda url: NON_SONG_LIST_HTML))
+
+    def test_navigation_links_are_not_taken_for_entries(self):
+        self.assertNotIn("1", linked_exclusions(lambda url: NON_SONG_LIST_HTML))
+
+    def test_a_missing_source_means_no_exclusions(self):
+        self.assertEqual([], linked_exclusions(lambda url: ""))
+
+    def test_they_are_dropped_from_the_list(self):
+        listed, matched, excluded, _ = classify(
+            {"3970": "あなたの不在は、私には耐え難い苦痛でした", "1999": "まだない曲"},
+            {}, {"1999": {"song": True, "at": 0}}, fetcher=lambda url: "",
+            excluded_pids=["3970"])
+        self.assertEqual([("1999", "まだない曲")], listed)
+        self.assertEqual(0, matched)
+        self.assertEqual(1, excluded)
+
+
+class IndexPageDensityTest(TestCase):
+    def test_a_page_that_is_mostly_links_is_not_a_song(self):
+        plain, links = page_stats(MENU_HTML)
+        self.assertGreaterEqual(links, 12)
+        self.assertLess(len(plain), 120)
+        self.assertFalse(is_song_page(plain, links))
+
+    def test_a_lyrics_page_with_a_couple_of_links_stays(self):
+        plain, links = page_stats(SONG_WITH_LINKS_HTML)
+        self.assertEqual(1, links)
+        self.assertTrue(is_song_page(plain, links))
+
+    def test_the_link_count_is_optional(self):
+        self.assertTrue(is_song_page("作" * 200))
+
+
+class TitleSplitsTest(TestCase):
+    def test_a_trailing_paren_is_peeled_with_nested_brackets(self):
+        self.assertEqual(("セカイ", "DECO*27×堀江晶太(kemu)"),
+                         strip_trailing_paren("セカイ(DECO*27×堀江晶太(kemu))"))
+
+    def test_producer_tokens_drop_their_own_brackets(self):
+        self.assertEqual(["DECO*27", "堀江晶太", "kemu"],
+                         hint_tokens("DECO*27×堀江晶太(kemu)"))
+
+    def test_slash_titles_split_into_name_and_producer(self):
+        self.assertEqual([("シンデレラ", ["DECO*27"])], title_splits("シンデレラ/DECO*27"))
+
+    def test_a_plain_name_has_no_splits(self):
+        self.assertEqual([], title_splits("千本桜"))
+
+    def test_a_slash_in_a_song_name_only_matches_with_producer_proof(self):
+        """「1/4」这种名字拆开是「1」，没有作者佐证绝不能当成条目「1」。"""
+        self.assertEqual([("1", ["4"])], title_splits("1/4"))
+        aliases = {name_key("1"): [("某曲", "somebody")]}
+        self.assertIsNone(match_song({}, aliases, "1/4"))
+
+
+class MatchSongTest(TestCase):
+    def _match(self, songs, title):
+        return match_song(build_name_index(songs), build_alias_index(songs), title)
+
+    def test_a_slash_title_matches_the_parenthetical_article(self):
+        self.assertEqual("ECHO(Crusher-P)", self._match(ECHO_SONGS, "ECHO/Crusher-P"))
+
+    def test_nested_producer_brackets_are_handled(self):
+        self.assertEqual("世界(初音未来)",
+                         self._match(SEKAI_SONGS, "セカイ(DECO*27×堀江晶太(kemu))"))
+
+    def test_the_producer_picks_between_two_articles_with_the_same_name(self):
+        self.assertEqual("灰姑娘(DECO*27)", self._match(CINDERELLA_SONGS, "シンデレラ/DECO*27"))
+        self.assertEqual("灰姑娘(zig)", self._match(CINDERELLA_SONGS, "シンデレラ/ジグ"))
+
+    def test_an_ambiguous_name_without_producer_proof_stays_listed(self):
+        self.assertIsNone(self._match(CINDERELLA_SONGS, "シンデレラ/誰か"))
+
+    def test_an_exact_title_is_untouched(self):
+        self.assertEqual("灰姑娘(zig)",
+                         match_song(build_name_index(CINDERELLA_SONGS), {}, "灰姑娘(zig)"))
+
+    def test_a_producer_that_contradicts_the_article_is_not_trusted(self):
+        self.assertIsNone(self._match(ECHO_SONGS, "ECHO/別の人"))
+
+
+class AliasIndexTest(TestCase):
+    def test_the_producer_field_is_flattened(self):
+        lead = CINDERELLA_SONGS["灰姑娘(zig)"]["lead"]
+        self.assertEqual("ジグ", song_producer(lead))
+        lead = SEKAI_SONGS["世界(初音未来)"]["lead"]
+        self.assertEqual("DECO*27、堀江晶太(kemu)", song_producer(lead))
+
+    def test_pages_without_a_songbox_are_not_aliases(self):
+        pages = dict(CINDERELLA_SONGS)
+        pages["セカイ"] = {"redirects": [], "lead": "#REDIRECT [[:世界]]"}
+        aliases = build_alias_index(pages)
+        self.assertNotIn(name_key("セカイ"), aliases)
+
+    def test_every_candidate_is_kept_for_disambiguation(self):
+        aliases = build_alias_index(CINDERELLA_SONGS)
+        titles = [title for title, _producer in aliases[name_key("シンデレラ")]]
+        self.assertEqual(["灰姑娘(DECO*27)", "灰姑娘(zig)"], titles)
+
+    def test_producer_matching_ignores_case_and_width(self):
+        self.assertTrue(producer_matches("ＣＲＵＳＨＥＲ－Ｐ", ["crusher-p"]))
+        self.assertFalse(producer_matches("DECO*27", ["ジグ"]))
+
+
+class FakeRequest:
+    def __init__(self, data):
+        self.data = data
+
+    def submit(self):
+        return self.data
+
+
+class FakeApiSite:
+    """只够 ``simple_request`` 用的假 site：recentchanges + 按标题取首段。"""
+
+    def __init__(self, changes, leads=None, fail=False):
+        self.changes = changes
+        self.leads = leads or {}
+        self.fail = fail
+        self.calls = []
+
+    def simple_request(self, **params):
+        self.calls.append(params)
+        if self.fail:
+            raise RuntimeError("boom")
+        if params.get("list") == "recentchanges":
+            return FakeRequest({"query": {"recentchanges": [
+                {"title": title} for title in self.changes]}})
+        pages = []
+        for title in str(params.get("titles", "")).split("|"):
+            pages.append({"title": title, "revisions": [{"slots": {"main": {
+                "content": self.leads.get(title, "")}}}]})
+        return FakeRequest({"query": {"pages": pages}})
+
+    def recentchanges_calls(self):
+        return [call for call in self.calls if call.get("list") == "recentchanges"]
+
+
+class IndexPatchTest(TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        patcher = patch.multiple(completion, INDEX_CACHE=self.root / "index.pickle")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _cache(self, age, **extra):
+        cache = {"built": time.time() - age, "names": {name_key("千本桜"): "千本樱"},
+                 "aliases": {}, "pages": 1, "version": completion.INDEX_VERSION}
+        cache.update(extra)
+        return cache
+
+    def test_a_stale_index_is_patched_with_new_pages(self):
+        site = FakeApiSite(["AGE"], leads={
+            "AGE": "{{VOCALOID Songbox\n|歌曲名称 = AGE\n|P主 = [[Synzi]]\n}}"})
+        names, _cache = completion.collect_names(
+            site, refresh=False, cache=self._cache(3 * 3600))
+        self.assertEqual("AGE", names.get(name_key("AGE")))
+        self.assertEqual(1, len(site.recentchanges_calls()))
+
+    def test_a_fresh_index_is_not_patched(self):
+        site = FakeApiSite(["AGE"])
+        completion.collect_names(site, refresh=False, cache=self._cache(600))
+        self.assertEqual([], site.recentchanges_calls())
+
+    def test_too_many_changes_fall_back_to_a_full_rebuild(self):
+        site = FakeApiSite([str(i) for i in range(completion.INDEX_PATCH_LIMIT + 5)])
+        called = []
+
+        def song_pages(_site, batch_size=50):
+            called.append(True)
+            return {"千本樱": {"redirects": [], "lead": "{{VOCALOID Songbox\n"
+                                                       "|歌曲名称 = {{lj|千本桜}}\n}}"}}
+
+        with patch.object(completion, "song_pages", song_pages):
+            names, _cache = completion.collect_names(site, refresh=False,
+                                                    cache=self._cache(3 * 3600))
+        self.assertEqual([True], called)
+        self.assertEqual("千本樱", names.get(name_key("千本桜")))
+
+    def test_a_broken_recentchanges_query_falls_back_to_a_full_rebuild(self):
+        site = FakeApiSite([], fail=True)
+        called = []
+
+        def song_pages(_site, batch_size=50):
+            called.append(True)
+            return {"千本樱": {"redirects": [], "lead": "{{VOCALOID Songbox\n"
+                                                       "|歌曲名称 = {{lj|千本桜}}\n}}"}}
+
+        with patch.object(completion, "song_pages", song_pages):
+            completion.collect_names(site, refresh=False, cache=self._cache(3 * 3600))
+        self.assertEqual([True], called)
+
+
+class ShrinkGuardTest(TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        patcher = patch.multiple(
+            completion,
+            PAGES_CACHE=root / "pages.pickle",
+            INDEX_CACHE=root / "index.pickle",
+            VERDICT_CACHE=root / "verdicts.pickle",
+            PAGE_TITLE="User:测试/补完计划",
+            atwiki_pages=lambda fetcher=None: dict(PAGES),
+            song_pages=lambda site, batch_size=50: dict(SONGS),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    PAGE_TEXT = ("<!-- 比對日期：2026-10-17；來源共 3 個不同頁面；已匹配 9 個 Vocawiki "
+                 "歌曲條目；排除 1 個消歧義／站務／目錄／非歌曲翻譯頁。 -->\n"
+                 "旧清单\n")
+
+    def _run(self, **kwargs):
+        page = FakePage(self.PAGE_TEXT)
+        with patch.object(completion, "Page", lambda site, title: page):
+            changed = completion.run_once(FakeSite(), write=True, refresh=True,
+                                          fetcher=fake_fetcher, **kwargs)
+        return changed, page
+
+    def test_a_smaller_match_count_is_not_saved(self):
+        changed, page = self._run()
+        self.assertFalse(changed)
+        self.assertEqual([], page.saved, "已匹配变少时不该写页面")
+
+    def test_the_guard_can_be_bypassed(self):
+        changed, page = self._run(allow_shrink=True)
+        self.assertTrue(changed)
+        self.assertEqual(1, len(page.saved))

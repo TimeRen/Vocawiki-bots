@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """bots/vocaloid_lyrics_completion.py 的测试（不联网：AtWiki / Vocawiki 全部用假页面）。"""
 import tempfile
 import time
@@ -9,16 +9,22 @@ from unittest.mock import patch
 import bots.vocaloid_lyrics_completion as completion
 
 from bots.vocaloid_lyrics_completion import (
+    VERDICT_VERSION,
     build_alias_index,
     build_name_index,
     classify,
+    collect_variants,
     hint_tokens,
     is_song_page,
     is_song_pid,
+    is_song_title,
+    label_variants,
     link_text,
     linked_exclusions,
+    loose_producer,
     match_song,
     name_key,
+    name_suffix_variants,
     page_plaintext,
     page_stats,
     parse_page_list,
@@ -26,8 +32,10 @@ from bots.vocaloid_lyrics_completion import (
     render_page,
     song_names,
     song_producer,
+    spaced_separator_splits,
     strip_trailing_paren,
     title_splits,
+    variant_lookup,
 )
 
 # 真实的 AtWiki 消歧义页（pages/667「Alice in Dreamland」）：正文只有两个链接
@@ -314,8 +322,8 @@ class ClassifyTest(TestCase):
             calls.append(url)
             return SONG_HTML
 
-        verdicts = {pid: {"song": True, "at": time.time()} for pid in self.PAGES}
-        verdicts["667"] = {"song": False, "at": time.time()}      # 消歧义页，上一轮已经判定过
+        verdicts = {pid: {"song": True, "at": time.time(), "v": VERDICT_VERSION} for pid in self.PAGES}
+        verdicts["667"] = {"song": False, "at": time.time(), "v": VERDICT_VERSION}      # 消歧义页，上一轮已经判定过
         listed, _matched, excluded, _ = classify(self.PAGES, self.NAMES, verdicts,
                                                  fetcher=fetcher)
         self.assertEqual([("1999", "まだない曲")], listed)
@@ -341,23 +349,28 @@ class ClassifyTest(TestCase):
         self.assertEqual(1, len(calls))
 
     def test_listing_is_sorted_by_title(self):
-        pages = {"13": "あ", "11": "B", "12": "a"}
-        verdicts = {pid: {"song": True, "at": time.time()} for pid in pages}
+        pages = {"913": "あ", "911": "B", "912": "a"}
+        verdicts = {pid: {"song": True, "at": time.time(), "v": VERDICT_VERSION} for pid in pages}
         listed, _matched, _excluded, _ = classify(
             pages, {}, verdicts, fetcher=self._fetcher({}))
         # 大小写不敏感、其余按码位：「a」<「B」<「あ」
-        self.assertEqual(["12", "11", "13"], [pid for pid, _ in listed])
+        self.assertEqual(["912", "911", "913"], [pid for pid, _ in listed])
 
 
 class FakeSite:
     def __init__(self):
         self.logins = 0
+        self.requests = []
 
     def logged_in(self):
         return True
 
     def login(self):
         self.logins += 1
+
+    def simple_request(self, **params):
+        self.requests.append(params)
+        return FakeRequest({"query": {"converted": []}})
 
 
 class FakePage:
@@ -490,7 +503,7 @@ CINDERELLA_SONGS = {
 class NonSongPidTest(TestCase):
     def test_whitelisted_pids_never_reach_the_list(self):
         pages = {"2": "メニュー", "1557": "LOG下半年", "1999": "まだない曲"}
-        verdicts = {pid: {"song": True, "at": time.time()} for pid in pages}
+        verdicts = {pid: {"song": True, "at": time.time(), "v": VERDICT_VERSION} for pid in pages}
         listed, matched, excluded, _ = classify(pages, {}, verdicts,
                                                fetcher=lambda url: "")
         self.assertEqual([("1999", "まだない曲")], listed)
@@ -518,7 +531,7 @@ class LinkedExclusionTest(TestCase):
     def test_they_are_dropped_from_the_list(self):
         listed, matched, excluded, _ = classify(
             {"3970": "あなたの不在は、私には耐え難い苦痛でした", "1999": "まだない曲"},
-            {}, {"1999": {"song": True, "at": 0}}, fetcher=lambda url: "",
+            {}, {"1999": {"song": True, "at": 0, "v": VERDICT_VERSION}}, fetcher=lambda url: "",
             excluded_pids=["3970"])
         self.assertEqual([("1999", "まだない曲")], listed)
         self.assertEqual(0, matched)
@@ -740,3 +753,238 @@ class ShrinkGuardTest(TestCase):
         changed, page = self._run(allow_shrink=True)
         self.assertTrue(changed)
         self.assertEqual(1, len(page.saved))
+
+
+# 目录页表头（pages/11「初音ミク原創曲」实测）
+CATALOG_HTML = (
+    '<div id="wikibody" class="box">\n<!--@@@@@--><div>格式(暫定)這裡是曲名網址:原創曲'
+    'sugarchocolatewaffleShibayan（原曲動畫）（翻譯在此）貴方に花を私に唄をRe:nGテラカゾク'
+    '</div><div class="atwiki-page-keyword">檢索</div></div>'
+)
+# 没填的模板（pages/1427「激孃想歌」实测）
+UNTRANSLATED_HTML = (
+    '<div id="wikibody" class="box">\n<!--@@@@@--><div>:nicovideoエラー'
+    '(正しい動画URLを入力してください.)作詞：作曲：編曲：歌：翻譯：'
+    '(想具名的話寫在這裡，不想的話把這行刪掉)(有翻譯標題的話寫這行)(歌詞)'
+    '</div><div class="atwiki-page-keyword">檢索</div></div>'
+)
+# 真翻译页 + 文末残留模板提示（pages/2127「月雪花」实测）：不能删
+TRANSLATED_LEFTOVER_HTML = (
+    '<div id="wikibody" class="box">\n<!--@@@@@--><div>作詞：Ebot作曲：Ebot歌：翻譯：四海漂泊怪叔叔'
+    '殘櫻落紅珠滴滴為風逐嘗綻天地間靜觀春華度花藟不諳愁欲訴相思語枉顧離別恨溫存只今宵'
+    '願得卿垂憐甘為花與露明朝夢醒時消散歸塵土空懷脈脈情枉做癡心夢愁緒催腸斷'
+    '(有註解的話寫在這條線下面，沒有的話連線一起刪掉)(下面tag欄)'
+    '</div><div class="atwiki-page-keyword">檢索</div></div>'
+)
+
+# 各种「作者挂在曲名前 / 后用分隔符或标签」的条目
+WRAPPED_SONGS = {
+    "世界(初音未来)": {
+        "redirects": [],
+        "lead": ("{{VOCALOID Songbox\n|歌曲名称 = {{lj|セカイ}}<br/>世界\n"
+                 "|P主      = [[DECO*27]]、[[堀江晶太]](kemu)\n}}"),
+    },
+    "EAT ME": {"redirects": [],
+               "lead": "{{VOCALOID Songbox\n|歌曲名称 = EAT ME\n|P主 = [[OSTER project]]\n}}"},
+    "Re:birthed": {"redirects": [],
+                   "lead": "{{VOCALOID Songbox\n|歌曲名称 = Re:birthed\n|P主 = [[某P]]\n}}"},
+    "说谎家": {
+        "redirects": [],
+        "lead": "{{VOCALOID Songbox\n|歌曲名称 = {{lj|うそつき}}\n|P主 = [[めざめP]]\n}}",
+    },
+    "约定的地方": {
+        "redirects": [],
+        "lead": "{{VOCALOID Songbox\n|歌曲名称 = {{lj|約束の場所}}\n|P主 = [[仕事してP]]\n}}",
+    },
+    "洁癖症": {
+        "redirects": [],
+        "lead": "{{VOCALOID Songbox\n|歌曲名称 = {{lj|ケッペキショウ}}\n|P主 = [[すこっぷ]]\n}}",
+    },
+    "恋爱勇者": {
+        "redirects": [],
+        "lead": "{{VOCALOID Songbox\n|歌曲名称 = {{lj|恋愛勇者}}\n|P主 = [[Last Note.]]\n}}",
+    },
+}
+
+
+class CatalogMarkerTest(TestCase):
+    def test_a_name_and_url_table_is_not_a_song(self):
+        self.assertFalse(is_song_page(page_plaintext(CATALOG_HTML)))
+
+    def test_the_catalog_title_prefix_is_recognised(self):
+        self.assertFalse(is_song_title("中文歌詞列表作者別(五十音順)"))
+        self.assertFalse(is_song_title("中文歌詞列表VOCALOID別"))
+
+    def test_a_real_song_title_is_kept(self):
+        self.assertTrue(is_song_title("合唱コンクール"))
+        self.assertTrue(is_song_title("未完成人間"))
+
+
+class UntranslatedMarkerTest(TestCase):
+    def test_an_unfilled_template_is_not_listed(self):
+        self.assertFalse(is_song_page(page_plaintext(UNTRANSLATED_HTML)))
+
+    def test_a_translation_with_leftover_template_text_is_kept(self):
+        """pages/2127「月雪花」有翻译，只是文末残留模板提示 —— 不能删。"""
+        self.assertTrue(is_song_page(page_plaintext(TRANSLATED_LEFTOVER_HTML)))
+
+
+class LabelStripTest(TestCase):
+    def test_leading_and_trailing_labels_are_stripped(self):
+        self.assertEqual(["【GUMI】ケッペキショウ（洁癖症）", "ケッペキショウ（洁癖症）"],
+                         label_variants("【GUMI】ケッペキショウ（洁癖症）"))
+        self.assertEqual(["Fireworks【流星プロジェクト】", "Fireworks"],
+                         label_variants("Fireworks【流星プロジェクト】"))
+        # 两层标签：逐层剥，中间结果也留着（多一个候选而已）
+        self.assertEqual(["【ののた】おこちゃま戦争【歌ってみた】",
+                          "おこちゃま戦争【歌ってみた】",
+                          "おこちゃま戦争"],
+                         label_variants("【ののた】おこちゃま戦争【歌ってみた】"))
+
+    def test_a_name_that_is_only_a_label_is_left_alone(self):
+        self.assertEqual(["【オリジナル】"], label_variants("【オリジナル】"))
+
+    def test_a_trailing_bracket_is_only_an_extra_candidate(self):
+        """`女王←→魔女【中世騎士物語】` 的方括号是标题的一部分：剥掉只是多一个候选，
+        真要对上还得靠条目名，剥掉后的名字在 voca 上没有条目 → 不会误删。"""
+        variants = label_variants("女王←→魔女【中世騎士物語】")
+        self.assertEqual("女王←→魔女【中世騎士物語】", variants[0])
+        self.assertIn("女王←→魔女", variants)
+
+
+class NameSuffixTest(TestCase):
+    def test_the_trailing_suffix_is_dropped(self):
+        self.assertEqual(["Re:birthed中文歌詞", "Re:birthed"],
+                         name_suffix_variants("Re:birthed中文歌詞"))
+
+    def test_a_plain_name_is_untouched(self):
+        self.assertEqual(["Re:birthed"], name_suffix_variants("Re:birthed"))
+
+    def test_the_suffix_in_the_middle_is_kept(self):
+        self.assertEqual(["中文歌詞列表VOCALOID別"],
+                         name_suffix_variants("中文歌詞列表VOCALOID別"))
+
+
+class SpacedSeparatorSplitTest(TestCase):
+    def test_both_directions_are_offered(self):
+        self.assertEqual(
+            [("DECO-27×堀江晶太(kemu)", ["セカイ"]),
+             ("セカイ", ["DECO-27", "堀江晶太", "kemu"])],
+            spaced_separator_splits("DECO-27×堀江晶太(kemu) - セカイ"))
+        self.assertEqual([("EAT ME", ["OSTER", "project"]),
+                          ("OSTER project", ["EAT", "ME"])],
+                         spaced_separator_splits("EAT ME > OSTER project"))
+
+    def test_full_width_and_long_dashes_are_handled(self):
+        self.assertTrue(spaced_separator_splits("曲名　－　作者"))
+        self.assertTrue(spaced_separator_splits("曲名 — 作者"))
+        self.assertTrue(spaced_separator_splits("曲名 ＞ 作者"))
+
+    def test_an_unspaced_separator_is_not_split(self):
+        self.assertEqual([], spaced_separator_splits("DECO*27-セカイ"))
+        self.assertEqual([], spaced_separator_splits("かがみのむこう＞"))
+        self.assertEqual([], spaced_separator_splits("女王←→魔女【中世騎士物語】"))
+        self.assertEqual([], spaced_separator_splits("千本桜"))
+
+
+class WrappedMatchTest(TestCase):
+    def _match(self, title):
+        return match_song(build_name_index(WRAPPED_SONGS),
+                          build_alias_index(WRAPPED_SONGS), title)
+
+    def test_author_before_the_title(self):
+        self.assertEqual("世界(初音未来)", self._match("DECO-27×堀江晶太(kemu) - セカイ"))
+
+    def test_angle_separator(self):
+        self.assertEqual("EAT ME", self._match("EAT ME > OSTER project"))
+        self.assertEqual("说谎家", self._match("うそつき > めざめP"))
+        self.assertEqual("约定的地方", self._match("約束の場所 > 仕事してP"))
+
+    def test_the_translation_suffix(self):
+        self.assertEqual("Re:birthed", self._match("Re:birthed中文歌詞"))
+
+    def test_labels_and_the_chinese_name_in_brackets(self):
+        self.assertEqual("洁癖症", self._match("【GUMI】ケッペキショウ（洁癖症）"))
+
+    def test_subtitles_are_not_taken_for_producers(self):
+        self.assertIsNone(self._match("リナリア - 第二章 -"))
+        self.assertIsNone(self._match("光芒 - Twilight Ray -"))
+        self.assertIsNone(self._match("自覚 - Awareness"))
+        self.assertIsNone(self._match("かがみのむこう＞"))
+
+
+class ProducerLooseTest(TestCase):
+    def test_punctuation_differences_are_ignored(self):
+        self.assertEqual("deco27", loose_producer("DECO-27"))
+        self.assertEqual("deco27", loose_producer("DECO*27"))
+        self.assertTrue(producer_matches("DECO*27、堀江晶太(kemu)", ["DECO-27"]))
+
+    def test_short_hints_are_not_compared_loosely(self):
+        self.assertFalse(producer_matches("DECO*27", ["D*"]))
+
+    def test_an_unrelated_producer_does_not_match(self):
+        self.assertFalse(producer_matches("DECO*27", ["ジグ"]))
+
+
+class VariantSite:
+    def __init__(self, mapping):
+        self.mapping = mapping
+        self.requests = []
+
+    def simple_request(self, **params):
+        self.requests.append(params)
+        titles = str(params.get("titles", "")).split("|")
+        converted = [{"from": title, "to": self.mapping[title]}
+                     for title in titles
+                     if self.mapping.get(title) and self.mapping[title] != title]
+        return FakeRequest({"query": {"converted": converted}})
+
+
+class VariantMatchTest(TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        patcher = patch.multiple(completion, VARIANT_CACHE=self.root / "variants.pickle")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_traditional_name_is_matched_through_the_simplified_one(self):
+        site = VariantSite({"魔法少女幸福論": "魔法少女幸福论"})
+        variants = collect_variants(site, ["魔法少女幸福論"])
+        self.assertEqual({"魔法少女幸福論": "魔法少女幸福论"}, variants)
+        names = {name_key("魔法少女幸福论"): "魔法少女幸福论"}
+        self.assertEqual("魔法少女幸福论",
+                         variant_lookup(names, {}, "魔法少女幸福論", variants))
+
+    def test_the_conversion_is_cached(self):
+        site = VariantSite({"魔法少女幸福論": "魔法少女幸福论"})
+        collect_variants(site, ["魔法少女幸福論"])
+        collect_variants(site, ["魔法少女幸福論"])
+        self.assertEqual(1, len(site.requests), "同一个名字不该再问一次")
+
+    def test_names_that_are_already_simplified_cost_nothing(self):
+        site = VariantSite({})
+        collect_variants(site, ["千本桜"])
+        collect_variants(site, ["千本桜"])
+        self.assertEqual(1, len(site.requests))
+        self.assertIsNone(variant_lookup({}, {}, "千本桜", {"千本桜": "千本桜"}))
+
+
+class LenientVerificationTest(TestCase):
+    """宽松匹配到的页面要验一次正文：空模板要算「排除」，不能算「已匹配」。"""
+
+    PAGES = {"8217": "DECO-27×堀江晶太(kemu) - セカイ",
+             "4130": "【GUMI】恋愛勇者【オリジナル】"}
+
+    def test_an_unfilled_template_is_excluded_even_though_it_matches(self):
+        def fetcher(url):
+            pid = url.rsplit("/", 1)[-1].split(".")[0]
+            return {"8217": SONG_HTML, "4130": UNTRANSLATED_HTML}.get(pid, "")
+
+        listed, matched, excluded, _ = classify(
+            self.PAGES, build_name_index(WRAPPED_SONGS), {},
+            aliases=build_alias_index(WRAPPED_SONGS), fetcher=fetcher)
+        self.assertEqual([], listed)
+        self.assertEqual(1, matched)
+        self.assertEqual(1, excluded)

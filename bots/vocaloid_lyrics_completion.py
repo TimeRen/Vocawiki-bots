@@ -18,9 +18,15 @@
 * 站务页：导航 / 目录 / 日志 / 留言页（``pages/2``「メニュー」、``pages/1557``「LOG下半年」
   之类）正文以链接或留言为主，按 pid 白名单（``NON_SONG_PIDS``）直接排掉；「歌曲以外的翻譯」
   （``pages/448``）列出的页面（广播剧、小剧场、散文…）同样不是歌曲，每轮跟着它的清单排除。
-* 「曲名/作者」：AtWiki 的页面名常写成 ``曲名/作者`` 或 ``曲名(作者)``，Vocawiki 的条目名却是
-  「中文曲名(作者)」。整串比不上时把作者拆出来当佐证（Songbox 的 ``|P主=``）；一个歌名对到
-  好几个条目时（``シンデレラ`` 既是 `灰姑娘(DECO*27)` 也是 `灰姑娘(zig)` 的歌名）靠它消歧。
+  ``pages/11``「初音ミク原創曲」这一族的正文是「曲名 / 作者 / 網址」表格（表头
+  ``格式(暫定)這裡是曲名網址``），``pages/1427`` 那种整页是没填的模板
+  （``翻譯：(想具名的話寫在這裡…)``），两种都按正文判据排掉。
+* 「曲名/作者」：AtWiki 的页面名常写成 ``曲名/作者``、``曲名(作者)``、``作者 - 曲名``、
+  ``曲名 > 作者``、``【歌姬】曲名【オリジナル】``，Vocawiki 的条目名却是「中文曲名(作者)」。
+  整串比不上时把作者 / 标签拆出来当佐证（Songbox 的 ``|P主=``）；一个歌名对到好几个条目时
+  （``シンデレラ`` 既是 `灰姑娘(DECO*27)` 也是 `灰姑娘(zig)` 的歌名）靠它消歧。
+* 繁简：AtWiki 写 ``魔法少女幸福論``、条目叫 ``魔法少女幸福论``。用 voca 自己的
+  ``converttitles&variant=zh-hans`` 转换页面名再比，结果缓存在 ``data/`` 下。
 
 判定结果与两个来源清单都缓存在 ``data/`` 下，所以第一次跑要抓上千个 AtWiki 页面
 （几分钟），之后每轮只补新出现的页面；判定过期（默认 30 天）的页面会重新抓一次。
@@ -72,11 +78,18 @@ DATA_DIR = Path("data")
 PAGES_CACHE = DATA_DIR / "vocaloid_lyrics_completion_pages.pickle"
 INDEX_CACHE = DATA_DIR / "vocaloid_lyrics_completion_index.pickle"
 VERDICT_CACHE = DATA_DIR / "vocaloid_lyrics_completion_verdicts.pickle"
+VARIANT_CACHE = DATA_DIR / "vocaloid_lyrics_completion_variants.pickle"
 # 缓存格式变了就换这个号：旧缓存会被丢掉重建（这份索引重建一次约五分钟）
 # 3：索引里多了 ``aliases``（歌名 → ``[(条目标题, P主)]``），用来消歧「曲名/作者」
 INDEX_VERSION = 3
 # 页面清单的格式版本（标题做过 NFC 规范化；3：多了 ``linked`` 非歌曲页清单）
 PAGES_VERSION = 3
+# 繁简转换缓存的格式版本
+VARIANT_VERSION = 1
+# 逐页判定的格式版本：**判定规则变了就 +1**，旧判定会被重抓一遍。
+# 不然缓存要等 30 天 TTL 到期，新加的「目录页 / 空模板」规则一个月内不生效。
+# 2：加了目录页（``這裡是曲名``）与空模板（``翻譯：(想具名``）判据
+VERDICT_VERSION = 2
 
 DEFAULT_MAX_AGE = 12 * 3600        # AtWiki 页面清单多久重建一次（秒）
 # 歌名索引自己的有效期：条目一建好就该被认出来，别等一天的缓存过期
@@ -107,8 +120,11 @@ NON_SONG_TITLES = (
 # 所以这里只列确认过的页面，不按关键词批量删。
 NON_SONG_PIDS = frozenset({
     "2",                            # メニュー
+    "11", "12", "13", "14", "16", "17",   # ○○原創曲（按歌姬 / 作者 / 再生数分的目录）
     "15",                           # 其他原創曲（目录）
     "20",                           # 歌詞template
+    "48", "49", "55", "56",         # 鏡音レン／リン獨唱、デッドボールP、19's Sound Factory（目录）
+    "125",                          # 中文歌詞列表作者別(五十音順)（页码目录）
     "127", "128", "129",            # 作者別英數 / あ～な行 / は～わ行（作者目录）
     "130",                          # V廢海外組出品2008上半年埋沒曲發掘特集（特集页）
     "171", "236",                   # 求翻譯log / 求翻譯討論log
@@ -119,6 +135,23 @@ NON_SONG_PIDS = frozenset({
     "829",                          # 求翻譯認領頁
     "1554", "1557", "1558", "1559",  # LOG-2008 / LOG下半年 / LOG上半年 / 舊留言區LOG
 })
+# 目录页正文的固定表头（「曲名 / 作者 / 網址」表格）。全站 4779 个清单页里只有
+# 11~56 那 10 个 `○○原創曲` 有，所以按它判目录页不会误伤。
+CATALOG_MARKERS = ("這裡是曲名", "格式(暫定)")
+# 页面名以它开头的是「中文歌詞列表」这类目录（126 早就在 NON_SONG_TITLES 里）
+CATALOG_TITLE_PREFIX = "中文歌詞列表"
+# 没填内容的模板页：「翻譯：」后面紧跟占位符。只认这一种写法——4913 那种
+# 「翻譯：某某人」但文末残留模板提示的页面是真翻译页，不能删。
+UNTRANSLATED_MARKERS = ("翻譯：(想具名", "翻譯:(想具名", "翻譯：（想具名")
+# 页面名首尾的标签（歌姬名、【オリジナル】、【歌ってみた】…）：剥掉再比
+LEADING_LABEL_RE = re.compile(r"^[【［][^】］]*[】］]\s*")
+TRAILING_LABEL_RE = re.compile(r"\s*[【［][^】］]*[】］]$")
+# 「作者 - 曲名」「曲名 > 作者」的分隔符：**两侧必须有空格**，否则歌名里的连字符 / 箭头会被拆坏
+SPACED_SEP_RE = re.compile(r"\s+[-－—–―−>＞»]+\s+")
+# 页面名结尾多挂的说明性后缀
+NAME_SUFFIX_RE = re.compile(r"(?:中文歌詞|中譯|中文翻譯)$")
+# 作者名比较用：去掉标点，让 `DECO*27` 与 `DECO-27` 算同一个人
+PRODUCER_LOOSE_RE = re.compile(r"[^0-9a-z\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]+")
 # 这些页面的正文是一份「不是歌」的清单（广播剧 / 小剧场 / 散文 / 视频解说…）：
 # 它们列出的页面同样不该进清单。每轮抓一次，结果跟着页面清单一起缓存。
 NON_SONG_LIST_SOURCES = ("448",)
@@ -344,17 +377,78 @@ def title_splits(title: str) -> List[Tuple[str, List[str]]]:
 
 
 def producer_matches(producer: str, hints: Sequence[str]) -> bool:
-    """条目的作者原文里有没有某个 hint token（``Crusher-P`` / ``DECO*27`` …）。"""
+    """条目的作者原文里有没有某个 hint token（``Crusher-P`` / ``DECO*27`` …）。
+
+    AtWiki 把 ``DECO*27`` 写成 ``DECO-27``，所以除了原样比，还会去掉标点再比一次
+    （``*`` `-` `・` `_` 一律忽略）：这是同一个人的两种写法，不算两个人。
+    """
     text = name_key(producer)
     if not text:
         return False
+    loose = loose_producer(producer)
     for hint in hints:
         key = name_key(hint)
         if len(key) < 2:
             continue
         if key in text or (len(text) >= 2 and text in key):
             return True
+        hint_loose = loose_producer(hint)
+        if (len(hint_loose) >= 3 and loose
+                and (hint_loose in loose or loose in hint_loose)):
+            return True
     return False
+
+
+def loose_producer(text: str) -> str:
+    """作者名的「去标点」写法：``DECO-27`` 与 ``DECO*27`` 都变成 ``deco27``。"""
+    return PRODUCER_LOOSE_RE.sub("", name_key(text))
+
+
+def spaced_separator_splits(title: str) -> List[Tuple[str, List[str]]]:
+    """「作者 - 曲名」「曲名 > 作者」→ ``[(每一段, 其余各段的作者 token)]``。
+
+    只认**两侧带空格**的分隔符：``DECO-27`` 里的 ``-``、``かがみのむこう＞`` 这种
+    右边没东西的、歌名里的 ``←→``／``→`` 都不切。两个方向都给，是因为 AtWiki 两种
+    顺序都在用（``DECO-27×堀江晶太(kemu) - セカイ`` 与 ``EAT ME > OSTER project``）；
+    方向反过来也匹配不上——另一边不可能出现在条目的 ``P主`` 里。
+    """
+    parts = [piece.strip() for piece in SPACED_SEP_RE.split(str(title or "")) if piece.strip()]
+    if len(parts) < 2:
+        return []
+    splits: List[Tuple[str, List[str]]] = []
+    for index, base in enumerate(parts):
+        others = " ".join(piece for pos, piece in enumerate(parts) if pos != index)
+        splits.append((base, hint_tokens(others)))
+    return splits
+
+
+def label_variants(title: str) -> List[str]:
+    """页面名 → ``[原名, 去掉首尾【…】标签的名字]``。
+
+    AtWiki 常把页面名写成 ``【GUMI】恋愛勇者【オリジナル】``、``Fireworks【流星プロジェクト】``、
+    ``いろは唄【男性目線ver.】``：方括号里是歌姬 / 投稿分类 / 版本说明，不是歌名的一部分。
+    歌名中间带 ``【】`` 的（``女王←→魔女【中世騎士物語】``）只在去掉后还有字时才算候选，
+    真要对上还得靠下面的条目名 / 作者佐证。
+    """
+    variants = [title]
+    current = str(title or "").strip()
+    while True:
+        stripped = LEADING_LABEL_RE.sub("", current)
+        if stripped == current:
+            stripped = TRAILING_LABEL_RE.sub("", current)
+        stripped = stripped.strip()
+        if stripped == current or not stripped:
+            break
+        current = stripped
+        if current not in variants:
+            variants.append(current)
+    return variants
+
+
+def name_suffix_variants(title: str) -> List[str]:
+    """去掉页面名结尾的「中文歌詞」这类后缀（``Re:birthed中文歌詞`` → ``Re:birthed``）。"""
+    stripped = NAME_SUFFIX_RE.sub("", str(title or "")).strip()
+    return [str(title or "")] + ([stripped] if stripped and stripped != title else [])
 
 
 def build_alias_index(
@@ -387,20 +481,45 @@ def match_song(names: Dict[str, str], aliases: Dict[str, List[Tuple[str, str]]],
                title: str) -> Optional[str]:
     """AtWiki 页面名 → 对应的条目标题（整串 → 拆作者 → 作者佐证）。
 
-    整串名字先按老办法比（标题 / 重定向 / Songbox 歌名 + 结尾标点宽松），对不上再把
-    「曲名/作者」「曲名(作者)」拆开：曲名在 Songbox 歌名里出现过，**并且**括号里的作者
-    跟条目的 ``P主`` 对上，才算匹配。作者佐证是必须的——``1/4`` 这种名字拆开就变成
-    ``1``，没有佐证会误配到别的歌。
+    依次试「原名」「去掉【…】标签的名字」「去掉「中文歌詞」后缀的名字」，每种都先按
+    整串名字比（标题 / 重定向 / Songbox 歌名 + 结尾标点宽松），对不上再把
+    「曲名/作者」「曲名(作者)」「作者 - 曲名」「曲名 > 作者」拆开。
+
+    拆开之后的判定：
+    * 括号 / 分隔符里的字如果正好是某个候选条目的**标题**（``ケッペキショウ（洁癖症）``），
+      算命中；
+    * 否则要求那个字跟条目的 ``P主`` 对得上（作者佐证）——``1/4`` 拆开就变成 ``1``，
+      没有佐证会误配到别的歌。
     """
+    seen = set()
+    for variant in name_suffix_variants(title):
+        for candidate in label_variants(variant):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            hit = _match_one(names, aliases, candidate)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _match_one(names: Dict[str, str], aliases: Dict[str, List[Tuple[str, str]]],
+               title: str) -> Optional[str]:
+    """单个页面名的匹配（``match_song`` 的内层，对每个名字变体各跑一次）。"""
     exact = lookup_song(names, title)
     if exact is not None:
         return exact
-    for base, hints in title_splits(title):
+    for base, hints in title_splits(title) + spaced_separator_splits(title):
         candidates = aliases.get(name_key(base)) or aliases.get(loose_key(base)) or []
         if not candidates:
             continue
         if len(candidates) == 1 and not hints:
             return candidates[0][0]
+        # 括号里写的是中文译名（= 某个候选条目的标题）时也算命中
+        titles = [entry[0] for entry in candidates
+                  if hints and any(name_key(hint) == name_key(entry[0]) for hint in hints)]
+        if len(titles) == 1:
+            return titles[0]
         matched = [entry for entry in candidates
                    if hints and producer_matches(entry[1], hints)]
         if len(matched) == 1:
@@ -507,15 +626,24 @@ def page_plaintext(markup: str) -> Optional[str]:
 
 
 def is_song_page(plain: Optional[str], links: Optional[int] = None) -> bool:
-    """正文够不够长、像不像一首歌（而不是消歧义 / 目录 / 站务 / 测试页）。
+    """正文够不够长、像不像一首有翻译的歌。
 
-    给了 ``links``（正文区里的内部链接数）时多看一条：只剩链接、几乎没有文字的
-    就是目录页（``pages/2``「メニュー」是 26 个链接、68 字）。
+    排除这几类：
+
+    * 消歧义页（页面上直接写着「消歧義」）；
+    * 只剩链接的目录页（``pages/2``「メニュー」是 26 个链接、68 字）；
+    * 「曲名 / 作者 / 網址」表格页（``○○原創曲`` 这一族，表头是 ``這裡是曲名網址``）；
+    * 没填内容的模板页（``翻譯：(想具名的話寫在這裡…)``）——没有翻译，补不了。
+
     认不出正文时返回 True：宁可留在清单里，也不要因为一次抓取失败把它删掉。
     """
     if plain is None:
         return True
     if any(marker in plain for marker in DISAMBIG_MARKERS):
+        return False
+    if any(marker in plain for marker in CATALOG_MARKERS):
+        return False
+    if any(marker in plain for marker in UNTRANSLATED_MARKERS):
         return False
     if links is not None and links >= LINK_ONLY_MIN_LINKS and len(plain) < LINK_ONLY_MAX_TEXT:
         return False
@@ -524,7 +652,10 @@ def is_song_page(plain: Optional[str], links: Optional[int] = None) -> bool:
 
 def is_song_title(title: str) -> bool:
     """页面名本身像不像一首歌（这个 wiki 自己的首页 / 目录页按标题就能认出来）。"""
-    return name_key(title) not in NON_SONG_KEYS
+    key = name_key(title)
+    if key in NON_SONG_KEYS:
+        return False
+    return not key.startswith(name_key(CATALOG_TITLE_PREFIX))
 
 
 def is_song_pid(pid: str) -> bool:
@@ -686,7 +817,8 @@ def render_page(listed: Sequence[Tuple[str, str]], source_total: int, matched: i
               f"排除 {excluded} 個消歧義／站務／目錄／非歌曲翻譯頁。 -->")
     intro = ("本列表列出來源頁面標題尚未對應到 Vocawiki 歌曲條目的項目"
              "（依標題、重定向及 Songbox 的歌名比對；已排除消歧義頁、明確的"
-             "站務、目錄、討論及測試頁，以及「歌曲以外的翻譯」列出的頁面）。"
+             "站務、目錄、討論及測試頁、沒有翻譯的空模板頁，以及"
+             "「歌曲以外的翻譯」列出的頁面）。"
              f"共 '''{len(listed)}''' 頁。")
     lines = [header, intro, ""]
     for pid, title in listed:
@@ -719,6 +851,56 @@ def save_page(page: Page, text: str, summary: Optional[str]) -> bool:
 
 
 # ---------------------------------------------------------------- 主流程
+
+def collect_variants(site, titles: Iterable[str], cache: Optional[Dict] = None,
+                     batch_size: int = 50) -> Dict[str, str]:
+    """名字 → 简体写法（``魔法少女幸福論`` → ``魔法少女幸福论``）。
+
+    用 wiki 自己的 ``converttitles`` + ``variant=zh-hans`` 转换，口径跟站内搜索、
+    ``-{}-`` 一致，比自己造繁简对照表稳。结果按名字永久缓存：只有**新出现的名字**
+    才会再发请求（首批约 100 个请求，之后每轮几个）。
+    """
+    cache = load_cache(VARIANT_CACHE) if cache is None else cache
+    known: Dict[str, str] = dict(cache.get("names") or {})
+    wanted = [clean_title(title) for title in titles]
+    wanted = [title for title in dict.fromkeys(wanted) if title and title not in known]
+    if not wanted:
+        return known
+    changed = False
+    for start in range(0, len(wanted), batch_size):
+        batch = [title for title in wanted[start:start + batch_size] if "|" not in title]
+        if not batch:
+            continue
+        params = {"action": "query", "format": "json", "formatversion": "2",
+                  "prop": "info", "converttitles": "1", "variant": "zh-hans",
+                  "titles": "|".join(batch)}
+        try:
+            data = site.simple_request(**params).submit()
+        except Exception as exc:  # noqa: BLE001 - 转换失败只是少认几条，下一轮再试
+            pywikibot.warning(f"繁简转换失败，本轮跳过：{exc}")
+            continue
+        query = data.get("query") or {}
+        converted = {str(item.get("from")): str(item.get("to"))
+                     for item in query.get("converted") or []
+                     if item.get("from") and item.get("to")}
+        for title in batch:
+            known[title] = converted.get(title, title)
+            changed = True
+    if changed:
+        save_cache(VARIANT_CACHE, {"built": time.time(), "names": known,
+                                   "version": VARIANT_VERSION})
+        pywikibot.output(f"繁简转换缓存：{len(known)} 个名字")
+    return known
+
+
+def variant_lookup(names: Dict[str, str], aliases: Dict[str, List[Tuple[str, str]]],
+                   title: str, variants: Dict[str, str]) -> Optional[str]:
+    """按简体写法再匹配一次（繁简差异只在页面名上，条目那边已是简体）。"""
+    converted = variants.get(clean_title(title)) or ""
+    if not converted or converted == title:
+        return None
+    return match_song(names, aliases, converted)
+
 
 def collect_pages(max_age: float = DEFAULT_MAX_AGE, refresh: bool = False,
                   fetcher=fetch_text, cache: Optional[Dict] = None) -> Tuple[Dict[str, str], Dict]:
@@ -854,28 +1036,47 @@ def classify(pages: Dict[str, str], names: Dict[str, str], verdicts: Dict[str, D
              recheck: float = DEFAULT_RECHECK, probe_budget: int = 0,
              fetcher=fetch_text, on_progress=None,
              aliases: Optional[Dict[str, List[Tuple[str, str]]]] = None,
-             excluded_pids: Iterable[str] = ()
+             excluded_pids: Iterable[str] = (),
+             variants: Optional[Dict[str, str]] = None
              ) -> Tuple[List[Tuple[str, str]], int, int, Dict[str, Dict]]:
     """把 AtWiki 页面分成「已匹配 / 不是歌曲 / 要补的」三类。
 
     返回 ``(清单, 已匹配数, 排除数, 判定缓存)``。判定缓存里只放抓到结果的页面；
     抓不到的下一轮再试，本轮先按「是歌曲」保守处理。``on_progress`` 在每抓完一批
-    页面后被调用（用来把判定落盘）。``excluded_pids`` 是「歌曲以外的翻譯」列出的页面。
+    页面后被调用（用来把判定落盘）。``excluded_pids`` 是「歌曲以外的翻譯」列出的页面，
+    ``variants`` 是名字的简体写法（``magic 魔法少女幸福論 → 魔法少女幸福论``）。
+
+    新规则（分隔符 / 标签 / 后缀 / 繁简）认出来的页面会**额外抓一次正文**：这些页面
+    以前一直在清单里，判定缓存说「是歌」，但可能是空模板（``翻譯：(想具名…)``）——
+    不验的话会把它算进「已匹配」，统计就虚高了。
     """
     skipped = {str(pid) for pid in excluded_pids}
+    variants = variants or {}
     candidate = {pid: title for pid, title in pages.items()
-                 if is_song_pid(pid) and pid not in skipped and is_song_title(title)}
-    unmatched = [(pid, title) for pid, title in candidate.items()
-                 if match_song(names, aliases or {}, title) is None]
+        if is_song_pid(pid) and pid not in skipped and is_song_title(title)}
+    strict = {pid: lookup_song(names, title) for pid, title in candidate.items()}
+    lenient: Dict[str, str] = {}
+    unmatched: List[Tuple[str, str]] = []
+    for pid, title in candidate.items():
+        if strict[pid] is not None:
+            continue
+        hit = match_song(names, aliases or {}, title) or variant_lookup(
+            names, aliases or {}, title, variants)
+        if hit is None:
+            unmatched.append((pid, title))
+        else:
+            lenient[pid] = hit
     now = time.time()
     pending: List[str] = []
     for pid, _title in unmatched:
         verdict = verdicts.get(pid)
-        if verdict is None or not is_fresh(verdict.get("at"), recheck):
+        if (verdict is None or verdict.get("v") != VERDICT_VERSION
+                or not is_fresh(verdict.get("at"), recheck)):
             pending.append(pid)
     if probe_budget:
         pending = pending[:probe_budget]
-    fresh = probe_in_chunks(pending, fetcher=fetcher,
+    forced = list(lenient)                # 宽松匹配：每次都验正文，不吃 30 天的缓存
+    fresh = probe_in_chunks(forced + pending, fetcher=fetcher,
                             on_chunk=lambda found: _record(verdicts, found, now, on_progress))
     for pid in pending:
         if pid in fresh:
@@ -887,8 +1088,12 @@ def classify(pages: Dict[str, str], names: Dict[str, str], verdicts: Dict[str, D
         on_progress(verdicts)
     listed = [(pid, title) for pid, title in unmatched
               if verdicts.get(pid, {}).get("song", True)]
-    excluded = (len(unmatched) - len(listed)) + (len(pages) - len(candidate))
-    matched = len(candidate) - len(unmatched)
+    listed_pids = {pid for pid, _title in listed}
+    bad_lenient = [pid for pid in lenient if not verdicts.get(pid, {}).get("song", True)]
+    rejected = bad_lenient + [pid for pid, _title in unmatched if pid not in listed_pids]
+    matched = sum(1 for pid in candidate if strict[pid] is not None)
+    matched += len(lenient) - len(bad_lenient)
+    excluded = len(rejected) + (len(pages) - len(candidate))
     return sort_listed(listed), matched, excluded, verdicts
 
 
@@ -896,7 +1101,7 @@ def _record(verdicts: Dict[str, Dict], found: Dict[str, bool], now: float,
             on_progress) -> None:
     """把这一批判定写进缓存，并回调（落盘）。"""
     for pid, is_song in found.items():
-        verdicts[pid] = {"song": bool(is_song), "at": now}
+        verdicts[pid] = {"song": bool(is_song), "at": now, "v": VERDICT_VERSION}
     if on_progress is not None:
         on_progress(verdicts)
 
@@ -923,10 +1128,14 @@ def run_once(site, write: bool = False, summary: Optional[str] = None,
     aliases = index_cache.get("aliases") or {}
     verdicts = load_cache(VERDICT_CACHE)
     verdicts = {pid: value for pid, value in verdicts.items() if pid in pages}
+    variants = collect_variants(site, [
+        title for pid, title in pages.items()
+        if is_song_pid(pid) and is_song_title(title)])
     listed, matched, excluded, verdicts = classify(
         pages, names, verdicts, recheck, probe_budget, fetcher,
         on_progress=lambda found: save_cache(VERDICT_CACHE, found),
-        aliases=aliases, excluded_pids=page_cache.get("linked") or ())
+        aliases=aliases, excluded_pids=page_cache.get("linked") or (),
+        variants=variants)
     save_cache(VERDICT_CACHE, verdicts)
 
     text = render_page(listed, len(pages), matched, excluded)

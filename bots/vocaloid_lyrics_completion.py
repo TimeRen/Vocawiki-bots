@@ -20,11 +20,13 @@
   （``pages/448``）列出的页面（广播剧、小剧场、散文…）同样不是歌曲，每轮跟着它的清单排除。
   ``pages/11``「初音ミク原創曲」这一族的正文是「曲名 / 作者 / 網址」表格（表头
   ``格式(暫定)這裡是曲名網址``），``pages/1427`` 那种整页是没填的模板
-  （``翻譯：(想具名的話寫在這裡…)``），两种都按正文判据排掉。
+  （``翻譯：(想具名的話寫在這裡…)``），``pages/60``「Shoutbox擬人頁」那种满是
+  ``2008-06-15 03:45:21`` 时间戳、却没有任何歌曲标记的聊天记录，都按正文判据排掉。
 * 「曲名/作者」：AtWiki 的页面名常写成 ``曲名/作者``、``曲名(作者)``、``作者 - 曲名``、
   ``曲名 > 作者``、``【歌姬】曲名【オリジナル】``，Vocawiki 的条目名却是「中文曲名(作者)」。
   整串比不上时把作者 / 标签拆出来当佐证（Songbox 的 ``|P主=``）；一个歌名对到好几个条目时
   （``シンデレラ`` 既是 `灰姑娘(DECO*27)` 也是 `灰姑娘(zig)` 的歌名）靠它消歧。
+  作者名还会按站内重定向解析后再比：``LamazeP`` = ``ラマーズP``、``きくお`` = ``Kikuo``。
 * 繁简：AtWiki 写 ``魔法少女幸福論``、条目叫 ``魔法少女幸福论``。用 voca 自己的
   ``converttitles&variant=zh-hans`` 转换页面名再比，结果缓存在 ``data/`` 下。
 
@@ -87,9 +89,10 @@ PAGES_VERSION = 3
 # 繁简转换缓存的格式版本
 VARIANT_VERSION = 1
 # 逐页判定的格式版本：**判定规则变了就 +1**，旧判定会被重抓一遍。
-# 不然缓存要等 30 天 TTL 到期，新加的「目录页 / 空模板」规则一个月内不生效。
+# 不然缓存要等 30 天 TTL 到期，新加的判据一个月内不生效。
 # 2：加了目录页（``這裡是曲名``）与空模板（``翻譯：(想具名``）判据
-VERDICT_VERSION = 2
+# 3：加了聊天记录页判据（``SONG_MARKERS`` + 时间戳）
+VERDICT_VERSION = 3
 
 DEFAULT_MAX_AGE = 12 * 3600        # AtWiki 页面清单多久重建一次（秒）
 # 歌名索引自己的有效期：条目一建好就该被认出来，别等一天的缓存过期
@@ -133,6 +136,7 @@ NON_SONG_PIDS = frozenset({
     "448",                          # 歌曲以外的翻譯（下面那份清单的来源）
     "463",                          # コメント/wiki管理討論
     "829",                          # 求翻譯認領頁
+    "60",                           # Shoutbox擬人頁（K 岛闲聊记录，不是歌词翻译）
     "1554", "1557", "1558", "1559",  # LOG-2008 / LOG下半年 / LOG上半年 / 舊留言區LOG
 })
 # 目录页正文的固定表头（「曲名 / 作者 / 網址」表格）。全站 4779 个清单页里只有
@@ -143,6 +147,13 @@ CATALOG_TITLE_PREFIX = "中文歌詞列表"
 # 没填内容的模板页：「翻譯：」后面紧跟占位符。只认这一种写法——4913 那种
 # 「翻譯：某某人」但文末残留模板提示的页面是真翻译页，不能删。
 UNTRANSLATED_MARKERS = ("翻譯：(想具名", "翻譯:(想具名", "翻譯：（想具名")
+# 聊天记录 / 留言页（chat log）：正文里一堆 `2008-06-15 03:45:21` 这种时间戳。
+# 判据要求「≥3 个时间戳**且**一个歌曲标记都没有」，所以歌词里出现日期也不会误伤。
+CHATLOG_STAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}\s*\d{1,2}:\d{2}:\d{2}")
+CHATLOG_MIN_STAMPS = 3
+# 歌曲页一定会有的标记。`pages/8344 ナタリー` 用的是 `曲：` / `歌：` / `译：`，
+# 所以不能只看 `作詞`——那样会把它当聊天记录删掉。
+SONG_MARKERS = ("作詞", "作曲", "詞：", "曲：", "歌：", "翻譯", "譯：", "译：")
 # 页面名首尾的标签（歌姬名、【オリジナル】、【歌ってみた】…）：剥掉再比
 LEADING_LABEL_RE = re.compile(r"^[【［][^】］]*[】］]\s*")
 TRAILING_LABEL_RE = re.compile(r"\s*[【［][^】］]*[】］]$")
@@ -376,11 +387,16 @@ def title_splits(title: str) -> List[Tuple[str, List[str]]]:
     return splits
 
 
-def producer_matches(producer: str, hints: Sequence[str]) -> bool:
+def producer_matches(producer: str, hints: Sequence[str], resolve=None) -> bool:
     """条目的作者原文里有没有某个 hint token（``Crusher-P`` / ``DECO*27`` …）。
 
-    AtWiki 把 ``DECO*27`` 写成 ``DECO-27``，所以除了原样比，还会去掉标点再比一次
-    （``*`` `-` `・` `_` 一律忽略）：这是同一个人的两种写法，不算两个人。
+    三层判据，从严到宽：
+
+    1. 原样比（一方包含另一方）；
+    2. 去掉标点再比：AtWiki 把 ``DECO*27`` 写成 ``DECO-27``，这是同一个人的两种写法；
+    3. 给了 ``resolve`` 时，把两边都解析成**站内条目标题**再比：``LamazeP`` 与
+       ``ラマーズP`` 字面毫不相干，但 voca 上 ``ラマーズP`` 就是重定向到 ``LamazeP`` 的。
+       只有两边解析到同一个页面才算，比字面比更严。
     """
     text = name_key(producer)
     if not text:
@@ -396,6 +412,10 @@ def producer_matches(producer: str, hints: Sequence[str]) -> bool:
         if (len(hint_loose) >= 3 and loose
                 and (hint_loose in loose or loose in hint_loose)):
             return True
+        if resolve is not None:
+            left, right = resolve(hint), resolve(producer)
+            if left and right and name_key(left) == name_key(right):
+                return True
     return False
 
 
@@ -521,7 +541,8 @@ def _match_one(names: Dict[str, str], aliases: Dict[str, List[Tuple[str, str]]],
         if len(titles) == 1:
             return titles[0]
         matched = [entry for entry in candidates
-                   if hints and producer_matches(entry[1], hints)]
+                   if hints and producer_matches(entry[1], hints,
+                                                 resolve=lambda text: lookup_song(names, text))]
         if len(matched) == 1:
             return matched[0][0]
         if len(matched) > 1:
@@ -633,7 +654,9 @@ def is_song_page(plain: Optional[str], links: Optional[int] = None) -> bool:
     * 消歧义页（页面上直接写着「消歧義」）；
     * 只剩链接的目录页（``pages/2``「メニュー」是 26 个链接、68 字）；
     * 「曲名 / 作者 / 網址」表格页（``○○原創曲`` 这一族，表头是 ``這裡是曲名網址``）；
-    * 没填内容的模板页（``翻譯：(想具名的話寫在這裡…)``）——没有翻译，补不了。
+    * 没填内容的模板页（``翻譯：(想具名的話寫在這裡…)``）——没有翻译，补不了；
+    * 聊天记录 / 留言页（``pages/60``「Shoutbox擬人頁」）：正文里一堆
+      ``2008-06-15 03:45:21`` 这种时间戳，而且一个歌曲标记都没有。
 
     认不出正文时返回 True：宁可留在清单里，也不要因为一次抓取失败把它删掉。
     """
@@ -644,6 +667,9 @@ def is_song_page(plain: Optional[str], links: Optional[int] = None) -> bool:
     if any(marker in plain for marker in CATALOG_MARKERS):
         return False
     if any(marker in plain for marker in UNTRANSLATED_MARKERS):
+        return False
+    if (len(CHATLOG_STAMP_RE.findall(plain)) >= CHATLOG_MIN_STAMPS
+            and not any(marker in plain for marker in SONG_MARKERS)):
         return False
     if links is not None and links >= LINK_ONLY_MIN_LINKS and len(plain) < LINK_ONLY_MAX_TEXT:
         return False

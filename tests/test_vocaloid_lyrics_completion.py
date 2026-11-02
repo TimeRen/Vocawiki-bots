@@ -517,6 +517,10 @@ class NonSongPidTest(TestCase):
         self.assertFalse(is_song_pid("1557"))
         self.assertFalse(is_song_pid("448"))
 
+    def test_the_shoutbox_personification_page_is_not_a_song(self):
+        """pages/60「Shoutbox擬人頁」是 K 岛闲聊记录，不是歌词翻译。"""
+        self.assertFalse(is_song_pid("60"))
+
 
 class LinkedExclusionTest(TestCase):
     def test_pages_listed_by_the_source_are_excluded(self):
@@ -988,3 +992,99 @@ class LenientVerificationTest(TestCase):
         self.assertEqual([], listed)
         self.assertEqual(1, matched)
         self.assertEqual(1, excluded)
+
+
+# 聊天记录页（pages/60「Shoutbox擬人頁」实测：3563 字、84 个时间戳、没有任何歌曲标记）
+CHATLOG_HTML = (
+    '<div id="wikibody" class="box">\n<!--@@@@@--><div>'
+    + "Shoutbox:性別依使用者需求而有所不同喜歡跟V版版眾討零食吃流言:總覺得SB君家有約1/3的房間堆放"
+    + "".join("|∀ﾟ)>星期一期末考(2008-06-%02d 03:45:21)" % day for day in range(10, 20))
+    + '</div><div class="atwiki-page-keyword">檢索</div></div>'
+)
+# pages/8344「ナタリー」：只用 `曲：` / `歌：` / `译：`，没有 作詞/作曲/翻譯 —— 是真歌
+SIMPLIFIED_MARKERS_HTML = (
+    '<div id="wikibody" class="box">\n<!--@@@@@--><div>歌：VOCALOID4V4X曲：あえる译：ふり'
+    '娜塔莉浮かばないもの飛ばしてみたり无法浮起之物尝试让其飞翔動かないもの逃してみたり'
+    '无法动弹之物尝试让它逃跑百万回のすいません百万回的对不起</div>'
+    '<div class="atwiki-page-keyword">檢索</div></div>'
+)
+# 歌词里出现日期（但页面有 `作詞：`）—— 不能被当聊天记录删掉
+SONG_WITH_DATES_HTML = (
+    '<div id="wikibody" class="box">\n<!--@@@@@--><div>作詞：すんｚりヴぇｒ歌：鏡音リン'
+    '2008-06-15 03:45:21 那天的事<br />2009-01-02 10:00:00 还在这里<br />'
+    '2010-03-04 05:06:07 记得吗<br />想一眼就看穿那橙色之物吧這點我跟你真是一丘之貉呢'
+    '</div><div class="atwiki-page-keyword">檢索</div></div>'
+)
+
+
+class ChatLogTest(TestCase):
+    def test_a_chat_log_is_not_a_song(self):
+        plain, links = page_stats(CHATLOG_HTML)
+        self.assertGreaterEqual(len(vocaloid_stamps(plain)), 3)
+        self.assertFalse(is_song_page(plain, links))
+
+    def test_a_song_that_only_uses_simplified_markers_is_kept(self):
+        """pages/8344 用 `曲：`/`歌：`/`译：`，没有 作詞/作曲/翻譯 —— 仍是歌。"""
+        self.assertTrue(is_song_page(page_plaintext(SIMPLIFIED_MARKERS_HTML)))
+
+    def test_dates_inside_lyrics_do_not_matter(self):
+        self.assertTrue(is_song_page(page_plaintext(SONG_WITH_DATES_HTML)))
+
+    def test_one_or_two_stamps_are_not_enough(self):
+        plain = "作詞：某人" + "(2008-06-15 03:45:21)" * 2 + "歌詞" * 60
+        self.assertTrue(is_song_page(plain))
+
+
+def vocaloid_stamps(text):
+    return completion.CHATLOG_STAMP_RE.findall(text)
+
+
+# `ラマーズP` 是 `LamazeP` 的重定向、`きくお` 是 `Kikuo` 的重定向：Vocawiki 自己知道
+# 这两个写法是同一个人，页面名与 Songbox 各写一种时应该能对上。
+PRODUCER_REDIRECTS = {
+    name_key("LamazeP"): "LamazeP",
+    name_key("ラマーズP"): "LamazeP",
+    name_key("Kikuo"): "Kikuo",
+    name_key("きくお"): "Kikuo",
+    name_key("梨本うい"): "梨本うい",
+    name_key("梨本P"): "梨本うい",
+}
+CALL_SONGS = {
+    "Call": {"redirects": [],
+             "lead": "{{VOCALOID Songbox\n|歌曲名称 = Call\n|P主 = [[ラマーズP]]\n}}"},
+    "Kaleidoscope": {"redirects": [],
+                     "lead": "{{VOCALOID Songbox\n|歌曲名称 = kaleidoscope\n|P主 = [[Kikuo]]\n}}"},
+    "空等": {"redirects": [],
+             "lead": "{{VOCALOID Songbox\n|歌曲名称 = {{lj|待ちぼうけ}}\n|P主 = [[梨本うい]]\n}}"},
+}
+
+
+def _resolve(text):
+    return PRODUCER_REDIRECTS.get(name_key(text))
+
+
+class ProducerResolveTest(TestCase):
+    def test_a_redirect_bridges_two_spellings(self):
+        self.assertTrue(producer_matches("ラマーズP", ["LamazeP"], resolve=_resolve))
+        self.assertTrue(producer_matches("Kikuo", ["きくお"], resolve=_resolve))
+        self.assertTrue(producer_matches("梨本うい", ["梨本P"], resolve=_resolve))
+
+    def test_without_the_resolver_the_literal_rule_still_applies(self):
+        self.assertFalse(producer_matches("ラマーズP", ["LamazeP"]))
+        self.assertTrue(producer_matches("ラマーズP", ["ラマーズP"]))
+
+    def test_two_different_people_do_not_match(self):
+        self.assertFalse(producer_matches("Kikuo", ["梨本P"], resolve=_resolve))
+
+    def test_an_unknown_name_does_not_match(self):
+        self.assertFalse(producer_matches("ラマーズP", ["誰か"], resolve=_resolve))
+
+    def test_a_slash_title_matches_through_the_redirect(self):
+        names = build_name_index(CALL_SONGS)
+        # 真实索引里这些作者条目带着对方写法的重定向（`きくお` → `Kikuo` 等）
+        for alias, title in PRODUCER_REDIRECTS.items():
+            names.setdefault(alias, title)
+        aliases = build_alias_index(CALL_SONGS)
+        self.assertEqual("Call", match_song(names, aliases, "Call/LamazeP"))
+        self.assertEqual("Kaleidoscope", match_song(names, aliases, "kaleidoscope/きくお"))
+        self.assertEqual("空等", match_song(names, aliases, "待ちぼうけ/梨本P"))

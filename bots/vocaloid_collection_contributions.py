@@ -262,6 +262,9 @@ MOEGIRL_FALLBACK: Dict[str, Tuple[str, str]] = {
     "夏日少女曾入梦境。": ("夏日少女曾入梦境。", "Iming42"),
     "就这样继续前进吧": ("就这样继续前进吧", "Touhoupikachu"),
     "处刑鼓掌": ("处刑鼓掌", "IIchopsticksII"),
+    # 2025夏 多色格子（周某不是轴某 / 珞羽子）靠这条在云上认出创建者；
+    # 认不出时那一格会被算成「无归属」，把珞羽子的数字磨掉。
+    "魔法女仆": ("魔法女仆", "珞羽子"),
 }
 
 # Bots / import accounts must not appear in the statistics.

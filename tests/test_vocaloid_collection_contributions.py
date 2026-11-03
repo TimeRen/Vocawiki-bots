@@ -338,26 +338,25 @@ class TestCountByListed(TestCase):
 
 
 class TestCountedTracks(TestCase):
-    def test_remix_and_neta_tracks_do_not_count(self):
-        # REMIX 与 neta 整条不算（2026-11-03：neta 曲无论创建者是谁都不计入图表）；
-        # 其它赛道里标题写着「二次创作」的二创也不算。
+    def test_remix_and_derivative_tracks_do_not_count(self):
+        # REMIX 赛道整条不算；neta 里「原曲/作者」写法、以及标题写着「二次创作」的
+        # 二创不算；「其他部门」这类分组里原创曲与二创混在一起，要看曲目本身。
         self.assertFalse(contributions.is_counted_track("REMIX", "Rolling Girl/郁P"))
-        self.assertFalse(contributions.is_counted_track("neta", "没带分组名的榜外曲"))
         self.assertFalse(contributions.is_counted_track("neta:其他部门", "某演奏/某人"))
-        self.assertFalse(contributions.is_counted_track("neta:未上榜歌曲", "榜外原创曲"))
         self.assertFalse(contributions.is_counted_track(
             "neta:其他部门", "发表自己爱吃的菜的龙#二次创作"))
-        self.assertFalse(contributions.is_counted_track(
-            "neta:其他部门", "长音厨肺活量测试"))   # 原创 neta 曲也不计入
+        self.assertFalse(contributions.is_counted_track("neta:未上榜歌曲", "某曲/某P"))
+        self.assertTrue(contributions.is_counted_track("neta:未上榜歌曲", "榜外原创曲"))
         self.assertTrue(contributions.is_counted_track("TOP100", "榜内曲"))
-        self.assertTrue(contributions.is_counted_track("ROOKIE", "榜内曲"))
-        # 其它赛道里的二创仍然排除
-        self.assertFalse(contributions.is_counted_track("TOP100", "某曲/某P"))
+        self.assertTrue(contributions.is_counted_track("neta", "没带分组名的榜外曲"))
+        # 「其他部门」里的原创曲（Exhibition 这类不排名模块）照样算
+        self.assertTrue(contributions.is_counted_track("neta:其他部门", "魔法(Murata Shiyuu)"))
+        # 标题看不出来时，由页面正文判断（derivative_of）
         self.assertFalse(contributions.is_counted_track(
-            "TOP100", "发表自己爱吃的菜的龙",
+            "neta:其他部门", "发表自己爱吃的菜的龙",
             lambda title: title == "发表自己爱吃的菜的龙"))
         self.assertTrue(contributions.is_counted_track(
-            "TOP100", "魔法(Murata Shiyuu)", lambda title: False))
+            "neta:其他部门", "魔法(Murata Shiyuu)", lambda title: False))
 
     @patch.object(contributions, "Page")
     def test_derivative_pages_are_read_once_and_cached(self, page_factory):
@@ -2123,8 +2122,12 @@ class ChartOrderTest(TestCase):
         self.assertEqual(applied["2025夏|某人"], 1)
 
 
-class NetaExclusionTest(TestCase):
-    """neta 赛道的曲目一律不计入图表（2026-11-03 的规则）。"""
+class NetaTrackTest(TestCase):
+    """neta（「其他歌曲」）的计入口径：原创曲照旧计入、二创不计入。
+
+    2026-11-03 曾试过「neta 整条不计入」，那会把 61 个格子的历史数字一起压下去，
+    已被撤回；这里守住现在的口径，改口径时不会再两边打架。
+    """
 
     @staticmethod
     def _template(sections):
@@ -2136,20 +2139,23 @@ class NetaExclusionTest(TestCase):
         for title in titles:
             exists[title] = True
 
-    def test_a_neta_track_is_never_credited_to_its_creator(self):
-        # 多色格子 + neta：以前会记给创建者，现在应当既不记给谁、又进 excluded
+    def _count(self, title):
         colour = "#111111"
         sections = [Section("2024冬", "TOP100", []),
-                    Section("2024冬", "neta", [Entry("长音厨肺活量测试", [colour])])]
+                    Section("2024冬", "neta", [Entry(title, [])])]
         legend = Legend(colour_to_name={colour: "创建者"},
                         name_to_colour={"创建者": colour})
-        template = {"neta": {1: "长音厨肺活量测试"}}
+        template = {"neta": {1: title}}
         excluded = {}
+        info = {"creator": "创建者", "side": "voca", "kind": "local",
+                "current": "创建者", "previous": "创建者",
+                "voca": ["创建者", ""], "moe": None}
         with patch.object(contributions, "batch_exists", side_effect=self._all_exist), \
                 patch.object(contributions, "page_exists", return_value=True), \
                 patch.object(contributions, "batch_creators"), \
-                patch.object(contributions, "page_credits_detail",
-                             return_value=("创建者", "创建者", "local")):
+                patch.object(contributions, "first_creator", return_value=info), \
+                patch.object(contributions, "page_credits",
+                             return_value=("创建者", "创建者")):
             counts = count_by_listed(
                 FakeSite(), sections, legend, {}, excluded=excluded,
                 songs_of=self._template(
@@ -2158,10 +2164,17 @@ class NetaExclusionTest(TestCase):
                 excluded_of=self._template(
                     {t for k, ranks in template.items() for t in ranks.values()
                      if not contributions.is_counted_track(k, t)}))
+        return counts, excluded
+
+    def test_an_original_neta_track_still_counts(self):
+        counts, excluded = self._count("长音厨肺活量测试")
+        self.assertEqual(counts["2024冬"]["#111111"], 1)
+        self.assertNotIn("2024冬", excluded)
+
+    def test_a_derivative_neta_track_does_not_count(self):
+        counts, excluded = self._count("发表自己爱吃的菜的龙#二次创作")
         self.assertFalse(counts["2024冬"])
-        self.assertEqual(sum(excluded["2024冬"].values()), 1)
-        self.assertEqual(excluded["2024冬"][colour], 1)
-        self.assertEqual(excluded["2024冬"][colour], 1)
+        self.assertEqual(excluded["2024冬"]["#111111"], 1)
 
 
 class MultiColourReportTest(TestCase):

@@ -34,9 +34,9 @@ The bot can:
   track and the derivative songs do not count, see ``is_counted_track``: a
   derivative is recognised by its title (``原曲/创作者``, ``…＃二次创作``) or,
   when the title says nothing, by its page calling itself a cover/二创
-  (``is_derivative``).  The whole neta track (「其他歌曲」) does *not* count
-  either - its cells are not credited to anyone, whatever their colours say
-  (2026-11-03).  A page that merely carries the season's navbox (the
+  (``is_derivative``).  「其他部门」 groups hold original songs (the Exhibition
+  module) *and* covers, so they are judged song by song rather than dropped as a
+  group.  A page that merely carries the season's navbox (the
   overview article) does not count either.  Rows are ordered by their total, so
   the chart reads 多→少 from top to bottom; rows whose totals tie keep the order
   they already have on the page, so a run does not shuffle them back and forth.
@@ -52,8 +52,8 @@ The bot can:
   Explicit corrections in ``CHART_COUNT_ADJUSTMENTS`` are applied to both the
   computed and retained chart values, so later runs do not undo a manual
   correction.
-  Four exceptions subtract from a cell: the REMIX / neta tracks and the
-  derivative songs (``removed``); the credits earlier runs gave to the author of
+  Four exceptions subtract from a cell: the REMIX tracks and the derivative
+  songs (``removed``); the credits earlier runs gave to the author of
   an *imported* revision (that author is either the source article's last
   editor, see ``page_creator``, or the mover recorded in the first revision's
   summary) - moving those credits to the real creator's cell is a one-off
@@ -302,10 +302,14 @@ def is_counted_section(name: str) -> bool:
     return upper.startswith("TOP") or upper.startswith("ROOKIE")
 
 
-# 「其他歌曲」（``neta`` 赛道）整条不计入图表：里面既有本季原创曲也有二创，逐条判断
-# 的旧规则太绕、也容易把多色格子的 neta 曲记到创建者头上（2026-11-03 的要求：
-# **neta 曲无论创建者是谁都不计入**）。所以 ``neta`` 直接整条排除。下面这些「二创
-# 痕迹」只用于别的赛道（比如 TOP100 里出现的翻唱）：
+# 「其他歌曲」下的分组名：这些分组里既有本季的原创曲（Exhibition 这类不排名模块
+# 也收在同一组），也有二创（歌ってみた/翻唱），所以不能按分组名一刀切——判断改看
+# 曲目本身：标题里写「原曲/创作者」、标题写着「二次创作」，或页面正文自认是翻唱/
+# 二创的，才不算（见 ``is_derivative``）。``ORIGINAL_GROUPS`` 是「明确只收原创曲的
+# 分组」，留着给不会混二创的分组用。
+ORIGINAL_GROUPS = {"未上榜歌曲"}
+
+# 二创的痕迹：标题上的（「原曲/创作者」「…＃二次创作」）和页面正文里的
 DERIVATIVE_TITLE_RE = re.compile(r"/|#\s*二次[創创]作")
 DERIVATIVE_TEXT_MARKERS = ("翻唱", "歌ってみた", "二次创作", "二次創作",
                            "二创", "アレンジ")
@@ -313,20 +317,23 @@ DERIVATIVE_TEXT_MARKERS = ("翻唱", "歌ってみた", "二次创作", "二次�
 
 def is_counted_track(section_key: str, title: str,
                      derivative_of: Optional[Callable[[str], bool]] = None) -> bool:
-    """这条曲目算不算创建贡献：REMIX 赛道与 neta 赛道一律不算，其余赛道里的二创也不算。
+    """这条曲目算不算创建贡献：REMIX 赛道与二创都不算。
 
     ``section_key`` 是 ``parse_season_template`` 的键，形如 ``REMIX`` /
     ``neta`` / ``neta:未上榜歌曲``（无区间分组会带上分组名）。``derivative_of``
     给出「页面正文自认是二创」的判断（需要读页面，见 ``is_derivative``）；不给就
     只看标题上的痕迹。
     """
-    name = section_key.partition(":")[0]
-    if name in ("REMIX", "neta"):
+    name, _, label = section_key.partition(":")
+    if name == "REMIX":
         return False
-    if DERIVATIVE_TITLE_RE.search(title):
-        return False
-    if derivative_of is not None and derivative_of(title):
-        return False
+    if name == "neta":
+        if label and label in ORIGINAL_GROUPS:
+            return "/" not in title  # 这一组只收原创曲，带斜杠的仍是「原曲/创作者」
+        if DERIVATIVE_TITLE_RE.search(title):
+            return False
+        if derivative_of is not None and derivative_of(title):
+            return False
     return True
 
 
@@ -1876,8 +1883,7 @@ def apply_colours(text: str, plan: Dict[str, Tuple[str, str]]) -> Tuple[str, int
 # --------------------------------------------------------------------------- #
 # report
 # --------------------------------------------------------------------------- #
-def build_report(site, sections: List[Section], legend: Legend,
-                 cache: Dict[str, Optional[str]], exists: Dict[str, bool],
+def build_report(site, sections: List[Section], legend: Legend,                 cache: Dict[str, Optional[str]], exists: Dict[str, bool],
                  plan: Optional[Dict[str, Tuple[str, str]]] = None) -> str:
     plan = plan or {}
     batch_exists(site, (e.title for s in sections for e in s.entries), exists)
@@ -1899,7 +1905,7 @@ def build_report(site, sections: List[Section], legend: Legend,
         # neta 赛道整条不计入，多色格子的「重要贡献者」也就没有收不收回的问题，
         # 两种情况的结论不一样，报告里要分开写，别让人以为 neta 那两条被计了。
         counted = is_counted_section(name)
-        label = "多色格子（只记创建者）" if counted else "多色格子（neta 曲，不计入）"
+        label = "多色格子（只记创建者）" if counted else "多色格子（neta 曲，neta 赛道照旧计入）"
         lines.append(f"{label}: {season}/{name} - {title}"
                      f"（{' / '.join(legend.display(c) for c in colours)}）")
     return "\n".join(lines)
@@ -3288,7 +3294,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
                                demoted=demoted, applied=removed_applied)
         dropped = sum(sum(entry.values()) for entry in excluded.values())
         lowered = sum(sum(entry.values()) for entry in demoted.values())
-        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/neta/二创 {dropped} 处，"
+        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处，"
                          f"只记创建者而收回 {lowered} 处）")
         for note in decisions[:30]:
             pywikibot.output(f"  {note}")

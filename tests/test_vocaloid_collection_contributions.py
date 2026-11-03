@@ -1803,6 +1803,20 @@ class CreatorOnlyCellTest(TestCase):
         self.assertEqual(demoted["2025夏"][self.B], 1)
 
     @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "first_creator",
+                  return_value={"creator": "", "side": "voca", "kind": "prefix",
+                                "current": "", "previous": "搬运者",
+                                "voca": ["搬运者", ""], "moe": None})
+    def test_an_unknown_creator_does_not_lower_anything(self, _first, _batch):
+        # 云上也想要官方站的答案，取不到时不许凭猜把重要贡献者的数减掉
+        sections = [Section("2025夏", "TOP100", [Entry("魔法女仆", [self.A, self.B])])]
+        demoted = {}
+        counts = count_by_listed(FakeSite(), sections, self._legend(), {},
+                                 demoted=demoted)
+        self.assertEqual(counts["2025夏"][self.A], 1)
+        self.assertFalse(demoted)
+
+    @patch.object(contributions, "batch_creators")
     def test_a_single_colour_cell_is_untouched(self, _batch):
         sections = [Section("2025夏", "TOP100", [Entry("曲", [self.B])])]
         demoted = {}

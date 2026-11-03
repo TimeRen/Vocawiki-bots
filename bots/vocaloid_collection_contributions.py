@@ -1278,12 +1278,18 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
             return
         info = first_creator(site, target, cache, moe_cache, order_cache,
                              song_store, names_store)
-        winner = legend.identity(str(info.get("creator") or ""))
+        creator = str(info.get("creator") or "")
+        winner = legend.identity(creator)
+        if not creator:
+            # 认不出创建者（萌百那一条没验过、源站也查不到）就只记第一个颜色，
+            # 也不再收回别的颜色——没有证据，不能凭猜把谁的数减掉。
+            pywikibot.warning(f"{season}/{title}: 认不出创建者，先记第一个颜色，不动其他颜色")
+            result[season][colours[0]] += 1
+            return
         if winner not in colours:
-            if info.get("creator"):
-                pywikibot.warning(
-                    f"{season}/{title}: 算出来的创建者 {info.get('creator')} 不在格子的颜色里"
-                    f"（{colours}），先记第一个颜色")
+            pywikibot.warning(
+                f"{season}/{title}: 算出来的创建者 {creator} 不在格子的颜色里"
+                f"（{colours}），先记第一个颜色")
             winner = colours[0]
         result[season][winner] += 1
         for other in colours:

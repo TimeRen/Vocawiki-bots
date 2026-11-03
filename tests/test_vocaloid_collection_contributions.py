@@ -11,8 +11,12 @@ import bots.vocaloid_collection_contributions as contributions
 from bots.vocaloid_collection_contributions import (
     Entry,
     Legend,
+    MoeSong,
     Section,
     count_by_listed,
+    moegirl_same_song,
+    parse_moe_song,
+    song_name_keys,
 )
 
 
@@ -686,7 +690,8 @@ class TestScheduledMaintenance(TestCase):
         contributions.main()
 
         run_once.assert_called_once_with(
-            site, set(contributions.ALL_ACTIONS), "listed", True, None, None, None)
+            site, set(contributions.ALL_ACTIONS), "listed", True, None, None, None,
+            contributions.SITEORDER_BUDGET)
 
     @patch.object(contributions, "load_cache", return_value={})
     @patch.object(contributions, "save_cache")
@@ -713,7 +718,7 @@ class TestScheduledMaintenance(TestCase):
             "\"series\":[{\"name\":\"ボカコレ2024春\",\"data\":[0]}]"
             "}</nowiki>}}\n"
         )
-        render_chart.side_effect = lambda text, *_: (text, {})
+        render_chart.side_effect = lambda text, *_a, **_kw: (text, {})
 
         contributions.run_once(object(), {"colour", "stats"})
 
@@ -1390,7 +1395,7 @@ class TestMoegirlAction(TestCase):
         contributions.main()
 
         run_once.assert_called_once_with(
-            site_factory.return_value, {"moe"}, "listed", False, None, None, None)
+            site_factory.return_value, {"moe"}, "listed", False, None, None, None, 0)
 
 
 class FakePage:
@@ -1465,3 +1470,475 @@ class TestCacheFlush(TestCase):
                 contributions.flush_caches()
 
             self.assertFalse(path.exists())
+
+
+# --------------------------------------------------------------------------- #
+# 萌百验货：是不是 Vocaloid 歌曲、是不是同一首
+# --------------------------------------------------------------------------- #
+# 照线上 moegirl「千本樱」抄（{{VOCALOID_Songbox}}，歌名写在 {{lj|…}} 里）
+MOE_SONGBOX = (
+    "{{虚拟歌手歌曲荣誉题头|VOCALOID|nrank=3}}\n"
+    "{{VOCALOID_Songbox\n"
+    "|演唱 = [[初音未来]]\n"
+    "|歌曲名称 = {{lj|千本桜}}<br>'''千本樱'''\n"
+    "|P主 = [[ryo]]\n"
+    "}}\n"
+    "《'''千本樱'''》是 ryo 的歌曲。\n"
+)
+
+
+class MoegirlSongTest(TestCase):
+    def test_a_vocaloid_songbox_is_recognised(self):
+        song = parse_moe_song(MOE_SONGBOX)
+        self.assertTrue(song.songbox)
+        self.assertIn("千本桜", song.names)
+        self.assertIn("千本樱", song.names)
+        self.assertEqual(song.producer, "ryo")
+        self.assertEqual(song.singer, "初音未来")
+
+    def test_a_page_without_a_songbox_is_not_a_song(self):
+        """萌百上大量同名条目是同名小说/游戏/角色，不能拿它们的创建者。"""
+        song = parse_moe_song("{{Infobox character\n|姓名 = Harmony\n}}\n角色介绍。")
+        self.assertFalse(song.songbox)
+        self.assertFalse(moegirl_same_song(song, ["Harmony"]))
+
+    def test_a_redirect_to_different_song_is_rejected(self):
+        """moegirl 的 `Harmony` 是 `#REDIRECT [[和谐]]`（另一首歌）。"""
+        song = parse_moe_song("#REDIRECT [[和谐]]")
+        self.assertFalse(song.songbox)
+        self.assertFalse(moegirl_same_song(song, ["Harmony"]))
+
+    def test_the_same_song_is_matched_on_song_names(self):
+        song = parse_moe_song(MOE_SONGBOX)
+        self.assertTrue(moegirl_same_song(song, ["千本桜"]))
+        self.assertTrue(moegirl_same_song(song, ["千本樱"]))
+        self.assertFalse(moegirl_same_song(song, ["千本樱(别的版本)"]))
+
+    def test_name_keys_ignore_decorations(self):
+        self.assertEqual({"fireworks"}, song_name_keys("Fireworks【流星プロジェクト】"))
+        self.assertEqual({"abc"}, song_name_keys("{{lj|ABC}}<br>"))
+        self.assertEqual({"call"}, song_name_keys("'''Call'''"))
+
+    def test_the_current_revision_is_used_when_the_first_one_has_no_songbox(self):
+        responses = [
+            {"query": {"pages": [{"title": "千本樱", "revisions": [
+                {"user": "创建者", "timestamp": "2020-01-01T00:00:00Z",
+                 "slots": {"main": {"content": "空壳"}}}]}]}},
+            {"query": {"pages": [{"title": "千本樱", "revisions": [
+                {"slots": {"main": {"content": MOE_SONGBOX}}}]}]}},
+        ]
+        with patch.object(contributions, "moegirl_api", side_effect=responses), \
+                patch.object(contributions.time, "sleep"):
+            song = contributions.moegirl_song("千本樱")
+        self.assertTrue(song.songbox)
+        self.assertIn("千本桜", song.names)
+
+    def test_a_missing_page_is_not_a_song(self):
+        with patch.object(contributions, "moegirl_api",
+                          return_value={"query": {"pages": [{"title": "甲",
+                                                             "missing": True}]}}):
+            self.assertIsNone(contributions.moegirl_song("甲"))
+
+    def test_a_redirected_article_is_followed(self):
+        """镜像站的 API 不认 ``redirects=1``：`秒针` 只回一句 ``#重定向``，要自己跟。"""
+        responses = [
+            {"query": {"pages": [{"title": "秒针", "revisions": [
+                {"user": "重定向作者", "timestamp": "2021-01-01T00:00:00Z",
+                 "slots": {"main": {"content": "#重定向 [[秒针(Riei)]]"}}}]}]}},
+            {"query": {"pages": [{"title": "秒针(Riei)", "revisions": [
+                {"user": "歌曲作者", "timestamp": "2022-02-02T00:00:00Z",
+                 "slots": {"main": {"content": MOE_SONGBOX.replace("千本桜", "秒针")}}}]}]}},
+        ]
+        with patch.object(contributions, "moegirl_api", side_effect=responses), \
+                patch.object(contributions.time, "sleep"):
+            song = contributions.moegirl_song("秒针")
+        self.assertTrue(song.songbox)
+        self.assertEqual(song.title, "秒针(Riei)")
+        self.assertEqual(song.user, "歌曲作者")
+        self.assertEqual(song.stamp, "2022-02-02T00:00:00Z")
+
+    def test_nested_name_templates_are_unwrapped(self):
+        """线上 `真不像话啊` 的歌名写作 ``{{ruby|真不像话啊|{{lj|みっともないな}}}}``。"""
+        text = ("{{VOCALOID_Songbox\n"
+                "|歌曲名称 = {{ruby|真不像话啊|{{lj|みっともないな}}}}\n"
+                "|P主 = [[EasyPop]]\n"
+                "}}\n")
+        song = parse_moe_song(text)
+        self.assertTrue(song.songbox)
+        self.assertIn("真不像话啊", song.names)
+        self.assertIn("みっともないな", song.names)
+        self.assertTrue(moegirl_same_song(song, ["真不像话啊"]))
+
+    def test_redirect_target_is_read_from_the_first_line(self):
+        self.assertEqual(contributions.moegirl_redirect_target("#重定向 [[秒针(Riei)]]"),
+                         "秒针(Riei)")
+        self.assertEqual(contributions.moegirl_redirect_target("#REDIRECT [[A|B]]"), "A")
+        self.assertIsNone(contributions.moegirl_redirect_target("正文"))
+
+
+class MoegirlCreatorVerifyTest(TestCase):
+    def test_creator_is_ignored_when_the_article_is_another_song(self):
+        cache = {}
+        with patch.object(contributions, "moegirl_lookup",
+                          return_value={"甲": contributions.MoePage("和谐", "萌百用户", True)}), \
+                patch.object(contributions, "moegirl_song",
+                             return_value=MoeSong(False)), \
+                patch.object(contributions, "moegirl_first_revision") as first:
+            self.assertIsNone(contributions.moegirl_creator_of("甲", cache, ["甲"]))
+        first.assert_not_called()
+
+    def test_creator_is_used_when_the_song_matches(self):
+        cache = {}
+        with patch.object(contributions, "moegirl_lookup",
+                          return_value={"甲": contributions.MoePage("甲", "萌百用户", True)}), \
+                patch.object(contributions, "moegirl_song",
+                             return_value=MoeSong(True, ["甲"])), \
+                patch.object(contributions.time, "sleep"):
+            self.assertEqual(contributions.moegirl_creator_of("甲", cache, ["甲"]),
+                             "萌百用户")
+
+    def test_moegirl_first_revision_reads_user_and_timestamp(self):
+        with patch.object(contributions, "moegirl_api", return_value={"query": {"pages": [
+                {"title": "甲", "revisions": [
+                    {"user": "萌百用户", "timestamp": "2020-01-01T00:00:00Z"}]}]}}):
+            self.assertEqual(contributions.moegirl_first_revision("甲"),
+                             ("萌百用户", "2020-01-01T00:00:00Z"))
+
+    def test_a_missing_moegirl_page_has_no_first_revision(self):
+        with patch.object(contributions, "moegirl_api",
+                          return_value={"query": {"pages": [{"title": "甲",
+                                                             "missing": True}]}}):
+            self.assertIsNone(contributions.moegirl_first_revision("甲"))
+
+
+# --------------------------------------------------------------------------- #
+# 谁先建条目 → 记谁
+# --------------------------------------------------------------------------- #
+class FirstCreatorTest(TestCase):
+    """voca 本地创作也要跟萌百比首版时间，谁先建条目就记谁那边的创建者。"""
+
+    def _first(self, kind, current, previous, voca_time, moe_time,
+               same_song=True, order_cache=None):
+        order = {} if order_cache is None else order_cache
+        moe_page = contributions.MoePage("萌百曲", "萌百用户", True)
+        with patch.object(contributions, "creator_of", return_value="voca用户"), \
+                patch.object(contributions, "page_credits_detail",
+                             return_value=(current, previous, kind)), \
+                patch.object(contributions, "creator_note", return_value=""), \
+                patch.object(contributions, "import_stamp", return_value=voca_time), \
+                patch.object(contributions, "voca_song_names", return_value=["曲"]), \
+                patch.object(contributions, "moegirl_lookup",
+                             return_value={"曲": moe_page}), \
+                patch.object(contributions, "cached_moe_song",
+                             return_value=MoeSong(same_song, ["曲"], title="萌百曲",
+                                                  user="萌百用户", stamp=moe_time)), \
+                patch.object(contributions, "moegirl_same_song",
+                             return_value=same_song), \
+                patch.object(contributions.time, "sleep"):
+            return contributions.first_creator(None, "曲", {}, {}, order, {}, {})
+
+    def test_a_locally_created_page_still_compares_with_moegirl(self):
+        info = self._first("local", "voca用户", "voca用户",
+                           "2026-03-01T00:00:00Z", "2020-06-30T00:00:00Z")
+        self.assertEqual(info["creator"], "萌百用户")
+        self.assertEqual(info["side"], "moegirl")
+
+    def test_a_later_moegirl_article_loses(self):
+        info = self._first("local", "voca用户", "voca用户",
+                           "2020-01-01T00:00:00Z", "2021-01-01T00:00:00Z")
+        self.assertEqual(info["creator"], "voca用户")
+        self.assertEqual(info["side"], "voca")
+
+    def test_a_same_name_article_that_is_another_song_does_not_count(self):
+        info = self._first("local", "voca用户", "voca用户",
+                           "2026-03-01T00:00:00Z", "2020-06-30T00:00:00Z",
+                           same_song=False)
+        self.assertEqual(info["creator"], "voca用户")
+        self.assertEqual(info["side"], "voca")
+
+    def test_an_imported_first_revision_means_moegirl_was_first(self):
+        info = self._first("prefix", "萌百用户", "搬运者",
+                           "2026-09-15T00:00:00Z", "2025-08-01T00:00:00Z")
+        self.assertEqual(info["creator"], "萌百用户")
+        self.assertEqual(info["side"], "moegirl")
+
+    def test_an_import_without_a_resolved_creator_credits_nobody(self):
+        info = self._first("note", None, "搬运者",
+                           "2026-09-15T00:00:00Z", "2025-08-01T00:00:00Z")
+        self.assertIsNone(info["creator"])
+
+    def test_no_moegirl_article_falls_back_to_voca(self):
+        with patch.object(contributions, "creator_of", return_value="voca用户"), \
+                patch.object(contributions, "page_credits_detail",
+                             return_value=("voca用户", "voca用户", "local")), \
+                patch.object(contributions, "creator_note", return_value=""), \
+                patch.object(contributions, "import_stamp",
+                             return_value="2026-03-01T00:00:00Z"), \
+                patch.object(contributions, "voca_song_names", return_value=["曲"]), \
+                patch.object(contributions, "moegirl_lookup",
+                             return_value={"曲": contributions.MoePage(None, None, True)}), \
+                patch.object(contributions.time, "sleep"):
+            info = contributions.first_creator(None, "曲", {}, {}, {}, {}, {})
+        self.assertEqual(info["creator"], "voca用户")
+        self.assertIsNone(info["moe"])
+
+
+class SiteOrderCacheTest(TestCase):
+    def test_the_comparison_is_done_once(self):
+        order = {}
+        moe_page = contributions.MoePage("萌百曲", "萌百用户", True)
+        with patch.object(contributions, "creator_of", return_value="voca用户"), \
+                patch.object(contributions, "page_credits_detail",
+                             return_value=("voca用户", "voca用户", "local")), \
+                patch.object(contributions, "creator_note", return_value=""), \
+                patch.object(contributions, "import_stamp",
+                             return_value="2026-03-01T00:00:00Z"), \
+                patch.object(contributions, "voca_song_names", return_value=["曲"]), \
+                patch.object(contributions, "moegirl_lookup",
+                             return_value={"曲": moe_page}) as lookup, \
+                patch.object(contributions, "cached_moe_song",
+                             return_value=MoeSong(True, ["曲"], title="萌百曲",
+                                                  user="萌百用户",
+                                                  stamp="2020-06-30T00:00:00Z")), \
+                patch.object(contributions, "moegirl_same_song", return_value=True), \
+                patch.object(contributions.time, "sleep"):
+            first = contributions.first_creator(None, "曲", {}, {}, order, {}, {})
+            second = contributions.first_creator(None, "曲", {}, {}, order, {}, {})
+        self.assertEqual(lookup.call_count, 1, "同一首歌不该问两次萌百")
+        self.assertEqual(first["creator"], second["creator"])
+        self.assertEqual(order["曲"]["side"], "moegirl")
+
+    def test_a_stale_answer_is_recomputed(self):
+        order = {"曲": {"creator": "旧结论", "side": "voca", "version":
+                        contributions.SITE_ORDER_VERSION, "checked": time.time() - 10 ** 7}}
+        with patch.object(contributions, "creator_of", return_value="voca用户"), \
+                patch.object(contributions, "page_credits_detail",
+                             return_value=("voca用户", "voca用户", "local")), \
+                patch.object(contributions, "creator_note", return_value=""), \
+                patch.object(contributions, "import_stamp",
+                             return_value="2026-03-01T00:00:00Z"), \
+                patch.object(contributions, "voca_song_names", return_value=["曲"]), \
+                patch.object(contributions, "moegirl_lookup",
+                             return_value={"曲": contributions.MoePage(None, None, True)}), \
+                patch.object(contributions.time, "sleep"):
+            info = contributions.first_creator(None, "曲", {}, {}, order, {}, {})
+        self.assertEqual(info["creator"], "voca用户")
+        self.assertNotEqual(order["曲"]["creator"], "旧结论")
+
+    def test_a_fresh_answer_does_not_need_recomparing(self):
+        order = {"曲": {"creator": "甲", "side": "moegirl", "moe": ["甲", "2020"],
+                        "version": contributions.SITE_ORDER_VERSION,
+                        "checked": time.time()}}
+        self.assertFalse(contributions.site_order_stale("曲", order))
+        self.assertTrue(contributions.site_order_stale("没比过的曲", order))
+
+    def test_an_old_version_is_recomputed(self):
+        order = {"曲": {"creator": "甲", "side": "moegirl", "moe": ["甲", "2020"],
+                        "version": contributions.SITE_ORDER_VERSION - 1,
+                        "checked": time.time()}}
+        self.assertTrue(contributions.site_order_stale("曲", order))
+
+
+class SiteOrderBudgetTest(TestCase):
+    """每小时的任务不能把整轮耗在问萌百上，--limit 默认要有个上限。"""
+
+    @patch("sys.argv", ["vocaloid_collection_contributions.py", "all"])
+    @patch.object(contributions.pywikibot, "Site")
+    @patch.object(contributions, "run_once")
+    def test_all_is_bounded(self, run_once, site_factory):
+        contributions.main()
+        self.assertEqual(run_once.call_args.args[-1], contributions.SITEORDER_BUDGET)
+
+    @patch("sys.argv", ["vocaloid_collection_contributions.py", "all", "--limit=7"])
+    @patch.object(contributions.pywikibot, "Site")
+    @patch.object(contributions, "run_once")
+    def test_an_explicit_limit_wins(self, run_once, site_factory):
+        contributions.main()
+        self.assertEqual(run_once.call_args.args[-1], 7)
+
+    @patch("sys.argv", ["vocaloid_collection_contributions.py", "siteorder"])
+    @patch.object(contributions.pywikibot, "Site")
+    @patch.object(contributions, "run_once")
+    def test_a_bare_siteorder_run_is_unlimited(self, run_once, site_factory):
+        contributions.main()
+        self.assertEqual(run_once.call_args.args[-1], 0)
+
+
+class CreatorOnlyCellTest(TestCase):
+    """多色格子 = 创建者 + 重要贡献者：图表只记创建者，另一份收回到 demoted。"""
+
+    A, B = "#111111", "#222222"
+
+    def _legend(self):
+        return Legend(colour_to_name={self.A: "创建者", self.B: "贡献者"},
+                      name_to_colour={"创建者": self.A, "贡献者": self.B})
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "first_creator",
+                  return_value={"creator": "创建者", "side": "voca", "kind": "local",
+                                "current": "创建者", "previous": "创建者",
+                                "voca": ["创建者", ""], "moe": None})
+    def test_a_two_colour_cell_credits_only_the_creator(self, _first, _batch):
+        sections = [Section("2025夏", "TOP100", [Entry("魔法女仆", [self.A, self.B])])]
+        demoted = {}
+        decisions = []
+        counts = count_by_listed(FakeSite(), sections, self._legend(), {},
+                                 demoted=demoted, decisions=decisions)
+        self.assertEqual(counts["2025夏"][self.A], 1)
+        self.assertEqual(counts["2025夏"][self.B], 0)
+        self.assertEqual(demoted["2025夏"][self.B], 1)
+        self.assertTrue(any("多色格子" in line for line in decisions))
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "first_creator",
+                  return_value={"creator": "图例里没有的人", "side": "moegirl",
+                                "kind": "local", "current": "x", "previous": "x",
+                                "voca": ["x", ""], "moe": ["y", ""]})
+    def test_an_unmapped_creator_falls_back_to_the_first_colour(self, _first, _batch):
+        sections = [Section("2025夏", "TOP100", [Entry("魔法女仆", [self.A, self.B])])]
+        demoted = {}
+        counts = count_by_listed(FakeSite(), sections, self._legend(), {},
+                                 demoted=demoted)
+        self.assertEqual(counts["2025夏"][self.A], 1)
+        self.assertEqual(demoted["2025夏"][self.B], 1)
+
+    @patch.object(contributions, "batch_creators")
+    def test_a_single_colour_cell_is_untouched(self, _batch):
+        sections = [Section("2025夏", "TOP100", [Entry("曲", [self.B])])]
+        demoted = {}
+        counts = count_by_listed(FakeSite(), sections, self._legend(), {},
+                                 demoted=demoted)
+        self.assertEqual(counts["2025夏"][self.B], 1)
+        self.assertFalse(demoted)
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "first_creator",
+                  return_value={"creator": "萌百用户", "side": "moegirl", "kind": "local",
+                                "current": "voca用户", "previous": "voca用户",
+                                "voca": ["voca用户", "2026-03-01T00:00:00Z"],
+                                "moe": ["萌百用户", "2020-06-30T00:00:00Z"]})
+    def test_the_old_voca_credit_is_taken_back_when_moegirl_is_earlier(
+            self, _first, _batch):
+        # 没有颜色的条目：旧口径记 voca 那个人，现在改记萌百创建者，旧那份要减掉
+        legend = Legend(colour_to_name={"#333333": "voca用户", "#444444": "萌百用户"},
+                        name_to_colour={"voca用户": "#333333", "萌百用户": "#444444"})
+        sections = [Section("2025夏", "TOP100", [Entry("曲", [])])]
+        demoted = {}
+        counts = count_by_listed(FakeSite(), sections, legend, {},
+                                 songs_of=lambda _season: {"曲"},
+                                 demoted=demoted)
+        self.assertEqual(counts["2025夏"]["#444444"], 1)
+        self.assertEqual(demoted["2025夏"]["#333333"], 1)
+
+    @patch.object(contributions, "batch_creators")
+    @patch.object(contributions, "first_creator",
+                  return_value={"creator": "voca用户", "side": "voca", "kind": "local",
+                                "current": "voca用户", "previous": "voca用户",
+                                "voca": ["voca用户", ""], "moe": None})
+    def test_nothing_is_taken_back_without_proof(self, _first, _batch):
+        """萌百没有更早的证据时一分都不减。"""
+        legend = Legend(colour_to_name={"#333333": "voca用户"},
+                        name_to_colour={"voca用户": "#333333"})
+        sections = [Section("2025夏", "TOP100", [Entry("曲", [])])]
+        demoted = {}
+        counts = count_by_listed(FakeSite(), sections, legend, {},
+                                 songs_of=lambda _season: {"曲"},
+                                 demoted=demoted)
+        self.assertEqual(counts["2025夏"]["#333333"], 1)
+        self.assertFalse(demoted)
+
+    def test_text_is_not_taken_back_for_excluded_songs_beyond_the_old_rule(self):
+        """REMIX/二创的减数仍按旧口径（几个颜色就减几份），不然减不到旧账。"""
+        a, b = "#555555", "#666666"
+        legend = Legend(colour_to_name={a: "甲", b: "乙"})
+        sections = [Section("2025夏", "TOP100", [Entry("曲", [a])])]
+        excluded = {}
+        count_by_listed(FakeSite(), sections, legend, {},
+                        songs_of=lambda _season: {"曲"},
+                        excluded_of=lambda _season: {"混音"},
+                        excluded=excluded)
+        self.assertIn("2025夏", excluded)
+
+
+class ChartOrderTest(TestCase):
+    """行顺序按合计创建数排；同分保持页面原顺序（277973 那次就是同分重排被撤销）。"""
+
+    @staticmethod
+    def _chart(axis, values, label="ボカコレ2025夏"):
+        chart = {"legend": {"data": [label]},
+                 "yAxis": {"data": axis},
+                 "series": [{"name": label, "type": "bar",
+                             "itemStyle": {"color": "#111111"}, "data": values}]}
+        return ("{{Echart|data=<nowiki>" + json.dumps(chart, ensure_ascii=False)
+                + "</nowiki>}}")
+
+    def _render(self, text, counts):
+        sections = [Section("2025夏", "TOP100", [])]
+        updated, _ = contributions.render_chart(text, sections, Legend(), counts)
+        return json.loads(contributions.CHART_RE.search(updated).group(2))
+
+    def test_rows_with_equal_totals_keep_their_places(self):
+        # 甲、乙 都是 8 分：页面上的先后要保住，不能被名字顺序翻过来
+        text = self._chart(["甲", "乙"], [8, 8])
+        parsed = self._render(text, {"2025夏": {"乙": 8, "甲": 8}})
+        self.assertEqual(parsed["yAxis"]["data"], ["甲", "乙"])
+        self.assertEqual(parsed["series"][0]["data"], [8, 8])
+
+    def test_a_row_that_overtakes_another_is_moved(self):
+        text = self._chart(["甲", "乙"], [5, 6])
+        parsed = self._render(text, {"2025夏": {"甲": 7, "乙": 6}})
+        self.assertEqual(parsed["yAxis"]["data"], ["乙", "甲"])
+        self.assertEqual(parsed["series"][0]["data"], [6, 7])
+
+    def test_demoted_credits_are_taken_back(self):
+        # 多色格子的重要贡献者：页面上是 2，现在只记创建者 → 降到 1
+        text = self._chart(["贡献者"], [2])
+        sections = [Section("2025夏", "TOP100", [])]
+        updated, _ = contributions.render_chart(
+            text, sections, Legend(), {"2025夏": {"贡献者": 1}},
+            demoted={"2025夏": {"贡献者": 1}})
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        self.assertEqual(parsed["series"][0]["data"], [1])
+
+    def test_nothing_below_the_retained_number_without_demotion(self):
+        # 没有可证明的多给，就不许把页面上的人工数字改小
+        text = self._chart(["某人"], [9])
+        sections = [Section("2025夏", "TOP100", [])]
+        updated, _ = contributions.render_chart(
+            text, sections, Legend(), {"2025夏": {"某人": 3}})
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        self.assertEqual(parsed["series"][0]["data"], [9])
+
+    def test_the_demotion_never_goes_below_the_computed_number(self):
+        # 页面 5、算出来 3、多给 1 → 先降到 4；再跑一轮会降到算出来的 3 就停，
+        # 不会一路减到 0（页面上还可能有人工记账的数字，靠 computed 兜底）。
+        sections = [Section("2025夏", "TOP100", [])]
+        counts = {"2025夏": {"某人": 3}}
+        text = self._chart(["某人"], [5])
+        for expected in (4, 3, 3):
+            updated, _ = contributions.render_chart(
+                text, sections, Legend(), counts,
+                demoted={"2025夏": {"某人": 1}})
+            text = updated
+            parsed = json.loads(contributions.CHART_RE.search(text).group(2))
+            self.assertEqual(parsed["series"][0]["data"], [expected])
+
+
+class MultiColourReportTest(TestCase):
+    def test_the_report_lists_multi_colour_cells(self):
+        legend = Legend(colour_to_name={"#111111": "创建者", "#222222": "贡献者"})
+        sections = [Section("2025夏", "TOP100",
+                            [Entry("魔法女仆", ["#111111", "#222222"]),
+                             Entry("别的曲", ["#111111"])])]
+        with patch.object(contributions, "batch_exists"), \
+                patch.object(contributions, "page_exists", return_value=True):
+            report = contributions.build_report(None, sections, legend, {}, {})
+        self.assertIn("多色格子（只记创建者）: 2025夏/TOP100 - 魔法女仆", report)
+        self.assertIn("创建者 / 贡献者", report)
+        self.assertNotIn("别的曲", report)
+
+    def test_multi_colour_cells_helper(self):
+        sections = [Section("2025夏", "TOP100",
+                            [Entry("甲", ["#1", "#2"]), Entry("乙", ["#1"])])]
+        self.assertEqual([("2025夏", "TOP100", "甲", ["#1", "#2"])],
+                         contributions.multi_colour_cells(sections))

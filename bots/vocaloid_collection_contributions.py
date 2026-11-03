@@ -38,23 +38,51 @@ The bot can:
   module) *and* covers, so they are judged song by song rather than dropped as a
   group.  A page that merely carries the season's navbox (the
   overview article) does not count either.  Rows are ordered by their total, so
-  the chart reads 多→少 from top to bottom.  A cell's colour is the hand-made
-  creator annotation and wins outright; other entries use the creator of the
-  local page. Some chart numbers come from bookkeeping outside the wiki and
-  cannot be derived at all, so a cell is normally only raised, never lowered.
+  the chart reads 多→少 from top to bottom; rows whose totals tie keep the order
+  they already have on the page, so a run does not shuffle them back and forth.
+  A cell's colour is the hand-made creator annotation and wins outright; other
+  entries use the creator of the local page.  A cell carrying several colours is
+  a *creator plus an important contributor*, not two creators: only the creator
+  is counted, the other colours are recorded and reported (``多色格子``) but
+  never counted, see ``multi_colour_cells``.
+  Some chart numbers come from bookkeeping outside the wiki and cannot be
+  derived at all, so a cell is normally only raised, never lowered.
   New chart rows are added only above five computed creations; manually removing
   a row therefore keeps a five-or-fewer row from being added back.
   Explicit corrections in ``CHART_COUNT_ADJUSTMENTS`` are applied to both the
   computed and retained chart values, so later runs do not undo a manual
   correction.
-  Two exceptions subtract from a cell: the REMIX/二创 songs, and the credits
+  Four exceptions subtract from a cell: the REMIX/二创 songs; the credits
   earlier runs gave to the author of an *imported* revision (that author is
   either the source article's last editor, see ``page_creator``, or the mover
-  recorded in the first revision's summary).  Moving those credits to the real
-  creator's cell is a one-off migration - ``recredit`` - because re-applying the
-  delta every hour would keep growing the number.
+  recorded in the first revision's summary) - moving those credits to the real
+  creator's cell is a one-off migration, ``recredit``, because re-applying the
+  delta every hour would keep growing the number; the non-creator colours of a
+  multi-colour cell; and entries whose credited user provably created the
+  article *after* the other site did (see below).
+  「最先创建者」: 贡献列表的创建者取萌娘百科与 Vocawiki **哪边先建条目**就取
+  哪边的创建者 (``first_creator``).  An imported revision already proves Moegirl
+  came first, so the Moegirl creator is used as is.  A locally written page is
+  compared too: its first revision is checked against the Moegirl article's, and
+  the Moegirl creator wins only when the Moegirl article is verified to be the
+  same VOCALOID song (``{{VOCALOID_Songbox}}``, see ``moegirl_song`` /
+  ``moegirl_same_song``); otherwise the local author is.  Verification follows
+  Moegirl redirects itself (the mirror ignores ``redirects=1``, so ``秒针``
+  resolves to ``秒针(Riei)``) and unwraps the name templates
+  (``{{ruby|真不像话啊|{{lj|みっともないな}}}}``), see ``unwrap_templates``.
+  The comparison is cached (``SITE_ORDER_CACHE``), and when the Moegirl side
+  turns out to be earlier the entry is taken back from the voca creator and
+  given to the Moegirl one - the only case in which a computed number may drop
+  for a reason other than the two above.
 * ``report``  - list anomalies (coloured but page missing / page exists but
-  not coloured).
+  not coloured), plus the multi-colour cells (who is the creator, who is only an
+  important contributor) and the entries whose credit moved to the other side.
+* ``siteorder`` - 把「萌百和 voca 谁先建条目」逐条比一遍并落盘（``--limit``
+  限制本轮比多少条）。比较要问萌百（每条 3~4 个请求），全量跑一轮很久，所以
+  它单列成一个动作：``stats``/``all`` 只用缓存里已有的结论，没比过的条目暂按
+  本机首版作者记，等 ``siteorder`` 补上。``all`` 每轮只新比
+  ``SITEORDER_BUDGET`` 条（已经比过的不占预算），免得慢查询把整轮拖到保存不了。
+  缓存过期（30 天）或没命中（7 天）后会重新比较。
 * ``moe``     - 与萌娘百科交叉比对创建者，**只出报告、不改页面**。贡献列表记的是
   「萌娘百科及 Vocawiki 上」的创建：页面上标着的创建者（格子颜色/图例）与本机
   页面的首版作者可能不是同一个人。三类条目会去萌娘百科查同名条目的最旧一版作者
@@ -127,6 +155,19 @@ DATA_DIR = Path("data")
 CREATOR_CACHE = DATA_DIR / "vocaloid_collection_creators.pickle"
 MOEGIRL_CACHE = DATA_DIR / "vocaloid_collection_moegirl.pickle"
 DERIVATIVE_CACHE = DATA_DIR / "vocaloid_collection_derivatives.pickle"
+# 歌名（voca 侧标题 + Songbox 歌曲名称）：验「萌百那一条是不是同一首」要用
+VOCA_NAMES_CACHE = DATA_DIR / "vocaloid_collection_songnames.pickle"
+# 萌百条目的歌曲信息（是不是 Vocaloid 歌曲、歌名）：验一次存一次
+MOEGIRL_SONG_CACHE = DATA_DIR / "vocaloid_collection_moesongs.pickle"
+# 「谁先建条目」的结论（萌百 vs voca 首版时间比出来的），跑一遍就落盘
+SITE_ORDER_CACHE = DATA_DIR / "vocaloid_collection_site_order.pickle"
+VOCA_NAMES_VERSION = 2      # 歌名拆模板（{{ruby|…}}）后要重取
+MOEGIRL_SONG_VERSION = 2    # 跟重定向 + 带上「最旧一版作者」，旧缓存要重取
+SITE_ORDER_VERSION = 1
+SONG_INFO_TTL = 30 * 24 * 3600      # 歌名 / 萌百歌曲信息多久重取一次（秒）
+SITE_ORDER_TTL = 30 * 24 * 3600     # 「谁先建条目」多久重比一次（秒）
+SITEORDER_BUDGET = 40               # all 每轮最多新比多少条（一条要问萌百 3~4 个请求）
+SITE_ORDER_MISS_TTL = 7 * 24 * 3600  # 萌百没有同名条目 / 不是同一首：过一周再验一次
 CHART_SERIES_PREFIX = "ボカコレ"
 CHART_NEW_USER_THRESHOLD = 5
 # Correct verified historical chart cells that the high-water mark would
@@ -771,6 +812,14 @@ _CACHE_REGISTRY: List[Tuple[Path, Dict]] = []
 _LAST_FLUSH = 0.0
 
 
+def register_cache(path: Path, cache: Dict) -> None:
+    """把一个缓存登记进来（只登记一次），之后 ``flush_caches`` 会定期落盘。"""
+    for known_path, _known in _CACHE_REGISTRY:
+        if known_path == path:
+            return
+    _CACHE_REGISTRY.append((path, cache))
+
+
 def flush_caches(force: bool = False, interval: float = CACHE_FLUSH_INTERVAL) -> None:
     """把缓存写回磁盘（默认最多每 ``interval`` 秒一次）。
 
@@ -996,6 +1045,140 @@ def season_window(season: str, end_shift_days: int = 0) -> Tuple[datetime, datet
     return start.replace(tzinfo=tz), end.replace(tzinfo=tz)
 
 
+# --------------------------------------------------------------------------- #
+# 「萌百 / voca 谁先建条目」→ 该记谁的创建
+# --------------------------------------------------------------------------- #
+def voca_song_names(site, title: str, store: Optional[Dict] = None) -> List[str]:
+    """voca 页面自己的歌名：标题 + Songbox 的 ``|歌曲名称=``。
+
+    验「萌百那一条是不是同一首」要拿它去比（``moegirl_same_song``）。结果缓存在
+    ``VOCA_NAMES_CACHE``，30 天重取一次；页面还没有就只有标题。
+    """
+    store = load_cache(VOCA_NAMES_CACHE) if store is None else store
+    cached = store.get(title)
+    if (isinstance(cached, tuple) and len(cached) == 3
+            and cached[2] == VOCA_NAMES_VERSION
+            and time.time() - cached[1] < SONG_INFO_TTL):
+        return list(cached[0])
+    names = [title]
+    try:
+        text = Page(site, title).text
+    except Exception as exc:  # noqa: BLE001 - 读不到就只用标题
+        pywikibot.warning(f"{title}: 读不到正文，验歌名时只用标题（{exc}）")
+        return names
+    head = text.split("\n==")[0]
+    song = parse_moe_song(head)
+    names += [name for name in song.names if name not in names]
+    store[title] = (names, time.time(), VOCA_NAMES_VERSION)
+    flush_caches()
+    return names
+
+
+def cached_moe_song(moe_title: str, store: Optional[Dict] = None) -> Optional[MoeSong]:
+    """``moegirl_song`` 的缓存版（30 天）；判否的结论也缓存，免得每轮都问。"""
+    store = load_cache(MOEGIRL_SONG_CACHE) if store is None else store
+    cached = store.get(moe_title)
+    if (isinstance(cached, tuple) and len(cached) == 3
+            and cached[2] == MOEGIRL_SONG_VERSION
+            and time.time() - cached[1] < SONG_INFO_TTL):
+        return cached[0]
+    song = moegirl_song(moe_title)
+    if song is None:
+        return None
+    store[moe_title] = (song, time.time(), MOEGIRL_SONG_VERSION)
+    flush_caches()
+    return song
+
+
+def site_order_stale(title: str, order_cache: Dict) -> bool:
+    """缓存里这条「谁先建条目」的结论是不是要重比（没有 / 过期 / 版本旧）。"""
+    cached = order_cache.get(title)
+    if not (isinstance(cached, dict) and cached.get("version") == SITE_ORDER_VERSION):
+        return True
+    age = time.time() - float(cached.get("checked") or 0)
+    limit = SITE_ORDER_TTL if cached.get("side") == "moegirl" or cached.get("moe") \
+        else SITE_ORDER_MISS_TTL
+    return not 0 <= age < limit
+
+
+def first_creator(site, title: str, cache: Dict,
+                  moe_cache: Optional[Dict] = None,
+                  order_cache: Optional[Dict] = None,
+                  song_store: Optional[Dict] = None,
+                  names_store: Optional[Dict] = None,
+                  allow_compute: bool = True) -> Dict[str, object]:
+    """「谁先建条目」的结论 → ``{creator, side, voca, moe, moe_title, kind, note}``。
+
+    * voca 侧：首版作者与时间（导入的那一版也算建页时间）；
+    * 萌百侧：同名条目的最旧一版，**必须先验货**——是 ``{{VOCALOID Songbox}}`` 的
+      歌曲条目，而且 Songbox 歌名跟 voca 的对得上（同名不同曲不算）；
+    * 判定：首版是跨站导入（``prefix`` / ``note``）说明萌百那边先有 → 记萌百创建者；
+      本地创作 → **比两边首版时间**，更早的那一边的创建者。
+
+    结果写进 ``SITE_ORDER_CACHE``（正面 30 天、判否 7 天），之后每轮直接读。
+    """
+    order_cache = load_cache(SITE_ORDER_CACHE) if order_cache is None else order_cache
+    if not site_order_stale(title, order_cache):
+        return dict(order_cache[title])
+    if not allow_compute:
+        # 缓存里还没有这首歌：先按老口径（voca 侧）算，别在每小时的任务里现问萌百。
+        # 真正的比较交给 ``siteorder`` 一次跑完存进缓存。
+        current, previous, kind = page_credits_detail(site, title, cache, moe_cache)
+        return {"creator": current, "side": "voca", "kind": kind,
+                "current": current, "previous": previous,
+                "voca": [previous or "", ""], "moe": None, "moe_title": "",
+                "checked": 0, "version": SITE_ORDER_VERSION, "cached": False}
+
+    raw = creator_of(site, title, cache)
+    current, previous, kind = page_credits_detail(site, title, cache, moe_cache)
+    voca_user = previous or ""
+    voca_time = import_stamp(site, title, cache) if raw else None
+
+    moe_user, moe_time, moe_title = "", None, ""
+    names = voca_song_names(site, title, names_store)
+    page = moegirl_lookup([title], moe_cache if moe_cache is not None else {}).get(title)
+    if page is not None and page.title:
+        song = cached_moe_song(page.title, song_store)
+        if moegirl_same_song(song, names):
+            # 萌百那一条可能只是重定向（秒针 → 秒针(Riei)）：用跟到底之后那条的
+            # 最旧一版，``moe_title`` 也记成它，报告里看得出对的是哪一篇。
+            moe_user, moe_time = song.user, song.stamp or None
+            moe_title = song.title or page.title
+        else:
+            pywikibot.output(f"{title}: 萌百 {page.title} 不是同一首 Vocaloid 歌曲，不参与比较")
+
+    creator, side = current, "voca"
+    if kind != "local":
+        # 首版就是跨站导入：萌百那边必定更早，创建者已经在 page_credits_detail 里换成
+        # 萌百创建者（换不过来说明验货没过或源站查不到，``creator`` 就是 None）
+        side = "moegirl" if current else "voca"
+    elif moe_user and moe_time and (not voca_time or moe_time < voca_time):
+        creator, side = moe_user, "moegirl"
+    entry = {"creator": creator, "side": side, "kind": kind,
+             "current": current, "previous": previous,
+             "voca": [voca_user, voca_time or ""],
+             "moe": [moe_user, moe_time or ""] if moe_user else None,
+             "moe_title": moe_title, "checked": time.time(),
+             "version": SITE_ORDER_VERSION}
+    order_cache[title] = entry
+    flush_caches()
+    return dict(entry)
+
+
+def describe_side(info: Dict[str, object]) -> str:
+    """一行说明「为什么记这个人」：萌百更早 / 导入 / 萌百没有这首。"""
+    side = info.get("side")
+    if side == "moegirl":
+        voca = info.get("voca") or ["", ""]
+        moe = info.get("moe") or ["", ""]
+        if info.get("kind") != "local":
+            # 导入型的 creator 就是源站创建者，moe 那栏没参与比较、是空的
+            who = moe[0] or str(info.get("creator") or info.get("current") or "")
+            return f"首版是萌百导入，萌百创建者 {who}".strip()
+        return f"萌百 {moe[1]} 早于 voca {voca[1]}"
+    return "萌百没有同一首（或不可比），记 voca 创建者"
+
+
 def count_by_listed(site, sections: List[Section], legend: Legend,
                     cache: Dict,
                     participants_of: Optional[Callable[[str], Optional[set]]] = None,
@@ -1005,7 +1188,12 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     moe_cache: Optional[Dict] = None,
                     corrections: Optional[Dict[str, Counter]] = None,
                     gains: Optional[Dict[str, Counter]] = None,
-                    kinds: Optional[set] = None
+                    kinds: Optional[set] = None,
+                    demoted: Optional[Dict[str, Counter]] = None,
+                    order_cache: Optional[Dict] = None,
+                    song_store: Optional[Dict] = None,
+                    names_store: Optional[Dict] = None,
+                    decisions: Optional[List[str]] = None
                     ) -> Dict[str, Counter]:
     """Count the ranked cells plus the rest of the season's songs.
 
@@ -1031,8 +1219,16 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
 
     A ranked cell's colour is its creator annotation. Redirects and pages listed
     more than once count only once.
+
+    ``demoted`` collects what has to be taken back from the chart, and only the
+    two cases that can be proven: the extra colours of a multi-colour cell (they
+    mark 重要贡献者, not creators) and the voca-side credit of an entry whose
+    moegirl article is *provably* older (``first_creator`` says ``moegirl``).
+    Everything else keeps the chart's usual never-lower behaviour.
     """
     result: Dict[str, Counter] = defaultdict(Counter)
+    if demoted is None:
+        demoted = defaultdict(Counter)
     seen: Dict[str, set] = defaultdict(set)
     counted = [s for s in sections if is_counted_section(s.name)]
     seasons = dict.fromkeys(s.season for s in counted)
@@ -1071,19 +1267,69 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
             if entry.colours:
                 colours_by_target.setdefault(target, entry.colours)
 
+    def credit_cell(season: str, colours: List[str], target: str, title: str) -> None:
+        """一格只记**一个人的**创建：多色格子只取创建者，其余颜色算「重要贡献者」。"""
+        colours = [colour for colour in dict.fromkeys(colours)
+                   if colour in legend.colour_to_name]
+        if not colours:
+            return
+        if len(colours) == 1:
+            result[season][colours[0]] += 1
+            return
+        info = first_creator(site, target, cache, moe_cache, order_cache,
+                             song_store, names_store)
+        winner = legend.identity(str(info.get("creator") or ""))
+        if winner not in colours:
+            if info.get("creator"):
+                pywikibot.warning(
+                    f"{season}/{title}: 算出来的创建者 {info.get('creator')} 不在格子的颜色里"
+                    f"（{colours}），先记第一个颜色")
+            winner = colours[0]
+        result[season][winner] += 1
+        for other in colours:
+            if other != winner:
+                demoted.setdefault(season, Counter())[other] += 1
+        if decisions is not None:
+            decisions.append(
+                f"多色格子: {season}/{title}（{' / '.join(legend.display(c) for c in colours)}）"
+                f" → 记 {legend.display(winner)}（{describe_side(info)}）")
+
+    def credit_entry(season: str, target: str, info: Dict[str, object]) -> None:
+        """没有颜色的条目：按「萌百 / voca 谁先建条目」记创建者。"""
+        new = legend.identity(str(info.get("creator") or ""))
+        old = legend.identity(str(info.get("previous") or ""))
+        if new and new not in KNOWN_BOTS:
+            result[season][new] += 1
+        if (info.get("side") == "moegirl" and info.get("kind") == "local"
+                and old and old != new and old not in KNOWN_BOTS):
+            # 萌百创建者被证明更早：旧口径记在 voca 侧那个人头上的那一份要减掉
+            # （导入型的旧账由 ``recredit`` 迁移处理，这里不重复减）
+            demoted.setdefault(season, Counter())[old] += 1
+            if decisions is not None:
+                decisions.append(
+                    f"换归属: {season}/{target} 由 {legend.display(old)} 改为"
+                    f" {legend.display(new)}（{describe_side(info)}）")
+
+    def record_migration(season: str, target: str, info: Dict[str, object]) -> None:
+        """``recredit`` 的一次性迁移还要知道「旧口径算的是谁」。"""
+        kind = str(info.get("kind") or "local")
+        new, old = credit_pair(legend, info.get("current"), info.get("previous"))
+        if new != old and (kinds is None or kind in kinds):
+            if old and corrections is not None:
+                corrections.setdefault(season, Counter())[old] += 1
+            if new and gains is not None:
+                gains.setdefault(season, Counter())[new] += 1
+
     for section in counted:
         for entry in section.entries:
             target = resolved.get(entry.title, entry.title)
             if target in seen[section.season]:  # redirects are the same song
                 continue
             seen[section.season].add(target)
-            # 单元格上的颜色是人工标注的创建者，最可信（页面缺失也照样算）；
-            # 没有颜色的条目才回退到「谁在 voca 建的页面」，两者合起来才是
-            # 页面上图表的口径。
+            # 单元格上的颜色是人工标注的创建者（多色 = 创建者 + 重要贡献者），
+            # 没有颜色的条目回退到「谁先建了这个页面」。
             if entry.colours:
-                for colour in dict.fromkeys(entry.colours):
-                    if colour in legend.colour_to_name:
-                        result[section.season][colour] += 1
+                credit_cell(section.season, entry.colours, target, entry.title)
                 continue
             if not exists.get(entry.title):
                 continue  # 页面还没建，等 build 出来再算
@@ -1091,16 +1337,10 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
                     section.season, target, participants_of):
                 # 同名不同曲，页面是别的赛季的歌：算进来就会给这一季添一个假数字
                 continue
-            current, previous, kind = page_credits_detail(site, target, cache,
-                                                          moe_cache)
-            new, old = credit_pair(legend, current, previous)
-            if new != old and (kinds is None or kind in kinds):
-                if old and corrections is not None:
-                    corrections.setdefault(season, Counter())[old] += 1
-                if new and gains is not None:
-                    gains.setdefault(season, Counter())[new] += 1
-            if new:
-                result[section.season][new] += 1
+            info = first_creator(site, target, cache, moe_cache, order_cache,
+                                 song_store, names_store, allow_compute=False)
+            record_migration(section.season, target, info)
+            credit_entry(section.season, target, info)
 
     for season, songs in listed.items():
         for title in songs:
@@ -1110,20 +1350,12 @@ def count_by_listed(site, sections: List[Section], legend: Legend,
             seen[season].add(target)
             colours = colours_by_target.get(target, [])
             if colours:
-                for colour in dict.fromkeys(colours):
-                    if colour in legend.colour_to_name:
-                        result[season][colour] += 1
+                credit_cell(season, colours, target, title)
                 continue
-            current, previous, kind = page_credits_detail(site, target, cache,
-                                                          moe_cache)
-            new, old = credit_pair(legend, current, previous)
-            if new != old and (kinds is None or kind in kinds):
-                if old and corrections is not None:
-                    corrections.setdefault(season, Counter())[old] += 1
-                if new and gains is not None:
-                    gains.setdefault(season, Counter())[new] += 1
-            if new:
-                result[season][new] += 1
+            info = first_creator(site, target, cache, moe_cache, order_cache,
+                                 song_store, names_store, allow_compute=False)
+            record_migration(season, target, info)
+            credit_entry(season, target, info)
 
     # 排除曲目以前也算进过图表：减掉的是**旧口径**算出来的那份（旧图表就是照它
     # 加的），跨站导入的条目减的是源站最后一版的作者，不然减不到点上。
@@ -1282,7 +1514,9 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
                  counts: Dict[str, Counter],
                  excluded: Optional[Dict[str, Counter]] = None,
                  gained: Optional[Dict[str, Counter]] = None,
-                 base_text: Optional[str] = None) -> Tuple[str, dict]:
+                 base_text: Optional[str] = None,
+                 demoted: Optional[Dict[str, Counter]] = None
+                 ) -> Tuple[str, dict]:
     match = CHART_RE.search(text)
     if not match:
         raise RuntimeError("未找到 {{Echart}} - 页面结构可能已改变")
@@ -1333,6 +1567,14 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
             user = colours.get(key, legend.display(key))
             added[season][user] = added[season].get(user, 0) + count
 
+    # 只降两类**可证明**的旧账：多色格子里的重要贡献者、以及萌百创建者被证明更早的
+    # 条目的旧记账人。减过之后 computed ≥ previous，下一轮自然停住（幂等），不会越减越小。
+    taken_back: Dict[str, Dict[str, int]] = {s: {} for s in seasons}
+    for season in seasons:
+        for key, count in (demoted or {}).get(season, {}).items():
+            user = colours.get(key, legend.display(key))
+            taken_back[season][user] = taken_back[season].get(user, 0) + count
+
     series_span = _container(raw, r'"series"\s*:\s*\[')
     spans = _elements(raw, *series_span)
     blocks: List[Tuple[str, dict]] = []
@@ -1369,11 +1611,19 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
               if totals[u] > CHART_NEW_USER_THRESHOLD and u not in users]
 
     def previous_of(label: str, season: str, user: str) -> int:
-        """上一版图表里的数字，扣掉机器人不再计入的、加上改归到这一格的。"""
+        """上一版图表里的数字，扣掉机器人不再计入的、加上改归到这一格的。
+
+        ``taken_back`` 减到「算出来的数」就停：页面上的数字也可能来自站外记账，
+        再减下去会把人工数字啃掉，而算出来的数是这话的底线。
+        """
         previous = kept.get(label, {}).get(user, 0)
-        return max(0, previous + adjustments.get(season, {}).get(user, 0)
-                   - removed.get(season, {}).get(user, 0)
-                   + added.get(season, {}).get(user, 0))
+        previous += adjustments.get(season, {}).get(user, 0)
+        previous -= removed.get(season, {}).get(user, 0)
+        previous += added.get(season, {}).get(user, 0)
+        taken = taken_back.get(season, {}).get(user, 0)
+        if taken:
+            previous = max(per_season[season].get(user, 0), previous - taken)
+        return max(0, previous)
 
     def chart_total(user: str) -> int:
         """这一行在整张图上的合计（推不出来、只能沿用的人工数字也算）。"""
@@ -1384,14 +1634,27 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
         return total
 
     # ECharts 的 yAxis 自下而上画：数组里靠前的画在图的下方。所以按创建数
-    # **升序**排，图上看起来才是从多到少。
-    users.sort(key=lambda u: (chart_total(u), u))
+    # **升序**排，图上看起来才是从多到少。同分保持页面上原来的先后（稳定排序）：
+    # 按名字再排一次只是噪声，会把整条 yAxis 与全部数据点重写一遍（277973 那次
+    # 就是这么被撤销的），真正该换的只有「被别人超过」的行。
+    order = {user: index for index, user in enumerate(yaxis)}
+    existing_rows = [u for u in users if u in order]
+    fresh_rows = [u for u in users if u not in order]
+    existing_rows.sort(key=chart_total)
+    fresh_rows.sort(key=chart_total)
+    users = existing_rows + fresh_rows
+    moved = [u for index, u in enumerate(users)
+             if u in order and order[u] != index]
+    if moved:
+        pywikibot.output("统计: 行顺序随创建数调整: " + "、".join(
+            f"{u}({chart_total(u)})" for u in moved))
 
     separators = [raw[spans[i][1]:spans[i + 1][0]] for i in range(len(spans) - 1)]
     separator = separators[-1] if separators else ",\n\n"
     model = blocks[0][0] if blocks else None
 
     manual = 0
+    drops: List[str] = []
     ordered: List[str] = []
     for index, label in enumerate(labels):
         season = seasons[index]
@@ -1401,7 +1664,11 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
             previous = previous_of(label, season, user)
             if previous > computed:
                 manual += 1
-            data.append(str(max(computed, previous)))
+            value = max(computed, previous)
+            was = kept.get(label, {}).get(user, 0)
+            if value < was:
+                drops.append(f"{label} / {user} {was} → {value}")
+            data.append(str(value))
         existing = next((block for block, obj in blocks if obj.get("name") == label), None)
         if existing is not None:
             ordered.append(_refill(existing, _container(existing, r'"data"\s*:\s*\['), data))
@@ -1411,6 +1678,9 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     ordered += [block for block, obj in blocks if obj.get("name") not in labels]
     if manual:
         pywikibot.output(f"统计: 保留 {manual} 个机器人推不出来的人工数字")
+    if drops:
+        # 只可能是两类：多色格子里的重要贡献者、萌百创建者被证明更早的旧记账人
+        pywikibot.output("统计: 下调 " + "；".join(drops))
 
     inner = raw[series_span[0] + 1:series_span[1] - 1]
     lead, trail = _edges(inner)
@@ -1536,7 +1806,19 @@ def build_report(site, sections: List[Section], legend: Legend,
                 lines.append(f"已上色但页面不存在: {section.season}/{section.name} - {entry.title}")
             elif found and not entry.colours and entry.title not in plan:
                 lines.append(f"页面已存在但未上色（未能自动上色）: {section.season}/{section.name} - {entry.title}")
+    multi = multi_colour_cells(sections)
+    for season, name, title, colours in multi:
+        lines.append(f"多色格子（只记创建者）: {season}/{name} - {title}"
+                     f"（{' / '.join(legend.display(c) for c in colours)}）")
     return "\n".join(lines)
+
+
+def multi_colour_cells(sections: List[Section]
+                       ) -> List[Tuple[str, str, str, List[str]]]:
+    """``[(赛季, 小节, 曲名, 颜色列表)]``：一格挂了两个以上颜色的（创建者 + 重要贡献者）。"""
+    return [(section.season, section.name, entry.title, list(entry.colours))
+            for section in sections for entry in section.entries
+            if len(dict.fromkeys(entry.colours)) > 1]
 
 
 # --------------------------------------------------------------------------- #
@@ -2018,14 +2300,216 @@ def moegirl_titles(titles: Iterable[str]) -> Dict[str, Optional[str]]:
     return found
 
 
-def moegirl_creator(title: str) -> Optional[str]:
-    """萌娘百科页面的最旧一版作者；页面不存在或这一次没问到都返回 ``None``。
+MOEGIRL_SONGBOX_RE = re.compile(r"\{\{\s*VOCALOID[ _]Songbox\b(.*?)\n\s*\}\}", re.S | re.I)
+MOEGIRL_NAME_RE = re.compile(r"\|\s*歌曲名称\s*=\s*([^\n]*)")
+MOEGIRL_PRODUCER_RE = re.compile(r"\|\s*P主\s*=\s*([^\n]*)")
+MOEGIRL_SINGER_RE = re.compile(r"\|\s*演唱\s*=\s*([^\n]*)")
+SONG_NAME_NOISE_RE = re.compile(r"\{\{lj\|([^{}]*)\}\}|''+|</?br\s*/?>|<[^>]+>",
+                               re.I)
+WIKILINK_RE = re.compile(r"\[\[([^\]|]*\|)?([^\]]*)\]\]")
 
-    MediaWiki 只允许对单页用 ``rvdir=newer``，所以一页一次请求。导入的页面这里
-    拿到的是导入者，未必是真作者——报告里照实列出。
+
+def strip_markup(text: str) -> str:
+    """``[[a|b]]`` → ``b``、``{{lj|…}}`` → 内容、去掉加粗与标签。"""
+    text = WIKILINK_RE.sub(lambda m: m.group(2), str(text or ""))
+    return SONG_NAME_NOISE_RE.sub(lambda m: m.group(1) or " ", text).strip()
+
+
+INNER_TEMPLATE_RE = re.compile(r"\{\{([^{}]*)\}\}")
+
+
+def unwrap_templates(text: str) -> List[str]:
+    """把 `{{ruby|真不像话啊|{{lj|みっともないな}}}}` 拆成 ``['真不像话啊', 'みっともないな']``。
+
+    萌百（和 voca 的 Songbox）常用 `{{ruby|中文|原文}}`、`{{lj|日文}}` 套着写歌名，
+    直接拿去比字符串永远对不上。这里从里往外一层层剥，每层的参数都留一份。
     """
+    pieces: List[str] = []
+    text = str(text or "")
+    for _ in range(8):  # 模板不会套这么深，兜住跑飞的情况
+        match = INNER_TEMPLATE_RE.search(text)
+        if not match:
+            break
+        params = []
+        for param in match.group(1).split("|")[1:]:
+            param = re.sub(r"^\s*\d+\s*=", "", param).strip()
+            if param:
+                params.append(param)
+        pieces.extend(params)
+        text = text[:match.start()] + " " + " ".join(params) + " " + text[match.end():]
+    pieces.append(text)
+    return pieces
+
+
+@dataclass
+class MoeSong:
+    """萌娘百科条目的歌曲信息（只为「是不是同一首」服务）。
+
+    ``title`` 是**跟过重定向之后**的条目名（镜像站的 API 不认 ``redirects=1``，
+    ``秒针``、``黑白`` 这类条目本身就是重定向，照原名查只会拿到 ``#重定向`` 那段字），
+    ``user`` / ``stamp`` 是那个条目的最旧一版作者与时间——顺手带上，省一次请求。
+    """
+
+    songbox: bool = False
+    names: List[str] = field(default_factory=list)
+    producer: str = ""
+    singer: str = ""
+    title: str = ""
+    user: str = ""
+    stamp: str = ""
+
+
+MOEGIRL_REDIRECT_RE = re.compile(r"^\s*#\s*(?:重定向|redirect)\s*\[\[([^\]|#]+)", re.I | re.M)
+
+
+def moegirl_redirect_target(text: str) -> Optional[str]:
+    """``#重定向 [[秒针(Riei)]]`` → ``秒针(Riei)``；不是重定向返回 ``None``。"""
+    match = MOEGIRL_REDIRECT_RE.match(str(text or ""))
+    return match.group(1).strip() if match else None
+
+
+def song_name_keys(text: str) -> Set[str]:
+    """歌名 → 比对键：拆 ``{{ruby|…}}`` / ``{{lj|…}}`` / ``'''`` / ``<br>`` / ``【…】``，
+    去空白与标点，小写。
+
+    「千本桜」与「千本樱」是两个键（繁简不同），两边的歌名各留一份，任一边相同就算
+    同一首；`Fireworks【流星プロジェクト】` 的方括号是版本说明，不算歌名的一部分。
+    """
+    keys: Set[str] = set()
+    for name in unwrap_templates(text):
+        plain = re.sub(r"[【［][^】］]*[】］]", " ", name)
+        for raw in SONG_NAME_NOISE_RE.sub(lambda m: m.group(1) or " ", plain).split("\n"):
+            for piece in re.split(r"[/／]", raw):
+                key = re.sub(r"[\s\u3000]+", "", piece).strip()
+                key = re.sub(r"[!?！？・…~～\-–—－、,，。.'\"“”‘’()（）\[\]{}]", "", key)
+                if key:
+                    keys.add(key.lower())
+    return keys
+
+
+def parse_moe_song(text: str) -> MoeSong:
+    """从萌娘百科的 wikitext 里认歌曲：要 `{{VOCALOID Songbox}}`，再取歌名 / P主 / 演唱。
+
+    没有这个模板就不是 Vocaloid 歌曲条目（萌百大量同名条目是同名小说、游戏、角色），
+    不能拿它们的创建者当「这首歌的创建者」。
+    """
+    box = MOEGIRL_SONGBOX_RE.search(text or "")
+    if not box:
+        return MoeSong()
+    body = box.group(1)
+    names: List[str] = []
+    found = MOEGIRL_NAME_RE.search(body)
+    if found:
+        for part in re.split(r"<br\s*/?>", found.group(1)):
+            for name in unwrap_templates(part):
+                for variant in (name.strip(),
+                                SONG_NAME_NOISE_RE.sub(lambda m: m.group(1) or " ",
+                                                       name).strip()):
+                    if variant and variant not in names:
+                        names.append(variant)
+    producer = MOEGIRL_PRODUCER_RE.search(body)
+    singer = MOEGIRL_SINGER_RE.search(body)
+    return MoeSong(True, names,
+                   strip_markup(producer.group(1) if producer else ""),
+                   strip_markup(singer.group(1) if singer else ""))
+
+
+
+def moegirl_revision(title: str, content: bool = True) -> Optional[dict]:
+    """萌百某页的最旧一版（``rvdir=newer``）；页面不存在或这一次没问到返回 ``None``。"""
+    props = "user|timestamp|content" if content else "user|timestamp"
     data = moegirl_api({"action": "query", "prop": "revisions", "titles": title,
-                        "rvprop": "user", "rvlimit": "1", "rvdir": "newer",
+                        "rvprop": props, "rvslots": "main",
+                        "rvlimit": "1", "rvdir": "newer"})
+    if data is None:
+        return None
+    pages = data.get("query", {}).get("pages") or []
+    if isinstance(pages, dict):
+        pages = list(pages.values())
+    if not pages or pages[0].get("missing"):
+        return None
+    revisions = pages[0].get("revisions") or []
+    return revisions[0] if revisions else None
+
+
+def moegirl_current_text(title: str) -> Optional[str]:
+    """萌百某页当前版本的正文（最旧一版还是空壳时用）。"""
+    data = moegirl_api({"action": "query", "prop": "revisions", "titles": title,
+                        "rvprop": "content", "rvslots": "main"})
+    if data is None:
+        return None
+    pages = data.get("query", {}).get("pages") or []
+    if isinstance(pages, dict):
+        pages = list(pages.values())
+    if not pages or pages[0].get("missing"):
+        return None
+    revisions = pages[0].get("revisions") or []
+    if not revisions:
+        return None
+    return (revisions[0].get("slots", {}).get("main", {}) or {}).get("content", "")
+
+
+def _revision_content(revision: dict) -> str:
+    return (revision.get("slots", {}).get("main", {}) or {}).get("content", "")
+
+
+def moegirl_song(moe_title: str) -> Optional[MoeSong]:
+    """萌百条目的歌曲信息；页面不存在／这一次没问到返回 ``None``。
+
+    一次请求拿全：最旧一版的作者 / 时间 / 正文（正文用来验货）。三种情况还要再问一次：
+    正文是 ``#重定向``（镜像站的 API 不认 ``redirects=1``，``秒针`` 就是重定向到
+    ``秒针(Riei)``）、最旧一版还是个没有 Songbox 的空壳（取当前版本）。
+    """
+    title = moe_title
+    first = moegirl_revision(title)
+    if first is None:
+        return None
+    for _ in range(2):
+        target = moegirl_redirect_target(_revision_content(first))
+        if not target or target == title:
+            break
+        time.sleep(MOEGIRL_DELAY)
+        resolved = moegirl_revision(target)
+        if resolved is None:
+            break
+        title, first = target, resolved
+    song = parse_moe_song(_revision_content(first))
+    if not song.songbox:
+        time.sleep(MOEGIRL_DELAY)
+        current = moegirl_current_text(title)
+        if current:
+            song = parse_moe_song(current)
+    song.title = title
+    song.user = first.get("user") or ""
+    song.stamp = first.get("timestamp") or ""
+    return song
+
+
+
+def moegirl_same_song(song: Optional[MoeSong], voca_names: Iterable[str]) -> bool:
+    """萌百这一条跟 voca 的是不是同一首：两边 Songbox 歌名要有交集。
+
+    `千本樱`（萌百，歌名 `千本桜`/`千本樱`）对上 voca 的 `千本桜` 算同一首；
+    `Harmony`（萌百重定向到 `和谐`，歌名是另一首歌）对不上就判否——同名不同曲最容易
+    把贡献记到别人头上，宁可不算。
+    """
+    if song is None or not song.songbox:
+        return False
+    mine = set()
+    for name in voca_names:
+        mine |= song_name_keys(name)
+    if not mine:
+        return False
+    theirs = set()
+    for name in song.names:
+        theirs |= song_name_keys(name)
+    return bool(mine & theirs)
+
+
+def moegirl_first_revision(title: str) -> Optional[Tuple[str, str]]:
+    """萌娘百科页面最旧一版的 ``(作者, ISO 时间)``；页面不存在或没问到返回 ``None``。"""
+    data = moegirl_api({"action": "query", "prop": "revisions", "titles": title,
+                        "rvprop": "user|timestamp", "rvlimit": "1", "rvdir": "newer",
                         "redirects": "1"})
     if data is None:
         return None
@@ -2035,7 +2519,22 @@ def moegirl_creator(title: str) -> Optional[str]:
     if not pages or pages[0].get("missing"):
         return None
     revisions = pages[0].get("revisions") or []
-    return revisions[0].get("user") if revisions else None
+    if not revisions:
+        return None
+    user, stamp = revisions[0].get("user"), revisions[0].get("timestamp")
+    if not user:
+        return None
+    return str(user), str(stamp or "")
+
+
+def moegirl_creator(title: str) -> Optional[str]:
+    """萌娘百科页面的最旧一版作者；页面不存在或这一次没问到都返回 ``None``。
+
+    MediaWiki 只允许对单页用 ``rvdir=newer``，所以一页一次请求。导入的页面这里
+    拿到的是导入者，未必是真作者——报告里照实列出。
+    """
+    first = moegirl_first_revision(title)
+    return first[0] if first else None
 
 
 def moegirl_cached(cache: Dict, title: str,
@@ -2093,17 +2592,34 @@ def moegirl_lookup(titles: Iterable[str], cache: Dict) -> Dict[str, MoePage]:
     return result
 
 
-def moegirl_creator_of(title: str, moe_cache: Optional[Dict] = None) -> Optional[str]:
+def moegirl_creator_of(title: str, moe_cache: Optional[Dict] = None,
+                       voca_names: Optional[Iterable[str]] = None) -> Optional[str]:
     """萌娘百科同名条目的创建者（最旧一版作者）；没有同名条目或查不到返回 ``None``。
 
     只看镜像站的答案；镜像说「没有」而条目其实是萌百「待审核」的页面时，由
     ``moegirl_imported_creator`` 去官方站确认（它还需要导入版的时间戳）。
+
+    ``voca_names`` 给出 voca 侧的歌名时还会验货：萌百那一条必须是
+    ``{{VOCALOID Songbox}}`` 的歌曲、而且 Songbox 歌名与 voca 的对得上。同名不同曲
+    （萌百 `Harmony` 重定向到 `和谐`）就不算——否则贡献会记到别人头上。
     """
     if moe_cache is None:
         moe_cache = {}
     page = moegirl_lookup([title], moe_cache).get(title)
     if page is None or not page.title:
         return None
+    if voca_names is not None:
+        song = moegirl_song(page.title)
+        if not moegirl_same_song(song, voca_names):
+            pywikibot.warning(
+                f"{title}: 萌百的 {page.title} 不是同一首 Vocaloid 歌曲"
+                f"（Songbox 歌名 {song.names if song else []}），不采用它的创建者")
+            return None
+        # 验过货就以验货那次问到的「跟到底那一篇」为准：镜像站的 API 不认
+        # redirects=1，重定向页（秒针 → 秒针(Riei)）的创建者是重定向页的作者，
+        # 不是这首歌条目的创建者。
+        if song.user:
+            return song.user
     return page.creator
 
 
@@ -2146,7 +2662,7 @@ def page_credits_of(site, title: str, raw: str, cache: Dict,
         pywikibot.output(f"{title}: 首版摘要写明是从{IMPORT_SOURCES[source]}"
                          f"搬来的（{previous} 只是搬运者），记给 {creator}")
     else:
-        creator = moegirl_creator_of(title, moe_cache)
+        creator = moegirl_creator_of(title, moe_cache, voca_song_names(site, title))
         if creator is None and source == IMPORT_SOURCE_MOEGIRL:
             creator = moegirl_imported_creator(title, previous,
                                                import_stamp(site, title, cache),
@@ -2362,7 +2878,7 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
 
 
 # --------------------------------------------------------------------------- #
-ALL_ACTIONS = ("entries", "counts", "colour", "stats", "report")
+ALL_ACTIONS = ("siteorder", "entries", "counts", "colour", "stats", "report")
 # 不进 ``all``：萌娘百科是别人的 wiki，别让每小时一次的维护去敲它；
 # recredit 是一次性迁移，必须显式带着基准版本跑，见 ``recredit``。
 EXTRA_ACTIONS = ("moe", "recredit")
@@ -2492,7 +3008,7 @@ def recredit(site, text: str, sections: List[Section], legend: Legend,
 
 def run_once(site, actions, basis: str = "listed", write: bool = False,
              summary: Optional[str] = None, from_rev: Optional[int] = None,
-             kinds: Optional[set] = None) -> bool:
+             kinds: Optional[set] = None, siteorder_limit: int = 0) -> bool:
     """Run one maintenance pass.  Returns True when the page changed.
 
     Returns False when there was nothing to do, and also when the save was
@@ -2514,9 +3030,15 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     cache = load_cache(CREATOR_CACHE)
     moe_cache = load_cache(MOEGIRL_CACHE)
     derivative_cache = load_cache(DERIVATIVE_CACHE)
+    order_cache = load_cache(SITE_ORDER_CACHE)
+    song_store = load_cache(MOEGIRL_SONG_CACHE)
+    names_store = load_cache(VOCA_NAMES_CACHE)
     # 登记给 flush_caches()：慢查询途中也要落盘，别把这一轮问到的全丢在内存里。
     _CACHE_REGISTRY[:] = [(MOEGIRL_CACHE, moe_cache), (CREATOR_CACHE, cache),
-                          (DERIVATIVE_CACHE, derivative_cache)]
+                          (DERIVATIVE_CACHE, derivative_cache),
+                          (SITE_ORDER_CACHE, order_cache),
+                          (MOEGIRL_SONG_CACHE, song_store),
+                          (VOCA_NAMES_CACHE, names_store)]
 
     def derivative_of(title: str) -> bool:
         """这一页是不是二创（标题看不出来时读页面正文，结果进缓存）。"""
@@ -2641,14 +3163,50 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     if "counts" in actions:
         text, changed = recompute_counts(text, created)
         pywikibot.output(f"计数: 更新 {changed} 个小节")
+    if "siteorder" in actions:
+        # 只填缓存、不改页面：把「萌百 / voca 谁先建条目」比一遍（--limit 控制本轮条数）
+        seen: Set[str] = set()
+        pending: List[str] = []
+        for section in sections:
+            for entry in section.entries:
+                if entry.title not in seen:
+                    seen.add(entry.title)
+                    pending.append(entry.title)
+        # 已经比过的直接从缓存读，不占本轮的预算，否则 --limit 会一直卡在前面的条目上
+        pending = [title for title in pending if site_order_stale(title, order_cache)]
+        todo = pending[:siteorder_limit] if siteorder_limit else pending
+        done = 0
+        for title in todo:
+            first_creator(site, title, cache, moe_cache, order_cache,
+                          song_store, names_store)
+            done += 1
+            if done % 20 == 0:
+                pywikibot.output(f"谁先建条目: 本轮已比较 {done}/{len(todo)}"
+                                 f"（待比共 {len(pending)} 条）")
+        moe_earlier = [title for title, info in order_cache.items()
+                       if isinstance(info, dict) and info.get("side") == "moegirl"]
+        pywikibot.output(f"谁先建条目: 本轮比较 {done} 条，还差 {len(pending) - done} 条，"
+                         f"缓存共 {len(order_cache)} 条，其中萌百更早 {len(moe_earlier)} 条")
     if "stats" in actions:
         excluded: Dict[str, Counter] = {}
+        demoted: Dict[str, Counter] = {}
+        decisions: List[str] = []
         counts = (count_by_listed(site, sections, legend, cache, participants_of,
-                                  songs_of, excluded_of, excluded, moe_cache)
+                                  songs_of, excluded_of, excluded, moe_cache,
+                                  demoted=demoted, order_cache=order_cache,
+                                  song_store=song_store, names_store=names_store,
+                                  decisions=decisions)
                   if basis == "listed" else count_by_window(site, sections))
-        text, _ = render_chart(text, sections, legend, counts, excluded)
+        text, _ = render_chart(text, sections, legend, counts, excluded,
+                               demoted=demoted)
         dropped = sum(sum(entry.values()) for entry in excluded.values())
-        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处）")
+        lowered = sum(sum(entry.values()) for entry in demoted.values())
+        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处，"
+                         f"只记创建者而收回 {lowered} 处）")
+        for note in decisions[:30]:
+            pywikibot.output(f"  {note}")
+        if len(decisions) > 30:
+            pywikibot.output(f"  ……另有 {len(decisions) - 30} 条未逐条列出")
     if "recredit" in actions:
         text = recredit(site, text, sections, legend, cache, moe_cache,
                         participants_of, songs_of, excluded_of, from_rev, kinds)
@@ -2684,8 +3242,8 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", default="all",
-                        help="all | one or more of counts,colour,stats,report,moe,recredit "
-                             "(comma separated, e.g. counts,colour,report)")
+                        help="all | one or more of siteorder,entries,counts,colour,stats,"
+                             "report,moe,recredit (comma separated)")
     parser.add_argument("--basis", choices=["listed", "window"], default="listed",
                         help="how to resolve creators when recomputing the chart")
     parser.add_argument("--write", action="store_true", help="save the page (default: dry-run)")
@@ -2695,11 +3253,19 @@ def main() -> None:
     parser.add_argument("--kinds", default=None,
                         help="recredit: 只迁移某一类导入账（prefix=zhmoe&gt; 前缀，"
                              "note=摘要里的搬运者；不给就两类都算）")
+    parser.add_argument("--limit", type=int, default=0, dest="limit",
+                        help="siteorder: 本轮最多比较多少条（0 = 全部；all 默认 "
+                             f"{SITEORDER_BUDGET}）")
     args = parser.parse_args()
 
     site = pywikibot.Site()
+    limit = args.limit
     if args.action == "all":
         actions = set(ALL_ACTIONS)
+        # 全量比较一条要问萌百三四个请求，每小时的任务不能耗在这上面：每轮只比一小批，
+        # 结论落盘，几天后自然补齐（看日志里的「还差 N 条」）；要一次跑完就单跑 siteorder。
+        if not limit:
+            limit = SITEORDER_BUDGET
     else:
         actions = {a.strip() for a in args.action.split(",") if a.strip()}
         unknown = actions - set(ALL_ACTIONS) - set(EXTRA_ACTIONS)
@@ -2707,7 +3273,7 @@ def main() -> None:
             parser.error(f"未知的动作：{', '.join(sorted(unknown)) or args.action}")
     kinds = {k.strip() for k in (args.kinds or "").split(",") if k.strip()} or None
     run_once(site, actions, args.basis, args.write, args.summary, args.from_rev,
-             kinds)
+             kinds, limit)
 
 
 if __name__ == "__main__":

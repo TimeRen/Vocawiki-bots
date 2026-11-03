@@ -34,9 +34,9 @@ The bot can:
   track and the derivative songs do not count, see ``is_counted_track``: a
   derivative is recognised by its title (``原曲/创作者``, ``…＃二次创作``) or,
   when the title says nothing, by its page calling itself a cover/二创
-  (``is_derivative``).  「其他部门」 groups hold original songs (the Exhibition
-  module) *and* covers, so they are judged song by song rather than dropped as a
-  group.  A page that merely carries the season's navbox (the
+  (``is_derivative``).  The whole neta track (「其他歌曲」) does *not* count
+  either - its cells are not credited to anyone, whatever their colours say
+  (2026-11-03).  A page that merely carries the season's navbox (the
   overview article) does not count either.  Rows are ordered by their total, so
   the chart reads 多→少 from top to bottom; rows whose totals tie keep the order
   they already have on the page, so a run does not shuffle them back and forth.
@@ -52,14 +52,18 @@ The bot can:
   Explicit corrections in ``CHART_COUNT_ADJUSTMENTS`` are applied to both the
   computed and retained chart values, so later runs do not undo a manual
   correction.
-  Four exceptions subtract from a cell: the REMIX/二创 songs; the credits
-  earlier runs gave to the author of an *imported* revision (that author is
-  either the source article's last editor, see ``page_creator``, or the mover
-  recorded in the first revision's summary) - moving those credits to the real
-  creator's cell is a one-off migration, ``recredit``, because re-applying the
-  delta every hour would keep growing the number; the non-creator colours of a
-  multi-colour cell; and entries whose credited user provably created the
-  article *after* the other site did (see below).
+  Four exceptions subtract from a cell: the REMIX / neta tracks and the
+  derivative songs (``removed``); the credits earlier runs gave to the author of
+  an *imported* revision (that author is either the source article's last
+  editor, see ``page_creator``, or the mover recorded in the first revision's
+  summary) - moving those credits to the real creator's cell is a one-off
+  migration, ``recredit``, because re-applying the delta every hour would keep
+  growing the number; the non-creator colours of a multi-colour cell; and
+  entries whose credited user provably created the article *after* the other
+  site did (see below).  Every subtraction stops at the computed number
+  (``previous = max(computed, previous - removed - taken_back)``), so a number
+  that was already taken back is not taken again on the next run and the
+  off-wiki bookkeeping is never eaten away.
   「最先创建者」: 贡献列表的创建者取萌娘百科与 Vocawiki **哪边先建条目**就取
   哪边的创建者 (``first_creator``).  An imported revision already proves Moegirl
   came first, so the Moegirl creator is used as is.  A locally written page is
@@ -81,8 +85,10 @@ The bot can:
   限制本轮比多少条）。比较要问萌百（每条 3~4 个请求），全量跑一轮很久，所以
   它单列成一个动作：``stats``/``all`` 只用缓存里已有的结论，没比过的条目暂按
   本机首版作者记，等 ``siteorder`` 补上。``all`` 每轮只新比
-  ``SITEORDER_BUDGET`` 条（已经比过的不占预算），免得慢查询把整轮拖到保存不了。
-  缓存过期（30 天）或没命中（7 天）后会重新比较。
+  ``SITEORDER_BUDGET`` 条、最多花 ``SITEORDER_SECONDS`` 秒（已经比过的不占预算），
+  而且这一段排在**保存页面之后**——只填缓存的动作绝不能挡住保存（2026-10-22、
+  11-03 页面停更都是这么来的）。萌百镜像连着失败 ``MOEGIRL_FAILURE_LIMIT`` 次就
+  本轮断路，不再一条条撞 30 秒超时。缓存过期（30 天）或没命中（7 天）后重新比较。
 * ``moe``     - 与萌娘百科交叉比对创建者，**只出报告、不改页面**。贡献列表记的是
   「萌娘百科及 Vocawiki 上」的创建：页面上标着的创建者（格子颜色/图例）与本机
   页面的首版作者可能不是同一个人。三类条目会去萌娘百科查同名条目的最旧一版作者
@@ -167,6 +173,7 @@ SITE_ORDER_VERSION = 2      # 结论口径变了（认不出创建者不下调�
 SONG_INFO_TTL = 30 * 24 * 3600      # 歌名 / 萌百歌曲信息多久重取一次（秒）
 SITE_ORDER_TTL = 30 * 24 * 3600     # 「谁先建条目」多久重比一次（秒）
 SITEORDER_BUDGET = 40               # all 每轮最多新比多少条（一条要问萌百 3~4 个请求）
+SITEORDER_SECONDS = 240             # all 每轮在「谁先建条目」上最多花多少秒
 SITE_ORDER_MISS_TTL = 7 * 24 * 3600  # 萌百没有同名条目 / 不是同一首：过一周再验一次
 CHART_SERIES_PREFIX = "ボカコレ"
 CHART_NEW_USER_THRESHOLD = 5
@@ -203,6 +210,9 @@ MOEGIRL_UA = ("Vocawiki-bots/1.0 (maintains voca.wiki contribution list; "
               "https://github.com/TimeRen/Vocawiki-bots)")
 MOEGIRL_TIMEOUT = 30
 MOEGIRL_DELAY = 0.2  # 两次请求之间的间隔：别把对方 API 打疼
+# 镜像站连着这么多次失败就本轮断路：不然「每条 3 次重试 × 30 秒超时」会把整轮
+# 拖到几小时，页面永远等不到保存（2026-10-22、11-03 都是这么被拖死的）。
+MOEGIRL_FAILURE_LIMIT = 5
 MOEGIRL_OFFICIAL_TIMEOUT = 20  # 官方站时不时要十几秒才回，但也别等太久
 MOEGIRL_OFFICIAL_ATTEMPTS = 4  # 它常常握手超时，重试几次基本就能过
 MOEGIRL_OFFICIAL_LOGIN_TRIES = 5  # 登录失败不锁死整轮：后面用到时再试几次
@@ -219,6 +229,8 @@ CACHE_FLUSH_INTERVAL = 120
 MOEGIRL_SOURCE_MIRROR = "icu"  # 缓存里的答案是谁给的：镜像站
 MOEGIRL_SOURCE_OFFICIAL = "zh"  # 官方站（这时「没有」才算定论）
 MOEGIRL_SOURCE_FALLBACK = "table"  # 下面那张核对表
+# 镜像站连续失败次数（见 moegirl_api）：进程级计数，成功一次就归零
+MOEGIRL_FAILURES = 0
 
 # 「voca 条目名 -> (萌百源条目名, 源条目创建者)」核对表，只在**问不到官方站**时兜底。
 #
@@ -288,14 +300,10 @@ def is_counted_section(name: str) -> bool:
     return upper.startswith("TOP") or upper.startswith("ROOKIE")
 
 
-# 「其他歌曲」下的分组名：这些分组里既有本季的原创曲（Exhibition 这类不排名模块
-# 也收在同一组），也有二创（歌ってみた/翻唱），所以不能按分组名一刀切——判断改看
-# 曲目本身：标题里写「原曲/创作者」、标题写着「二次创作」，或页面正文自认是翻唱/
-# 二创的，才不算（见 ``is_derivative``）。``ORIGINAL_GROUPS`` 现在是「明确只收
-# 原创曲的分组」，留着给不会混二创的分组用。
-ORIGINAL_GROUPS = {"未上榜歌曲"}
-
-# 二创的痕迹：标题上的（「原曲/创作者」「…＃二次创作」）和页面正文里的
+# 「其他歌曲」（``neta`` 赛道）整条不计入图表：里面既有本季原创曲也有二创，逐条判断
+# 的旧规则太绕、也容易把多色格子的 neta 曲记到创建者头上（2026-11-03 的要求：
+# **neta 曲无论创建者是谁都不计入**）。所以 ``neta`` 直接整条排除。下面这些「二创
+# 痕迹」只用于别的赛道（比如 TOP100 里出现的翻唱）：
 DERIVATIVE_TITLE_RE = re.compile(r"/|#\s*二次[創创]作")
 DERIVATIVE_TEXT_MARKERS = ("翻唱", "歌ってみた", "二次创作", "二次創作",
                            "二创", "アレンジ")
@@ -303,23 +311,20 @@ DERIVATIVE_TEXT_MARKERS = ("翻唱", "歌ってみた", "二次创作", "二次�
 
 def is_counted_track(section_key: str, title: str,
                      derivative_of: Optional[Callable[[str], bool]] = None) -> bool:
-    """这条曲目算不算创建贡献：REMIX 赛道与二创都不算。
+    """这条曲目算不算创建贡献：REMIX 赛道与 neta 赛道一律不算，其余赛道里的二创也不算。
 
     ``section_key`` 是 ``parse_season_template`` 的键，形如 ``REMIX`` /
     ``neta`` / ``neta:未上榜歌曲``（无区间分组会带上分组名）。``derivative_of``
     给出「页面正文自认是二创」的判断（需要读页面，见 ``is_derivative``）；不给就
     只看标题上的痕迹。
     """
-    name, _, label = section_key.partition(":")
-    if name == "REMIX":
+    name = section_key.partition(":")[0]
+    if name in ("REMIX", "neta"):
         return False
-    if name == "neta":
-        if label and label in ORIGINAL_GROUPS:
-            return "/" not in title  # 这一组只收原创曲，带斜杠的仍是「原曲/创作者」
-        if DERIVATIVE_TITLE_RE.search(title):
-            return False
-        if derivative_of is not None and derivative_of(title):
-            return False
+    if DERIVATIVE_TITLE_RE.search(title):
+        return False
+    if derivative_of is not None and derivative_of(title):
+        return False
     return True
 
 
@@ -1182,6 +1187,48 @@ def describe_side(info: Dict[str, object]) -> str:
     return "萌百没有同一首（或不可比），记 voca 创建者"
 
 
+def siteorder_pass(site, sections: List[Section], cache: Dict,
+                   moe_cache: Optional[Dict] = None,
+                   order_cache: Optional[Dict] = None,
+                   song_store: Optional[Dict] = None,
+                   names_store: Optional[Dict] = None,
+                   limit: int = 0, seconds: float = 0) -> int:
+    """把「萌百 / voca 谁先建条目」的结论补进缓存，返回本轮比较了多少条。
+
+    只填缓存、不改页面，所以调用点排在保存**之后**。``limit`` 是本轮最多比多少条
+    （0 = 不限）；``seconds`` 是墙钟预算（0 = 不限），到点就停——一条要问萌百 3~4 个
+    请求，网络差的时候没有预算能把整轮拖死。
+    """
+    order_cache = load_cache(SITE_ORDER_CACHE) if order_cache is None else order_cache
+    seen: Set[str] = set()
+    pending: List[str] = []
+    for section in sections:
+        for entry in section.entries:
+            if entry.title not in seen:
+                seen.add(entry.title)
+                pending.append(entry.title)
+    # 已经比过的直接从缓存读，不占本轮的预算，否则 --limit 一直卡在前面的条目上
+    pending = [title for title in pending if site_order_stale(title, order_cache)]
+    todo = pending[:limit] if limit else pending
+    deadline = time.time() + seconds if seconds else None
+    done = 0
+    for title in todo:
+        if deadline is not None and time.time() >= deadline:
+            pywikibot.output(f"谁先建条目: 到 {int(seconds)} 秒预算上限，本轮先停")
+            break
+        first_creator(site, title, cache, moe_cache, order_cache,
+                      song_store, names_store)
+        done += 1
+        if done % 20 == 0:
+            pywikibot.output(f"谁先建条目: 本轮已比较 {done}/{len(todo)}"
+                             f"（待比共 {len(pending)} 条）")
+    moe_earlier = [title for title, info in order_cache.items()
+                   if isinstance(info, dict) and info.get("side") == "moegirl"]
+    pywikibot.output(f"谁先建条目: 本轮比较 {done} 条，还差 {len(pending) - done} 条，"
+                     f"缓存共 {len(order_cache)} 条，其中萌百更早 {len(moe_earlier)} 条")
+    return done
+
+
 def count_by_listed(site, sections: List[Section], legend: Legend,
                     cache: Dict,
                     participants_of: Optional[Callable[[str], Optional[set]]] = None,
@@ -1622,16 +1669,16 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     def previous_of(label: str, season: str, user: str) -> int:
         """上一版图表里的数字，扣掉机器人不再计入的、加上改归到这一格的。
 
-        ``taken_back`` 减到「算出来的数」就停：页面上的数字也可能来自站外记账，
-        再减下去会把人工数字啃掉，而算出来的数是这话的底线。
+        ``removed`` / ``taken_back`` 都是**每轮从当前页面重算**的（不是累加），
+        所以只要页面数字已经不高于 ``computed`` 就说明早扣过了，别一小时再啃一块：
+        两者合起来只扣到 ``computed`` 为止。页面里站外记账的人工数字因此不会被啃掉。
         """
         previous = kept.get(label, {}).get(user, 0)
         previous += adjustments.get(season, {}).get(user, 0)
-        previous -= removed.get(season, {}).get(user, 0)
         previous += added.get(season, {}).get(user, 0)
-        taken = taken_back.get(season, {}).get(user, 0)
-        if taken:
-            previous = max(per_season[season].get(user, 0), previous - taken)
+        lower = removed.get(season, {}).get(user, 0) + taken_back.get(season, {}).get(user, 0)
+        if lower:
+            previous = max(per_season[season].get(user, 0), previous - lower)
         return max(0, previous)
 
     def chart_total(user: str) -> int:
@@ -1817,14 +1864,22 @@ def build_report(site, sections: List[Section], legend: Legend,
                 lines.append(f"页面已存在但未上色（未能自动上色）: {section.season}/{section.name} - {entry.title}")
     multi = multi_colour_cells(sections)
     for season, name, title, colours in multi:
-        lines.append(f"多色格子（只记创建者）: {season}/{name} - {title}"
+        # neta 赛道整条不计入，多色格子的「重要贡献者」也就没有收不收回的问题，
+        # 两种情况的结论不一样，报告里要分开写，别让人以为 neta 那两条被计了。
+        counted = is_counted_section(name)
+        label = "多色格子（只记创建者）" if counted else "多色格子（neta 曲，不计入）"
+        lines.append(f"{label}: {season}/{name} - {title}"
                      f"（{' / '.join(legend.display(c) for c in colours)}）")
     return "\n".join(lines)
 
 
 def multi_colour_cells(sections: List[Section]
                        ) -> List[Tuple[str, str, str, List[str]]]:
-    """``[(赛季, 小节, 曲名, 颜色列表)]``：一格挂了两个以上颜色的（创建者 + 重要贡献者）。"""
+    """``[(赛季, 小节, 曲名, 颜色列表)]``：一格挂了两个以上颜色的（创建者 + 重要贡献者）。
+
+    报告要用它说明「这一格只记创建者」，所以 neta 小节的多色格子也一并列出——
+    那类格子压根不计入（见 ``is_counted_track``），报告里另有一种措辞。
+    """
     return [(section.season, section.name, entry.title, list(entry.colours))
             for section in sections for entry in section.entries
             if len(dict.fromkeys(entry.colours)) > 1]
@@ -1851,7 +1906,14 @@ def moegirl_api(params: Dict[str, str]) -> Optional[dict]:
 
     对面回 ``error``（限流、参数被禁）也算「没问到」，绝不能当成「没有这条」——
     否则整批条目会被写成「无同名条目」，报告就成了误导。
+
+    连着失败 ``MOEGIRL_FAILURE_LIMIT`` 次就**本轮断路**：镜像站挂掉时，一条条去撞
+    「3 次重试 × 30 秒超时」会把整轮拖到几小时，页面永远等不到保存。断路后直接
+    返回 ``None``（调用方本来就按「这次没问到」处理，下次运行会重新尝试）。
     """
+    global MOEGIRL_FAILURES
+    if MOEGIRL_FAILURES >= MOEGIRL_FAILURE_LIMIT:
+        return None
     query = dict(params)
     query["format"] = "json"
     query["formatversion"] = "2"
@@ -1867,7 +1929,13 @@ def moegirl_api(params: Dict[str, str]) -> Optional[dict]:
                 time.sleep(1 + attempt)
                 continue
             pywikibot.error(f"萌娘百科查询失败: {exc}")
+            MOEGIRL_FAILURES += 1
+            if MOEGIRL_FAILURES == MOEGIRL_FAILURE_LIMIT:
+                pywikibot.error(
+                    f"萌娘百科连续失败 {MOEGIRL_FAILURES} 次，本轮不再请求它"
+                    f"（缓存里已有的结论照用）")
             return None
+        MOEGIRL_FAILURES = 0
         if "error" in data:
             error = data["error"]
             pywikibot.error(f"萌娘百科拒绝请求: {error.get('code')} "
@@ -3172,30 +3240,6 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     if "counts" in actions:
         text, changed = recompute_counts(text, created)
         pywikibot.output(f"计数: 更新 {changed} 个小节")
-    if "siteorder" in actions:
-        # 只填缓存、不改页面：把「萌百 / voca 谁先建条目」比一遍（--limit 控制本轮条数）
-        seen: Set[str] = set()
-        pending: List[str] = []
-        for section in sections:
-            for entry in section.entries:
-                if entry.title not in seen:
-                    seen.add(entry.title)
-                    pending.append(entry.title)
-        # 已经比过的直接从缓存读，不占本轮的预算，否则 --limit 会一直卡在前面的条目上
-        pending = [title for title in pending if site_order_stale(title, order_cache)]
-        todo = pending[:siteorder_limit] if siteorder_limit else pending
-        done = 0
-        for title in todo:
-            first_creator(site, title, cache, moe_cache, order_cache,
-                          song_store, names_store)
-            done += 1
-            if done % 20 == 0:
-                pywikibot.output(f"谁先建条目: 本轮已比较 {done}/{len(todo)}"
-                                 f"（待比共 {len(pending)} 条）")
-        moe_earlier = [title for title, info in order_cache.items()
-                       if isinstance(info, dict) and info.get("side") == "moegirl"]
-        pywikibot.output(f"谁先建条目: 本轮比较 {done} 条，还差 {len(pending) - done} 条，"
-                         f"缓存共 {len(order_cache)} 条，其中萌百更早 {len(moe_earlier)} 条")
     if "stats" in actions:
         excluded: Dict[str, Counter] = {}
         demoted: Dict[str, Counter] = {}
@@ -3210,7 +3254,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
                                demoted=demoted)
         dropped = sum(sum(entry.values()) for entry in excluded.values())
         lowered = sum(sum(entry.values()) for entry in demoted.values())
-        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处，"
+        pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/neta/二创 {dropped} 处，"
                          f"只记创建者而收回 {lowered} 处）")
         for note in decisions[:30]:
             pywikibot.output(f"  {note}")
@@ -3223,10 +3267,12 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     # 整轮常在这儿耗掉，页面就永远等不到保存（2026-10-22 起连续三天没动就是这样）。
     result = False
     if actions <= {"report", "moe"}:
-        pass  # 只出报告的动作不改页面
+        status = "只出报告，不改页面"
     elif text == original:
-        pywikibot.output("页面无需更新。")
+        status = "页面无需更新"
+        pywikibot.output(f"{status}。")
     elif not write:
+        status = "干跑（未保存）"
         import difflib
         diff = difflib.unified_diff(original.splitlines(), text.splitlines(),
                                     "old", "new", lineterm="")
@@ -3235,6 +3281,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         result = True
     else:
         result = save_page(page, text, summary)
+        status = "已保存" if result else "未保存（编辑冲突，下一轮再来）"
 
     if "report" in actions:
         report = build_report(site, sections, legend, cache, exists, plan)
@@ -3243,8 +3290,19 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
         report = moegirl_report(site, sections, legend, cache, exists,
                                 songs_of, moe_cache)
         pywikibot.output("萌娘百科交叉比对:\n" + (report or "  （无）"))
+    if "siteorder" in actions:
+        # 只填缓存、不改页面，所以排在保存**之后**：每条要问萌百 3~4 个请求
+        # （单请求 30 秒超时、重试 3 次），排在保存前面时网络一差，整轮就耗在这儿、
+        # 页面永远等不到保存（2026-10-22 起三天没动页面就是这么来的）。
+        # 单跑 siteorder（手动补缓存）不限时，跟着 all 一起跑才给墙钟预算。
+        seconds = 0 if actions == {"siteorder"} else SITEORDER_SECONDS
+        siteorder_pass(site, sections, cache, moe_cache, order_cache,
+                       song_store, names_store, siteorder_limit, seconds)
 
+    # 心跳：任务「有没有跑」不该靠页面上有没有修订来猜（2026-11-03 就是这么误判的）。
+    # Toolforge 的 job 日志（~/<job>.out）里最后一行永远写着这一轮什么时候跑的。
     flush_caches(force=True)
+    pywikibot.output(f"本轮结束 {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}：{status}")
     return result
 
 

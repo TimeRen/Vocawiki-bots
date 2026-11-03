@@ -43,6 +43,13 @@ if [[ -n "$JOB" ]]; then
     echo
     echo "=== $JOB 最近的日志（末 60 行）==="
     toolforge jobs logs "$JOB" 2>&1 | tail -60 || echo "toolforge jobs logs 失败"
+    # 机器人每轮末尾会写一行心跳「本轮结束 <时间>：已保存/页面无需更新」，
+    # 有它就是真的跑过了——页面没动不等于任务没跑（2026-11-03 就是这么误判的）。
+    if [[ -f "$HOME/$JOB.out" ]]; then
+        echo
+        echo "=== $JOB 最后一次运行的心跳（$HOME/$JOB.out 末 3 行）==="
+        tail -3 "$HOME/$JOB.out"
+    fi
 fi
 
 echo

@@ -338,25 +338,26 @@ class TestCountByListed(TestCase):
 
 
 class TestCountedTracks(TestCase):
-    def test_remix_and_derivative_tracks_do_not_count(self):
-        # REMIX 赛道整条不算；neta 里「原曲/作者」写法、以及标题写着「二次创作」的
-        # 二创不算；「其他部门」这类分组里原创曲与二创混在一起，要看曲目本身。
+    def test_remix_and_neta_tracks_do_not_count(self):
+        # REMIX 与 neta 整条不算（2026-11-03：neta 曲无论创建者是谁都不计入图表）；
+        # 其它赛道里标题写着「二次创作」的二创也不算。
         self.assertFalse(contributions.is_counted_track("REMIX", "Rolling Girl/郁P"))
+        self.assertFalse(contributions.is_counted_track("neta", "没带分组名的榜外曲"))
         self.assertFalse(contributions.is_counted_track("neta:其他部门", "某演奏/某人"))
+        self.assertFalse(contributions.is_counted_track("neta:未上榜歌曲", "榜外原创曲"))
         self.assertFalse(contributions.is_counted_track(
             "neta:其他部门", "发表自己爱吃的菜的龙#二次创作"))
-        self.assertFalse(contributions.is_counted_track("neta:未上榜歌曲", "某曲/某P"))
-        self.assertTrue(contributions.is_counted_track("neta:未上榜歌曲", "榜外原创曲"))
-        self.assertTrue(contributions.is_counted_track("TOP100", "榜内曲"))
-        self.assertTrue(contributions.is_counted_track("neta", "没带分组名的榜外曲"))
-        # 「其他部门」里的原创曲（Exhibition 这类不排名模块）照样算
-        self.assertTrue(contributions.is_counted_track("neta:其他部门", "魔法(Murata Shiyuu)"))
-        # 标题看不出来时，由页面正文判断（derivative_of）
         self.assertFalse(contributions.is_counted_track(
-            "neta:其他部门", "发表自己爱吃的菜的龙",
+            "neta:其他部门", "长音厨肺活量测试"))   # 原创 neta 曲也不计入
+        self.assertTrue(contributions.is_counted_track("TOP100", "榜内曲"))
+        self.assertTrue(contributions.is_counted_track("ROOKIE", "榜内曲"))
+        # 其它赛道里的二创仍然排除
+        self.assertFalse(contributions.is_counted_track("TOP100", "某曲/某P"))
+        self.assertFalse(contributions.is_counted_track(
+            "TOP100", "发表自己爱吃的菜的龙",
             lambda title: title == "发表自己爱吃的菜的龙"))
         self.assertTrue(contributions.is_counted_track(
-            "neta:其他部门", "魔法(Murata Shiyuu)", lambda title: False))
+            "TOP100", "魔法(Murata Shiyuu)", lambda title: False))
 
     @patch.object(contributions, "Page")
     def test_derivative_pages_are_read_once_and_cached(self, page_factory):
@@ -1764,6 +1765,150 @@ class SiteOrderBudgetTest(TestCase):
         self.assertEqual(run_once.call_args.args[-1], 0)
 
 
+class SiteOrderPassTest(TestCase):
+    """「谁先建条目」只填缓存、不改页面，得排在保存之后，而且要有时间上限。"""
+
+    def _sections(self, *titles):
+        return [Section("2025夏", "TOP100", [Entry(t, []) for t in titles])]
+
+    def test_the_cache_fill_stops_at_the_wall_clock_budget(self):
+        calls = []
+
+        def slow(*_args, **_kwargs):
+            calls.append(1)
+            return {}
+
+        with patch.object(contributions, "first_creator", side_effect=slow), \
+                patch.object(contributions, "site_order_stale", return_value=True), \
+                patch.object(contributions, "load_cache", return_value={}), \
+                patch.object(contributions.time, "time",
+                             side_effect=[0, 0, 999, 999, 999, 999]):
+            done = contributions.siteorder_pass(
+                None, self._sections("甲", "乙", "丙"), {}, None, {},
+                None, None, limit=0, seconds=10)
+        self.assertEqual(done, 1, "到点就停，别一条条问下去")
+        self.assertEqual(len(calls), 1)
+
+    def test_a_bare_siteorder_pass_has_no_budget(self):
+        calls = []
+
+        def counted(*_args, **_kwargs):
+            calls.append(1)
+            return {}
+
+        with patch.object(contributions, "first_creator", side_effect=counted), \
+                patch.object(contributions, "site_order_stale", return_value=True), \
+                patch.object(contributions, "load_cache", return_value={}):
+            done = contributions.siteorder_pass(
+                None, self._sections("甲", "乙"), {}, None, {}, None, None,
+                limit=0, seconds=0)
+        self.assertEqual(done, 2)
+
+    def test_already_compared_titles_do_not_use_up_the_limit(self):
+        compared = []
+
+        def counted(_site, title, *_args, **_kwargs):
+            compared.append(title)
+            return {}
+
+        with patch.object(contributions, "first_creator", side_effect=counted), \
+                patch.object(contributions, "site_order_stale",
+                             side_effect=lambda title, _cache: title != "甲"), \
+                patch.object(contributions, "load_cache", return_value={}):
+            done = contributions.siteorder_pass(
+                None, self._sections("甲", "乙"), {}, None, {}, None, None,
+                limit=1, seconds=0)
+        self.assertEqual(compared, ["乙"])
+        self.assertEqual(done, 1)
+
+
+class RunOnceOrderTest(TestCase):
+    """`siteorder` 只在填缓存，必须排在保存页面之后（10-22 三天没动的翻版）。"""
+
+    PAGE = (
+        "=== 2024春 ===\n"
+        "{{multicol}}\n"
+        "<poem>;TOP100 (0/1)\n"
+        "{| class=\"wikitable\"\n"
+        "|-\n"
+        "| [[Song|1]]\n"
+        "|}\n"
+        "{{Echart|data=<nowiki>{"
+        "\"legend\":{\"data\":[\"ボカコレ2024春\"]},"
+        "\"yAxis\":{\"data\":[\"Creator\"]},"
+        "\"series\":[{\"name\":\"ボカコレ2024春\",\"data\":[0]}]"
+        "}</nowiki>}}\n"
+    )
+
+    def _run(self, actions):
+        order = []
+
+        def save(*_args, **_kwargs):
+            order.append("save")
+            return True
+
+        def fill(*_args, **_kwargs):
+            order.append("siteorder")
+            return 0
+
+        with patch.object(contributions, "siteorder_pass", side_effect=fill), \
+                patch.object(contributions, "ensure_login"), \
+                patch.object(contributions, "save_page", side_effect=save), \
+                patch.object(contributions, "render_chart",
+                             side_effect=lambda text, *_a, **_kw:
+                             (text + "<!-- changed -->", {})), \
+                patch.object(contributions, "count_by_listed", return_value={}), \
+                patch.object(contributions, "load_cache", return_value={}), \
+                patch.object(contributions, "flush_caches"), \
+                patch.object(contributions, "DATA_DIR"), \
+                patch.object(contributions, "Page") as page_factory:
+            page_factory.return_value.text = self.PAGE
+            contributions.run_once(object(), set(actions), write=True)
+        return order
+
+    def test_the_cache_fill_runs_after_the_save(self):
+        self.assertEqual(self._run({"stats", "siteorder"}), ["save", "siteorder"])
+
+    def test_a_report_only_run_does_not_save(self):
+        self.assertNotIn("save", self._run({"siteorder"}))
+
+
+class MoegirlBreakerTest(TestCase):
+    """镜像站连着失败就本轮断路，别一条条去撞 30 秒超时。"""
+
+    def setUp(self):
+        contributions.MOEGIRL_FAILURES = 0
+        self.addCleanup(setattr, contributions, "MOEGIRL_FAILURES", 0)
+
+    def test_repeated_failures_stop_the_requests(self):
+        with patch.object(contributions.urllib.request, "urlopen",
+                          side_effect=OSError("boom")) as urlopen, \
+                patch.object(contributions.time, "sleep"):
+            for _ in range(contributions.MOEGIRL_FAILURE_LIMIT):
+                self.assertIsNone(contributions.moegirl_api({"action": "query"}))
+            attempts = urlopen.call_count
+            self.assertIsNone(contributions.moegirl_api({"action": "query"}))
+        self.assertEqual(urlopen.call_count, attempts, "断路后不该再请求")
+        self.assertGreaterEqual(attempts, contributions.MOEGIRL_FAILURE_LIMIT)
+
+    def test_a_success_resets_the_counter(self):
+        good = Mock()
+        good.__enter__ = Mock(return_value=good)
+        good.__exit__ = Mock(return_value=False)
+        good.read = Mock(return_value=b'{"query": {}}')
+        with patch.object(contributions.urllib.request, "urlopen",
+                          side_effect=OSError("boom")), \
+                patch.object(contributions.time, "sleep"):
+            contributions.moegirl_api({"action": "query"})
+        self.assertEqual(contributions.MOEGIRL_FAILURES, 1)
+
+        with patch.object(contributions.urllib.request, "urlopen", return_value=good), \
+                patch.object(contributions.json, "load", return_value={"query": {}}):
+            self.assertEqual(contributions.moegirl_api({"action": "query"}),
+                             {"query": {}})
+        self.assertEqual(contributions.MOEGIRL_FAILURES, 0)
+
+
 class CreatorOnlyCellTest(TestCase):
     """多色格子 = 创建者 + 重要贡献者：图表只记创建者，另一份收回到 demoted。"""
 
@@ -1936,6 +2081,71 @@ class ChartOrderTest(TestCase):
             text = updated
             parsed = json.loads(contributions.CHART_RE.search(text).group(2))
             self.assertEqual(parsed["series"][0]["data"], [expected])
+
+    def test_an_excluded_track_is_subtracted_only_down_to_the_computed_number(self):
+        # neta/二创不再计入：页面 4 = 算出来 3 + 多记的 1 → 降到 3 就停，
+        # 第二轮页面已经是 3，不再减（防止已经减过还要再减一遍）。
+        sections = [Section("2025夏", "TOP100", [])]
+        counts = {"2025夏": {"某人": 3}}
+        text = self._chart(["某人"], [4])
+        for expected in (3, 3):
+            updated, _ = contributions.render_chart(
+                text, sections, Legend(), counts,
+                excluded={"2025夏": {"某人": 1}})
+            text = updated
+            parsed = json.loads(contributions.CHART_RE.search(text).group(2))
+            self.assertEqual(parsed["series"][0]["data"], [expected])
+
+    def test_an_excluded_track_leaves_the_manual_number_above_it_alone(self):
+        # 页面 9 = 算出来 3 + 站外记账 5 + 多记的 1：只减那 1，人工的 5 不许啃掉
+        sections = [Section("2025夏", "TOP100", [])]
+        text = self._chart(["某人"], [9])
+        updated, _ = contributions.render_chart(
+            text, sections, Legend(), {"2025夏": {"某人": 3}},
+            excluded={"2025夏": {"某人": 1}})
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        self.assertEqual(parsed["series"][0]["data"], [8])
+
+
+class NetaExclusionTest(TestCase):
+    """neta 赛道的曲目一律不计入图表（2026-11-03 的规则）。"""
+
+    @staticmethod
+    def _template(sections):
+        return lambda _season: sections
+
+    @staticmethod
+    def _all_exist(_site, titles, exists, *_args):
+        """batch_exists 的替身：把批量查到的标题都标成「页面存在」。"""
+        for title in titles:
+            exists[title] = True
+
+    def test_a_neta_track_is_never_credited_to_its_creator(self):
+        # 多色格子 + neta：以前会记给创建者，现在应当既不记给谁、又进 excluded
+        colour = "#111111"
+        sections = [Section("2024冬", "TOP100", []),
+                    Section("2024冬", "neta", [Entry("长音厨肺活量测试", [colour])])]
+        legend = Legend(colour_to_name={colour: "创建者"},
+                        name_to_colour={"创建者": colour})
+        template = {"neta": {1: "长音厨肺活量测试"}}
+        excluded = {}
+        with patch.object(contributions, "batch_exists", side_effect=self._all_exist), \
+                patch.object(contributions, "page_exists", return_value=True), \
+                patch.object(contributions, "batch_creators"), \
+                patch.object(contributions, "page_credits_detail",
+                             return_value=("创建者", "创建者", "local")):
+            counts = count_by_listed(
+                FakeSite(), sections, legend, {}, excluded=excluded,
+                songs_of=self._template(
+                    {t for k, ranks in template.items() for t in ranks.values()
+                     if contributions.is_counted_track(k, t)}),
+                excluded_of=self._template(
+                    {t for k, ranks in template.items() for t in ranks.values()
+                     if not contributions.is_counted_track(k, t)}))
+        self.assertFalse(counts["2024冬"])
+        self.assertEqual(sum(excluded["2024冬"].values()), 1)
+        self.assertEqual(excluded["2024冬"][colour], 1)
+        self.assertEqual(excluded["2024冬"][colour], 1)
 
 
 class MultiColourReportTest(TestCase):

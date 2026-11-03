@@ -60,10 +60,10 @@ The bot can:
   migration, ``recredit``, because re-applying the delta every hour would keep
   growing the number; the non-creator colours of a multi-colour cell; and
   entries whose credited user provably created the article *after* the other
-  site did (see below).  Every subtraction stops at the computed number
-  (``previous = max(computed, previous - removed - taken_back)``), so a number
-  that was already taken back is not taken again on the next run and the
-  off-wiki bookkeeping is never eaten away.
+  site did (see below).  Every subtraction first checks that the credit is still
+  on the page (``page − computed ≥ 該格應扣數``) and remembers what it already
+  took per cell (``REMOVED_CACHE``), so the same credit is never taken twice and
+  the off-wiki bookkeeping is not eaten away run after run.
   「最先创建者」: 贡献列表的创建者取萌娘百科与 Vocawiki **哪边先建条目**就取
   哪边的创建者 (``first_creator``).  An imported revision already proves Moegirl
   came first, so the Moegirl creator is used as is.  A locally written page is
@@ -167,6 +167,8 @@ VOCA_NAMES_CACHE = DATA_DIR / "vocaloid_collection_songnames.pickle"
 MOEGIRL_SONG_CACHE = DATA_DIR / "vocaloid_collection_moesongs.pickle"
 # 「谁先建条目」的结论（萌百 vs voca 首版时间比出来的），跑一遍就落盘
 SITE_ORDER_CACHE = DATA_DIR / "vocaloid_collection_site_order.pickle"
+# 图表里「这笔账已经扣过多少」：跨轮次记账，防止把同一笔排除扣两遍
+REMOVED_CACHE = DATA_DIR / "vocaloid_collection_removed.pickle"
 VOCA_NAMES_VERSION = 2      # 歌名拆模板（{{ruby|…}}）后要重取
 MOEGIRL_SONG_VERSION = 2    # 跟重定向 + 带上「最旧一版作者」，旧缓存要重取
 SITE_ORDER_VERSION = 2      # 结论口径变了（认不出创建者不下调、核对表补条目）
@@ -1571,8 +1573,14 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
                  excluded: Optional[Dict[str, Counter]] = None,
                  gained: Optional[Dict[str, Counter]] = None,
                  base_text: Optional[str] = None,
-                 demoted: Optional[Dict[str, Counter]] = None
+                 demoted: Optional[Dict[str, Counter]] = None,
+                 applied: Optional[Dict[str, int]] = None
                  ) -> Tuple[str, dict]:
+    """重算 {{Echart}}；``applied`` 记录「每一格已经扣过多少」（跨轮次，防重复扣）。
+
+    返回 ``(新页面文本, 图表 dict)``。``applied`` 会被就地更新：本轮结算过的格子
+    写进 ``"赛季|用户" -> 已扣数``，由调用方落盘。
+    """
     match = CHART_RE.search(text)
     if not match:
         raise RuntimeError("未找到 {{Echart}} - 页面结构可能已改变")
@@ -1666,19 +1674,40 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     users += [u for u in totals
               if totals[u] > CHART_NEW_USER_THRESHOLD and u not in users]
 
+    # 「已经扣过的不再扣」：removed / taken_back 是「这个人总共有这么多条该被排除」，
+    # 不是「这一轮要扣多少」。页面上的数字一旦不再比 computed 高（或者已经扣过一次），
+    # 就说明这笔账早已结清，绝不能再从人工记账的数字里扣一遍。
+    withdrawn: Dict[Tuple[str, str], int] = {}
+    settled: Dict[str, int] = {}
+    for season, label in zip(seasons, labels):
+        for user in set(removed.get(season, {})) | set(taken_back.get(season, {})):
+            total = (removed.get(season, {}).get(user, 0)
+                     + taken_back.get(season, {}).get(user, 0))
+            if not total:
+                continue
+            key = f"{season}|{user}"
+            already = int((applied or {}).get(key, 0))
+            page_value = kept.get(label, {}).get(user, 0)
+            computed = per_season[season].get(user, 0)
+            outstanding = max(0, total - already)
+            settled[key] = total
+            if not outstanding or page_value <= computed:
+                continue
+            if page_value - computed < outstanding:
+                # 页面上留着的余量比这笔账还少：说明早扣过了（或本来就没人记过），
+                # 再扣就会啃到站外记账的人工数字。
+                continue
+            withdrawn[(season, user)] = outstanding
+
     def previous_of(label: str, season: str, user: str) -> int:
         """上一版图表里的数字，扣掉机器人不再计入的、加上改归到这一格的。
 
-        ``removed`` / ``taken_back`` 都是**每轮从当前页面重算**的（不是累加），
-        所以只要页面数字已经不高于 ``computed`` 就说明早扣过了，别一小时再啃一块：
-        两者合起来只扣到 ``computed`` 为止。页面里站外记账的人工数字因此不会被啃掉。
+        扣多少由 ``withdrawn`` 决定（见上），所以同一笔账只会扣一次。
         """
         previous = kept.get(label, {}).get(user, 0)
         previous += adjustments.get(season, {}).get(user, 0)
         previous += added.get(season, {}).get(user, 0)
-        lower = removed.get(season, {}).get(user, 0) + taken_back.get(season, {}).get(user, 0)
-        if lower:
-            previous = max(per_season[season].get(user, 0), previous - lower)
+        previous -= withdrawn.get((season, user), 0)
         return max(0, previous)
 
     def chart_total(user: str) -> int:
@@ -1749,6 +1778,9 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
 
     chart["legend"]["data"] = labels
     chart["yAxis"]["data"] = users
+    if applied is not None:
+        # 记下每格「这笔账到此为止」：扣过的、确认不需要再扣的都算结清。
+        applied.update(settled)
     return text[:match.start(2)] + updated + text[match.end(2):], chart
 
 
@@ -3110,12 +3142,14 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     order_cache = load_cache(SITE_ORDER_CACHE)
     song_store = load_cache(MOEGIRL_SONG_CACHE)
     names_store = load_cache(VOCA_NAMES_CACHE)
+    removed_applied = load_cache(REMOVED_CACHE)
     # 登记给 flush_caches()：慢查询途中也要落盘，别把这一轮问到的全丢在内存里。
     _CACHE_REGISTRY[:] = [(MOEGIRL_CACHE, moe_cache), (CREATOR_CACHE, cache),
                           (DERIVATIVE_CACHE, derivative_cache),
                           (SITE_ORDER_CACHE, order_cache),
                           (MOEGIRL_SONG_CACHE, song_store),
-                          (VOCA_NAMES_CACHE, names_store)]
+                          (VOCA_NAMES_CACHE, names_store),
+                          (REMOVED_CACHE, removed_applied)]
 
     def derivative_of(title: str) -> bool:
         """这一页是不是二创（标题看不出来时读页面正文，结果进缓存）。"""
@@ -3251,7 +3285,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
                                   decisions=decisions)
                   if basis == "listed" else count_by_window(site, sections))
         text, _ = render_chart(text, sections, legend, counts, excluded,
-                               demoted=demoted)
+                               demoted=demoted, applied=removed_applied)
         dropped = sum(sum(entry.values()) for entry in excluded.values())
         lowered = sum(sum(entry.values()) for entry in demoted.values())
         pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/neta/二创 {dropped} 处，"

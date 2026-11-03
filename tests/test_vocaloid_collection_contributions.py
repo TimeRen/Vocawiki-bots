@@ -2106,6 +2106,22 @@ class ChartOrderTest(TestCase):
         parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
         self.assertEqual(parsed["series"][0]["data"], [8])
 
+    def test_the_ledger_keeps_the_same_credit_from_being_taken_twice(self):
+        # 页面 9 = 算出来 3 + 人工 5 + 多记的 1；扣一次之后记进 applied，
+        # 下一轮（只剩人工那 5）不能再扣一遍，否则每小时都会啃掉 1。
+        sections = [Section("2025夏", "TOP100", [])]
+        counts = {"2025夏": {"某人": 3}}
+        applied = {}
+        text = self._chart(["某人"], [9])
+        for expected in (8, 8, 8):
+            updated, _ = contributions.render_chart(
+                text, sections, Legend(), counts,
+                excluded={"2025夏": {"某人": 1}}, applied=applied)
+            text = updated
+            parsed = json.loads(contributions.CHART_RE.search(text).group(2))
+            self.assertEqual(parsed["series"][0]["data"], [expected])
+        self.assertEqual(applied["2025夏|某人"], 1)
+
 
 class NetaExclusionTest(TestCase):
     """neta 赛道的曲目一律不计入图表（2026-11-03 的规则）。"""

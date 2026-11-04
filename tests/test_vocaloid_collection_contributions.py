@@ -2064,8 +2064,10 @@ class RevertRespectTest(TestCase):
                 patch.object(contributions, "count_by_listed", return_value={}), \
                 patch.object(contributions, "record_reverts", return_value=0), \
                 patch.object(contributions, "load_cache",
-                             return_value={"rejected": [
-                                 {"old": [], "new": ["<!-- changed -->"]}]}), \
+                             return_value={"version": contributions.REMOVED_VERSION,
+                                           "rejected": [
+                                               {"old": [],
+                                                "new": ["<!-- changed -->"]}]}), \
                 patch.object(contributions, "flush_caches"), \
                 patch.object(contributions, "DATA_DIR"), \
                 patch.object(contributions, "Page") as page_factory:
@@ -2304,6 +2306,17 @@ class ChartOrderTest(TestCase):
             excluded={"2025夏": {"某人": 1}})
         parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
         self.assertEqual(parsed["series"][0]["data"], [8])
+
+    def test_a_suppressed_deduction_is_not_recorded_as_applied(self):
+        # 页面已经不比 computed 高（早扣过或本来没记过）：这一轮不扣，也不能写进账本，
+        # 否则这一格以后就永久停在偏高的数上。
+        sections = [Section("2025夏", "TOP100", [])]
+        applied = {}
+        text = self._chart(["某人"], [4])
+        contributions.render_chart(
+            text, sections, Legend(), {"2025夏": {"某人": 4}},
+            excluded={"2025夏": {"某人": 1}}, applied=applied)
+        self.assertEqual(applied, {})
 
     def test_the_ledger_keeps_the_same_credit_from_being_taken_twice(self):
         # 页面 9 = 算出来 3 + 人工 5 + 多记的 1；扣一次之后记进 applied，

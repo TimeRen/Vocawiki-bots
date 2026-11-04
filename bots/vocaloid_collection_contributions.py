@@ -179,6 +179,7 @@ MOEGIRL_SONG_CACHE = DATA_DIR / "vocaloid_collection_moesongs.pickle"
 SITE_ORDER_CACHE = DATA_DIR / "vocaloid_collection_site_order.pickle"
 # 图表里「这笔账已经扣过多少」：跨轮次记账，防止把同一笔排除扣两遍
 REMOVED_CACHE = DATA_DIR / "vocaloid_collection_removed.pickle"
+REMOVED_VERSION = 2                 # 账本口径变了（只记真减掉的）→ 旧账本作废重来
 # 人工撤销过的改动：机器人算出来一模一样时不再写回去（见 record_reverts）
 REVERTS_CACHE = DATA_DIR / "vocaloid_collection_reverts.pickle"
 REVERTS_TTL = 180 * 24 * 3600       # 撤销记录多久后清理（秒）
@@ -1701,10 +1702,10 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
               if totals[u] > CHART_NEW_USER_THRESHOLD and u not in users]
 
     # 「已经扣过的不再扣」：removed / taken_back 是「这个人总共有这么多条该被排除」，
-    # 不是「这一轮要扣多少」。页面上的数字一旦不再比 computed 高（或者已经扣过一次），
-    # 就说明这笔账早已结清，绝不能再从人工记账的数字里扣一遍。
+    # 不是「这一轮要扣多少」。只有**真扣过**的数额才记进 ``applied``；被守卫挡下来的
+    # （页面余量本来就不够，说明早扣过或本来没记过）只这一轮不扣，不写进账本——
+    # 否则「没扣却记成扣过」会让这一格永久停在偏高的数上。
     withdrawn: Dict[Tuple[str, str], int] = {}
-    settled: Dict[str, int] = {}
     for season, label in zip(seasons, labels):
         for user in set(removed.get(season, {})) | set(taken_back.get(season, {})):
             total = (removed.get(season, {}).get(user, 0)
@@ -1716,7 +1717,6 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
             page_value = kept.get(label, {}).get(user, 0)
             computed = per_season[season].get(user, 0)
             outstanding = max(0, total - already)
-            settled[key] = total
             if not outstanding or page_value <= computed:
                 continue
             if page_value - computed < outstanding:
@@ -1813,8 +1813,10 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     chart["legend"]["data"] = labels
     chart["yAxis"]["data"] = users
     if applied is not None:
-        # 记下每格「这笔账到此为止」：扣过的、确认不需要再扣的都算结清。
-        applied.update(settled)
+        # 只把**这一轮真减掉的**记进账本，下一次同样的排除就不再减。
+        for (season, user), amount in withdrawn.items():
+            key = f"{season}|{user}"
+            applied[key] = int(applied.get(key, 0)) + amount
     return text[:match.start(2)] + updated + text[match.end(2):], chart
 
 
@@ -3417,6 +3419,11 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     song_store = load_cache(MOEGIRL_SONG_CACHE)
     names_store = load_cache(VOCA_NAMES_CACHE)
     removed_applied = load_cache(REMOVED_CACHE)
+    if removed_applied.get("version") != REMOVED_VERSION:
+        # 旧账本把「被守卫挡下来、其实没扣」的格子也记成了已扣，会让那些格子永久停在
+        # 偏高的数上；口径变了就整份作废，按新口径重新记。
+        removed_applied.clear()
+        removed_applied["version"] = REMOVED_VERSION
     reverts = load_cache(REVERTS_CACHE)
     # 登记给 flush_caches()：慢查询途中也要落盘，别把这一轮问到的全丢在内存里。
     _CACHE_REGISTRY[:] = [(MOEGIRL_CACHE, moe_cache), (CREATOR_CACHE, cache),

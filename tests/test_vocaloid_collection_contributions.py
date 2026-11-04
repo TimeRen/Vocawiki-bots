@@ -1763,6 +1763,13 @@ class SiteOrderBudgetTest(TestCase):
         contributions.main()
         self.assertEqual(run_once.call_args.args[-1], 0)
 
+    @patch("sys.argv", ["vocaloid_collection_contributions.py", "--forget-reverts"])
+    @patch.object(contributions.pywikibot, "Site")
+    @patch.object(contributions, "run_once")
+    def test_forget_reverts_alone_only_clears_the_record(self, run_once, site_factory):
+        contributions.main()
+        self.assertEqual(run_once.call_args.args[1], {"forget_reverts"})
+
 
 class SiteOrderPassTest(TestCase):
     """「谁先建条目」只填缓存、不改页面，得排在保存之后，而且要有时间上限。"""
@@ -1872,8 +1879,201 @@ class RunOnceOrderTest(TestCase):
         self.assertNotIn("save", self._run({"siteorder"}))
 
 
-class MoegirlBreakerTest(TestCase):
-    """镜像站连着失败就本轮断路，别一条条去撞 30 秒超时。"""
+class RevertRespectTest(TestCase):
+    """人工把机器人的改动撤掉之后，机器人不许再写回去（278253/278258/278259 那次）。"""
+
+    ORIGINAL = "line one\nline two\nline three\n"
+    BOT_TEXT = "line one\nline two changed\nline three\n"
+
+    def test_a_reverted_change_is_not_written_again(self):
+        rejected = [{"old": ["line two"], "new": ["line two changed"]}]
+        text, skipped = contributions.apply_reverts(self.ORIGINAL, self.BOT_TEXT,
+                                                    rejected)
+        self.assertEqual(skipped, 1)
+        self.assertEqual(text, self.ORIGINAL)
+
+    def test_new_changes_still_go_through(self):
+        rejected = [{"old": ["line two"], "new": ["line two changed"]}]
+        computed = "line one\nline two changed\nline three\nline four\n"
+        text, skipped = contributions.apply_reverts(self.ORIGINAL, computed, rejected)
+        self.assertEqual(skipped, 1)
+        self.assertEqual(text, "line one\nline two\nline three\nline four\n")
+
+    def test_a_reverted_deletion_is_restored(self):
+        # 机器人删掉了一行，人工撤了：那一行要加回来
+        rejected = [{"old": ["gone"], "new": []}]
+        text, skipped = contributions.apply_reverts("a\ngone\nb\n", "a\nb\n", rejected)
+        self.assertEqual(skipped, 1)
+        self.assertEqual(text, "a\ngone\nb\n")
+
+    def test_a_reverted_insertion_is_dropped(self):
+        rejected = [{"old": [], "new": ["extra"]}]
+        text, skipped = contributions.apply_reverts("a\nb\n", "a\nextra\nb\n", rejected)
+        self.assertEqual(skipped, 1)
+        self.assertEqual(text, "a\nb\n")
+
+    def test_nothing_is_skipped_without_a_record(self):
+        text, skipped = contributions.apply_reverts(self.ORIGINAL, self.BOT_TEXT, [])
+        self.assertEqual((text, skipped), (self.BOT_TEXT, 0))
+
+    def test_a_differently_written_change_is_still_written(self):
+        # 人工若把那一格改成别的写法，机器人算出来的新值与原被拒块不同 → 照常写
+        rejected = [{"old": ["line two"], "new": ["line two changed"]}]
+        computed = "line one\nline two (edited by human)\nline three\n"
+        text, skipped = contributions.apply_reverts(
+            "line one\nline two (edited by human)\nline three\n", computed, rejected)
+        self.assertEqual(skipped, 0)
+
+    def test_a_restored_chart_value_becomes_a_floor(self):
+        """人工还原回去的数字是地板：机器人不再把它压低（278266 又压低就是这毛病）。"""
+        sections = [Section("2025夏", "TOP100", [])]
+        text = ChartOrderTest._chart(["某人"], [4])
+        updated, _ = contributions.render_chart(
+            text, sections, Legend(), {"2025夏": {"某人": 3}},
+            excluded={"2025夏": {"某人": 1}},
+            floors={"2025夏|某人": 4})
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        self.assertEqual(parsed["series"][0]["data"], [4])
+
+    def test_the_floor_does_not_block_a_raise(self):
+        sections = [Section("2025夏", "TOP100", [])]
+        text = ChartOrderTest._chart(["某人"], [4])
+        updated, _ = contributions.render_chart(
+            text, sections, Legend(), {"2025夏": {"某人": 9}},
+            floors={"2025夏|某人": 4})
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        self.assertEqual(parsed["series"][0]["data"], [9])
+
+    def test_record_floors_only_keeps_the_cells_the_human_raised(self):
+        bot_text = ChartOrderTest._chart(["甲", "乙"], [0, 5])
+        human_text = ChartOrderTest._chart(["甲", "乙"], [1, 5])
+        store = {}
+        added = contributions.record_floors(store, bot_text, human_text)
+        self.assertEqual(added, 1)
+        self.assertEqual(store["floors"], {"2025夏|甲": 1})
+
+    def test_a_reverted_row_order_is_not_reshuffled_again(self):
+        # 277990 撤销 277973 就是「别排行顺序」：记下之后渲染不再重排
+        sections = [Section("2025夏", "TOP100", [])]
+        text = ChartOrderTest._chart(["甲", "乙"], [5, 6])
+        updated, _ = contributions.render_chart(
+            text, sections, Legend(), {"2025夏": {"甲": 9, "乙": 6}},
+            keep_order=True)
+        parsed = json.loads(contributions.CHART_RE.search(updated).group(2))
+        self.assertEqual(parsed["yAxis"]["data"], ["甲", "乙"], "行顺序保持不动")
+        self.assertEqual(parsed["series"][0]["data"], [9, 6])
+
+    def test_a_reverted_row_order_is_recorded(self):
+        store = {}
+        revisions = [
+            {"revid": 277990, "parentid": 277973, "user": "人间百态",
+             "comment": "撤销[[Special:Diff/277973|277973]]"},
+            {"revid": 277973, "parentid": 277963, "user": "Renjian-bot",
+             "comment": contributions.DEFAULT_SUMMARY},
+        ]
+        texts = {277963: ChartOrderTest._chart(["甲", "乙"], [1, 5]),
+                 277973: ChartOrderTest._chart(["乙", "甲"], [5, 1]),
+                 277990: ChartOrderTest._chart(["甲", "乙"], [1, 5])}
+        with patch.object(contributions, "recent_revisions", return_value=revisions), \
+                patch.object(contributions, "revision_text",
+                             side_effect=lambda _site, revid: texts[revid]):
+            contributions.record_reverts(None, "页面", store, contributions.BOT_USERS)
+        self.assertTrue(store["keep_row_order"])
+
+    def test_a_value_only_revert_does_not_freeze_the_order(self):
+        store = {}
+        revisions = [
+            {"revid": 278258, "parentid": 278253, "user": "人间百态",
+             "comment": "撤销[[Special:Diff/278253|278253]]"},
+            {"revid": 278253, "parentid": 278226, "user": "Renjian-bot",
+             "comment": contributions.DEFAULT_SUMMARY},
+        ]
+        texts = {278226: ChartOrderTest._chart(["甲"], [1]),
+                 278253: ChartOrderTest._chart(["甲"], [0]),
+                 278258: ChartOrderTest._chart(["甲"], [1])}
+        with patch.object(contributions, "recent_revisions", return_value=revisions), \
+                patch.object(contributions, "revision_text",
+                             side_effect=lambda _site, revid: texts[revid]):
+            contributions.record_reverts(None, "页面", store, contributions.BOT_USERS)
+        self.assertNotIn("keep_row_order", store)
+        self.assertEqual(store["floors"], {"2025夏|甲": 1})
+
+    def test_a_revert_is_detected_from_the_comment(self):
+        revisions = [
+            {"revid": 278259, "parentid": 278258, "user": "Renjian-bot",
+             "comment": contributions.DEFAULT_SUMMARY},
+            {"revid": 278258, "parentid": 278253, "user": "人间百态",
+             "comment": "撤销[[Special:Contributions/Renjian-bot|Renjian-bot]]"
+                        "的修订版本[[Special:Diff/278253|278253]]"},
+            {"revid": 278253, "parentid": 278226, "user": "Renjian-bot",
+             "comment": contributions.DEFAULT_SUMMARY},
+        ]
+        pairs = contributions.reverted_pairs(revisions, contributions.BOT_USERS)
+        self.assertEqual([(bot["revid"], rev["revid"]) for bot, rev in pairs],
+                         [(278253, 278258)])
+
+    def test_a_manual_undo_without_comment_is_detected(self):
+        # 没有摘要的整笔回退：parentid 指回机器人那一版的 parentid
+        revisions = [
+            {"revid": 300, "parentid": 200, "user": "某人", "comment": ""},
+            {"revid": 201, "parentid": 200, "user": "Renjian-bot",
+             "comment": contributions.DEFAULT_SUMMARY},
+        ]
+        pairs = contributions.reverted_pairs(revisions, contributions.BOT_USERS)
+        self.assertEqual([(bot["revid"], rev["revid"]) for bot, rev in pairs],
+                         [(201, 300)])
+
+    def test_a_human_edit_is_not_a_revert(self):
+        revisions = [
+            {"revid": 300, "parentid": 201, "user": "某人", "comment": "补充备注"},
+            {"revid": 201, "parentid": 200, "user": "Renjian-bot",
+             "comment": contributions.DEFAULT_SUMMARY},
+        ]
+        self.assertEqual(contributions.reverted_pairs(revisions,
+                                                      contributions.BOT_USERS), [])
+
+    def test_a_revert_is_recorded_once(self):
+        store = {}
+        revisions = [
+            {"revid": 278258, "parentid": 278253, "user": "人间百态",
+             "comment": "撤销[[Special:Diff/278253|278253]]"},
+            {"revid": 278253, "parentid": 278226, "user": "Renjian-bot",
+             "comment": contributions.DEFAULT_SUMMARY},
+        ]
+        texts = {278226: self.ORIGINAL, 278253: self.BOT_TEXT}
+        with patch.object(contributions, "recent_revisions", return_value=revisions), \
+                patch.object(contributions, "revision_text",
+                             side_effect=lambda _site, revid: texts[revid]):
+            first = contributions.record_reverts(None, "页面", store,
+                                                 contributions.BOT_USERS)
+            second = contributions.record_reverts(None, "页面", store,
+                                                  contributions.BOT_USERS)
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 0, "同一笔撤销不能记两遍")
+        self.assertEqual(store["rejected"],
+                         [{"old": ["line two"], "new": ["line two changed"]}])
+        self.assertIn("278258", store["recorded"])
+
+    def test_run_once_skips_the_save_when_only_reverted_changes_remain(self):
+        page_text = RunOnceOrderTest.PAGE
+        with patch.object(contributions, "ensure_login"), \
+                patch.object(contributions, "save_page") as save, \
+                patch.object(contributions, "render_chart",
+                             side_effect=lambda text, *_a, **_kw:
+                             (text + "<!-- changed -->", {})), \
+                patch.object(contributions, "count_by_listed", return_value={}), \
+                patch.object(contributions, "record_reverts", return_value=0), \
+                patch.object(contributions, "load_cache",
+                             return_value={"rejected": [
+                                 {"old": [], "new": ["<!-- changed -->"]}]}), \
+                patch.object(contributions, "flush_caches"), \
+                patch.object(contributions, "DATA_DIR"), \
+                patch.object(contributions, "Page") as page_factory:
+            page_factory.return_value.text = page_text
+            changed = contributions.run_once(object(), {"stats"}, write=True)
+        self.assertFalse(changed)
+        save.assert_not_called()
+
 
     def setUp(self):
         contributions.MOEGIRL_FAILURES = 0

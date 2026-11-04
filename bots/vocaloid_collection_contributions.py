@@ -78,6 +78,12 @@ The bot can:
   turns out to be earlier the entry is taken back from the voca creator and
   given to the Moegirl one - the only case in which a computed number may drop
   for a reason other than the two above.
+  Human reverts win: every run first reads the last few revisions, recognises a
+  revision of ours that a person undid (``record_reverts``), and then refuses to
+  write that same change again (``apply_reverts``), treats the numbers the person
+  restored as a floor for the chart (``floors``), and stops re-sorting the rows
+  if the reverted change had touched the row order. Without this the bot and the
+  person would keep overwriting each other (278253 → 278258 → 278259 → 278266).
 * ``report``  - list anomalies (coloured but page missing / page exists but
   not coloured), plus the multi-colour cells (who is the creator, who is only an
   important contributor) and the entries whose credit moved to the other side.
@@ -101,6 +107,10 @@ The bot can:
   作者」记进图表的那些数字减掉，并加到源站真正的创建者那一格。图表本身只把数字
   往上抬，所以这件事不能每轮都做——必须以某个基准版为参照跑一次，否则每跑一轮
   都会再加一遍。之后每小时的任务会照旧把结果保持住。
+* ``forget_reverts`` - 清空「人工撤销过哪些改动」的记录（``--forget-reverts``）。
+  平时不用给：机器人自己会从版本历史里认出被撤销的改动，并把人工还原回去的数字
+  当成地板（``record_reverts`` / ``apply_reverts`` / ``render_chart`` 的 ``floors``）；
+  被撤销过行顺序的话以后也不再重排。详见 ``deploy/toolforge/README.md``。
 * ``all``      - run all maintenance actions once. Toolforge and GitHub Actions
   schedule this full pass hourly; it does not poll ``list=recentchanges``, whose
   results can omit entries that have not yet appeared in the maintained list.
@@ -169,6 +179,11 @@ MOEGIRL_SONG_CACHE = DATA_DIR / "vocaloid_collection_moesongs.pickle"
 SITE_ORDER_CACHE = DATA_DIR / "vocaloid_collection_site_order.pickle"
 # 图表里「这笔账已经扣过多少」：跨轮次记账，防止把同一笔排除扣两遍
 REMOVED_CACHE = DATA_DIR / "vocaloid_collection_removed.pickle"
+# 人工撤销过的改动：机器人算出来一模一样时不再写回去（见 record_reverts）
+REVERTS_CACHE = DATA_DIR / "vocaloid_collection_reverts.pickle"
+REVERTS_TTL = 180 * 24 * 3600       # 撤销记录多久后清理（秒）
+REVERTS_MAX_BLOCKS = 300            # 最多记这么多块被拒改动，防止文件越滚越大
+REVERTS_REV_LIMIT = 12              # 往前看多少版找「我们的版本被撤销」
 VOCA_NAMES_VERSION = 2      # 歌名拆模板（{{ruby|…}}）后要重取
 MOEGIRL_SONG_VERSION = 2    # 跟重定向 + 带上「最旧一版作者」，旧缓存要重取
 SITE_ORDER_VERSION = 2      # 结论口径变了（认不出创建者不下调、核对表补条目）
@@ -1581,12 +1596,16 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
                  gained: Optional[Dict[str, Counter]] = None,
                  base_text: Optional[str] = None,
                  demoted: Optional[Dict[str, Counter]] = None,
-                 applied: Optional[Dict[str, int]] = None
+                 applied: Optional[Dict[str, int]] = None,
+                 floors: Optional[Dict[str, int]] = None,
+                 keep_order: bool = False
                  ) -> Tuple[str, dict]:
-    """重算 {{Echart}}；``applied`` 记录「每一格已经扣过多少」（跨轮次，防重复扣）。
+    """重算 {{Echart}}。
 
-    返回 ``(新页面文本, 图表 dict)``。``applied`` 会被就地更新：本轮结算过的格子
-    写进 ``"赛季|用户" -> 已扣数``，由调用方落盘。
+    ``applied`` 记录「每一格已经扣过多少」（跨轮次，防重复扣）；``floors`` 是
+    「人工还原过的数字」（``"赛季|用户" -> 值``），当作地板，机器人不再压到它下面；
+    ``keep_order`` 为真时保持页面原有的行顺序（有人撤销过行顺序调整）。
+    两个 dict 都会被就地更新，由调用方落盘。
     """
     match = CHART_RE.search(text)
     if not match:
@@ -1709,13 +1728,15 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     def previous_of(label: str, season: str, user: str) -> int:
         """上一版图表里的数字，扣掉机器人不再计入的、加上改归到这一格的。
 
-        扣多少由 ``withdrawn`` 决定（见上），所以同一笔账只会扣一次。
+        扣多少由 ``withdrawn`` 决定（见上），所以同一笔账只会扣一次；
+        ``floors`` 里记的「人工还原过的数字」是硬地板，机器人不再压到下面。
         """
         previous = kept.get(label, {}).get(user, 0)
         previous += adjustments.get(season, {}).get(user, 0)
         previous += added.get(season, {}).get(user, 0)
         previous -= withdrawn.get((season, user), 0)
-        return max(0, previous)
+        floor = (floors or {}).get(f"{season}|{user}", 0)
+        return max(0, previous, floor)
 
     def chart_total(user: str) -> int:
         """这一行在整张图上的合计（推不出来、只能沿用的人工数字也算）。"""
@@ -1730,16 +1751,22 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     # 按名字再排一次只是噪声，会把整条 yAxis 与全部数据点重写一遍（277973 那次
     # 就是这么被撤销的），真正该换的只有「被别人超过」的行。
     order = {user: index for index, user in enumerate(yaxis)}
-    existing_rows = [u for u in users if u in order]
-    fresh_rows = [u for u in users if u not in order]
-    existing_rows.sort(key=chart_total)
-    fresh_rows.sort(key=chart_total)
-    users = existing_rows + fresh_rows
-    moved = [u for index, u in enumerate(users)
-             if u in order and order[u] != index]
-    if moved:
-        pywikibot.output("统计: 行顺序随创建数调整: " + "、".join(
-            f"{u}({chart_total(u)})" for u in moved))
+    if keep_order:
+        # 有人撤销过「调整行顺序」（277990 撤销 277973）：从此保持页面原顺序，
+        # 只补新行。排序不承载信息，硬排只会跟人对刷。
+        users = [u for u in yaxis if u in users] + [u for u in users if u not in order]
+        pywikibot.output("统计: 人工撤销过行顺序调整，本轮保持页面原顺序")
+    else:
+        existing_rows = [u for u in users if u in order]
+        fresh_rows = [u for u in users if u not in order]
+        existing_rows.sort(key=chart_total)
+        fresh_rows.sort(key=chart_total)
+        users = existing_rows + fresh_rows
+        moved = [u for index, u in enumerate(users)
+                 if u in order and order[u] != index]
+        if moved:
+            pywikibot.output("统计: 行顺序随创建数调整: " + "、".join(
+                f"{u}({chart_total(u)})" for u in moved))
 
     separators = [raw[spans[i][1]:spans[i + 1][0]] for i in range(len(spans) - 1)]
     separator = separators[-1] if separators else ",\n\n"
@@ -2996,8 +3023,10 @@ def moegirl_report(site, sections: List[Section], legend: Legend,
 ALL_ACTIONS = ("siteorder", "entries", "counts", "colour", "stats", "report")
 # 不进 ``all``：萌娘百科是别人的 wiki，别让每小时一次的维护去敲它；
 # recredit 是一次性迁移，必须显式带着基准版本跑，见 ``recredit``。
-EXTRA_ACTIONS = ("moe", "recredit")
+EXTRA_ACTIONS = ("moe", "recredit", "forget_reverts")
 DEFAULT_SUMMARY = "机器人：自动维护贡献列表"
+# 我们自己的账号（历史里认出「这是机器人写的」用；摘要同样能认，见 is_bot_revision）
+BOT_USERS = {"Renjian-bot"}
 
 
 def ensure_login(site) -> None:
@@ -3071,6 +3100,245 @@ def save_page(page: Page, text: str, summary: Optional[str]) -> bool:
         return True
     except EditConflictError as exc:
         return _abandon_round(page, exc)
+
+
+def recent_revisions(site, title: str, limit: int = REVERTS_REV_LIMIT) -> List[dict]:
+    """最近几版（新的在前）：``revid / parentid / user / timestamp / comment``。
+
+    取不到（网络、权限）就返回空列表——「不知道」不能当成「没被撤销」而乱写。
+    """
+    try:
+        data = site.simple_request(action="query", prop="revisions", titles=title,
+                                   rvprop="ids|user|timestamp|comment",
+                                   rvlimit=str(limit), formatversion=2).submit()
+    except Exception as exc:  # noqa: BLE001
+        pywikibot.warning(f"读不到 {title} 的版本历史：{exc}")
+        return []
+    pages = data.get("query", {}).get("pages") or []
+    if not pages:
+        return []
+    return list(pages[0].get("revisions") or [])
+
+
+# 「撤销 278253」的写法：撤销/撤銷/Undo/回退 + Special:Diff 链接或裸版本号
+REVERT_RE = re.compile(
+    r"(?:撤销|撤銷|回退|还原|還原|revert|undid|undo).*?"
+    r"(?:Special:Diff/|oldid=|diff=)?(\d{3,})", re.I)
+
+
+def is_bot_revision(revision: dict, bot_users: Iterable[str] = ()) -> bool:
+    """这一版是不是我们自己的：摘要就是我们的，或作者是我们的账号。
+
+    摘要比账号更可靠：Toolforge 与 GitHub Actions 跑的是同一个账号，而干跑（没登录）
+    时也要认得出历史里的机器人版本。
+    """
+    comment = str(revision.get("comment") or "")
+    if comment.startswith(DEFAULT_SUMMARY):
+        return True
+    return str(revision.get("user") or "") in set(bot_users)
+
+
+def reverted_pairs(revisions: List[dict],
+                   bot_users: Iterable[str] = ()) -> List[Tuple[dict, dict]]:
+    """``[(我们的版本, 撤销它的人类版本)]``。
+
+    两种认法：
+    * 人类那版的摘要点名了我们的 revid（``撤销…[[Special:Diff/278253|278253]]``）；
+    * 人类那版的 ``parentid`` 等于我们那版的 ``parentid``——整笔回退但没写摘要。
+    """
+    pairs: List[Tuple[dict, dict]] = []
+    by_revid = {int(rev["revid"]): rev for rev in revisions}
+    for revision in revisions:
+        if is_bot_revision(revision, bot_users):
+            continue
+        comment = str(revision.get("comment") or "")
+        match = REVERT_RE.search(comment)
+        if match:
+            target = by_revid.get(int(match.group(1)))
+            if target is not None and is_bot_revision(target, bot_users):
+                pairs.append((target, revision))
+                continue
+        parent = revision.get("parentid")
+        if parent:
+            # parentid 相同 = 把那一版整笔退回：找 parentid 等于它、但更早的那一版
+            for other in revisions:
+                if (other is not revision
+                        and int(other.get("revid") or 0) != int(revision["revid"])
+                        and other.get("parentid") == parent
+                        and is_bot_revision(other, bot_users)):
+                    pairs.append((other, revision))
+                    break
+    return pairs
+
+
+def _change_blocks(before: str, after: str) -> List[Dict[str, List[str]]]:
+    """``before → after`` 改了哪几块：``[{"old": [...], "new": [...]}]``（行级）。"""
+    import difflib
+    matcher = difflib.SequenceMatcher(None, before.splitlines(), after.splitlines())
+    blocks: List[Dict[str, List[str]]] = []
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        blocks.append({"old": before.splitlines()[old_start:old_end],
+                       "new": after.splitlines()[new_start:new_end]})
+    return blocks
+
+
+def _normalise(lines: Iterable[str]) -> Tuple[str, ...]:
+    return tuple(line.strip() for line in lines)
+
+
+def chart_values(text: str) -> Dict[Tuple[str, str], int]:
+    """页面里 {{Echart}} 的每个格子：``{(赛季, 用户): 数字}``。没有图表就返回空。
+
+    「人工还原过的数字」要按格子记成地板——图表的 JSON 每季就是**一整行**，行级的
+    「块完全相同」根本对不上（整行数字都变了），只有按格子比才有意义。
+    """
+    match = CHART_RE.search(text or "")
+    if not match:
+        return {}
+    try:
+        chart = json.loads(match.group(2))
+    except ValueError:
+        return {}
+    axis = list((chart.get("yAxis") or {}).get("data") or [])
+    values: Dict[Tuple[str, str], int] = {}
+    for series in chart.get("series") or []:
+        label = str(series.get("name") or "")
+        season = label[len(CHART_SERIES_PREFIX):] if label.startswith(CHART_SERIES_PREFIX) \
+            else label
+        for user, value in zip(axis, series.get("data") or []):
+            try:
+                values[(season, user)] = int(value)
+            except (TypeError, ValueError):
+                continue
+    return values
+
+
+def chart_axis(text: str) -> List[str]:
+    """页面里 {{Echart}} 的行顺序（yAxis）；没有图表就返回空列表。"""
+    match = CHART_RE.search(text or "")
+    if not match:
+        return []
+    try:
+        chart = json.loads(match.group(2))
+    except ValueError:
+        return []
+    return [str(name) for name in (chart.get("yAxis") or {}).get("data") or []]
+
+
+def record_floors(store: Dict, bot_text: str, human_text: str) -> int:
+    """把「人工还原回去的数字」记成地板，返回记了几格。
+
+    只记**人工那一版比机器人那一版高**的格子：那些正是机器人压下去、人又抬回来的，
+    机器人不该再压第二次（278253 压低 → 278258 人抬回 → 278266 又压低就是这么来的）。
+    机器人自己抬高的格子不在此列，照旧生效。
+    """
+    before, after = chart_values(bot_text), chart_values(human_text)
+    floors: Dict[str, int] = store.setdefault("floors", {})
+    added = 0
+    for (season, user), value in after.items():
+        if value > before.get((season, user), 0):
+            key = f"{season}|{user}"
+            if floors.get(key, 0) < value:
+                floors[key] = value
+                added += 1
+    return added
+
+
+def record_reverts(site, title: str, store: Dict, bot_users: Iterable[str] = ()) -> int:
+    """把「人工撤销了机器人的哪几处改动」记进 ``store``，返回本次新记的处数。
+
+    记的是 ``我们的版本`` 相对它上一版改了什么（``_change_blocks``）：之后算出来的改动
+    只要跟这些块一模一样就不再写回去（``apply_reverts``），人工还原过的图表数字记成
+    地板（``record_floors``），被撤销过行顺序的话以后不再重排。同一笔撤销按撤销版本的
+    revid 去重，跑几轮都只记一次。
+    """
+    revisions = recent_revisions(site, title)
+    if not revisions:
+        return 0
+    recorded: Dict[str, float] = store.setdefault("recorded", {})
+    rejected: List[Dict[str, List[str]]] = store.setdefault("rejected", [])
+    new_blocks = 0
+    for bot_revision, revert_revision in reverted_pairs(revisions, bot_users):
+        key = str(revert_revision["revid"])
+        if key in recorded:
+            continue
+        parent = bot_revision.get("parentid")
+        if not parent:
+            recorded[key] = time.time()
+            continue
+        try:
+            before = revision_text(site, int(parent))
+            after = revision_text(site, int(bot_revision["revid"]))
+        except Exception as exc:  # noqa: BLE001
+            pywikibot.warning(f"取撤销前的两版失败，这笔记不下：{exc}")
+            continue
+        blocks = _change_blocks(before, after)
+        rejected.extend(blocks)
+        recorded[key] = time.time()
+        new_blocks += len(blocks)
+        who = revert_revision.get("user") or "?"
+        try:
+            human = revision_text(site, int(revert_revision["revid"]))
+        except Exception as exc:  # noqa: BLE001
+            pywikibot.warning(f"取撤销后那一版失败，地板记不下：{exc}")
+            human = ""
+        kept = record_floors(store, after, human) if human else 0
+        reshuffled = bool(human) and chart_axis(before) != chart_axis(after)
+        if reshuffled:
+            # 有人撤销过「调整行顺序」：以后不再重排（排版不承载信息，硬排只会打起来）
+            store["keep_row_order"] = True
+        pywikibot.output(f"人工撤销记录: rev {revert_revision['revid']}（{who}）"
+                         f"撤销了 rev {bot_revision['revid']} 的 {len(blocks)} 处改动"
+                         + (f"，{kept} 个数字被还原（记成地板，不再压低）" if kept else "")
+                         + ("，行顺序不再调整" if reshuffled else ""))
+    prune_reverts(store)
+    return new_blocks
+
+
+def prune_reverts(store: Dict, now: Optional[float] = None) -> None:
+    """丢掉过期的撤销记录，并把被拒改动块截到上限以内（新的在后）。"""
+    now = time.time() if now is None else now
+    recorded = {key: stamp for key, stamp in (store.get("recorded") or {}).items()
+                if now - float(stamp) < REVERTS_TTL}
+    store["recorded"] = recorded
+    rejected = list(store.get("rejected") or [])[-REVERTS_MAX_BLOCKS:]
+    store["rejected"] = rejected
+
+
+def apply_reverts(original: str, text: str, rejected: Optional[Iterable[dict]]
+                  ) -> Tuple[str, int]:
+    """把「人工撤销过」的改动从 ``text`` 里拿掉，返回 ``(文本, 跳过的块数)``。
+
+    只有算出来的改动块与被拒块**完全一致**（按去首尾空白比）才让路：
+    替换 → 还原人工那几行；插入 → 不插；删除 → 把那几行加回去。人工改写成别的
+    写法时机器人照常写，不会把人锁死。
+    """
+    blocked = {_normalise(block["new"]): list(block["old"])
+               for block in (rejected or []) if isinstance(block, dict)}
+    if not blocked:
+        return text, 0
+    import difflib
+    before, after = original.splitlines(), text.splitlines()
+    matcher = difflib.SequenceMatcher(None, before, after)
+    out: List[str] = []
+    skipped = 0
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if tag == "equal":
+            out.extend(after[new_start:new_end])
+            continue
+        replacement = blocked.get(_normalise(after[new_start:new_end]))
+        if replacement is None:
+            out.extend(after[new_start:new_end])
+            continue
+        out.extend(before[old_start:old_end] if not replacement else replacement)
+        skipped += 1
+    if not skipped:
+        return text, 0
+    # 结尾换行按**人工那一版**的形态来：被还原掉的那块可能正好是末尾新增的一行，
+    # 照 ``text`` 判断会把原来的结尾换行弄丢，结果还是「有改动」而白写一次。
+    return "\n".join(out) + ("\n" if original.endswith("\n") else ""), skipped
 
 
 def revision_text(site, revid: int) -> str:
@@ -3149,13 +3417,22 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     song_store = load_cache(MOEGIRL_SONG_CACHE)
     names_store = load_cache(VOCA_NAMES_CACHE)
     removed_applied = load_cache(REMOVED_CACHE)
+    reverts = load_cache(REVERTS_CACHE)
     # 登记给 flush_caches()：慢查询途中也要落盘，别把这一轮问到的全丢在内存里。
     _CACHE_REGISTRY[:] = [(MOEGIRL_CACHE, moe_cache), (CREATOR_CACHE, cache),
                           (DERIVATIVE_CACHE, derivative_cache),
                           (SITE_ORDER_CACHE, order_cache),
                           (MOEGIRL_SONG_CACHE, song_store),
                           (VOCA_NAMES_CACHE, names_store),
-                          (REMOVED_CACHE, removed_applied)]
+                          (REMOVED_CACHE, removed_applied),
+                          (REVERTS_CACHE, reverts)]
+    if "forget_reverts" in actions:
+        # 想请机器人重新算一遍时用：清掉「这些改动被人工拒过」的记录。这一轮不再
+        # 从历史里重新记一遍，否则刚清掉就又被记回来。
+        reverts.clear()
+        pywikibot.output("已清空人工撤销记录，下一轮起机器人会重新计算这些改动")
+    else:
+        record_reverts(site, PAGE_TITLE, reverts, BOT_USERS)
 
     def derivative_of(title: str) -> bool:
         """这一页是不是二创（标题看不出来时读页面正文，结果进缓存）。"""
@@ -3291,7 +3568,9 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
                                   decisions=decisions)
                   if basis == "listed" else count_by_window(site, sections))
         text, _ = render_chart(text, sections, legend, counts, excluded,
-                               demoted=demoted, applied=removed_applied)
+                               demoted=demoted, applied=removed_applied,
+                               floors=reverts.get("floors"),
+                               keep_order=bool(reverts.get("keep_row_order")))
         dropped = sum(sum(entry.values()) for entry in excluded.values())
         lowered = sum(sum(entry.values()) for entry in demoted.values())
         pywikibot.output(f"统计: 依据 {basis} 重算图表（排除 REMIX/二创 {dropped} 处，"
@@ -3303,10 +3582,17 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     if "recredit" in actions:
         text = recredit(site, text, sections, legend, cache, moe_cache,
                         participants_of, songs_of, excluded_of, from_rev, kinds)
+    # 人工撤销优先：算出来的改动要是跟「被人撤掉的那几块」一模一样，就不写回去。
+    # 没有这一步，机器人会在「我改 → 人撤 → 我再改」之间无限来回（278253/278258/
+    # 278259 就是这么打起来的）。
+    text, reverted = apply_reverts(original, text, reverts.get("rejected"))
+    if reverted:
+        pywikibot.output(f"统计: 尊重人工撤销，跳过 {reverted} 处改动"
+                         f"（--forget-reverts 可清空这份记录）")
     # 先保存页面、再出报告。萌百百科那边一问几十秒还要重试，报告排在保存前面时
     # 整轮常在这儿耗掉，页面就永远等不到保存（2026-10-22 起连续三天没动就是这样）。
     result = False
-    if actions <= {"report", "moe"}:
+    if actions <= {"report", "moe", "forget_reverts"}:
         status = "只出报告，不改页面"
     elif text == original:
         status = "页面无需更新"
@@ -3350,7 +3636,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", default="all",
                         help="all | one or more of siteorder,entries,counts,colour,stats,"
-                             "report,moe,recredit (comma separated)")
+                             "report,moe,recredit,forget_reverts (comma separated)")
     parser.add_argument("--basis", choices=["listed", "window"], default="listed",
                         help="how to resolve creators when recomputing the chart")
     parser.add_argument("--write", action="store_true", help="save the page (default: dry-run)")
@@ -3363,6 +3649,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, dest="limit",
                         help="siteorder: 本轮最多比较多少条（0 = 全部；all 默认 "
                              f"{SITEORDER_BUDGET}）")
+    parser.add_argument("--forget-reverts", action="store_true", dest="forget_reverts",
+                        help="清空「人工撤销过哪些改动」的记录，让机器人重新计算这些改动")
     args = parser.parse_args()
 
     site = pywikibot.Site()
@@ -3379,6 +3667,10 @@ def main() -> None:
         if not actions or unknown:
             parser.error(f"未知的动作：{', '.join(sorted(unknown)) or args.action}")
     kinds = {k.strip() for k in (args.kinds or "").split(",") if k.strip()} or None
+    if args.forget_reverts:
+        # 只给 --forget-reverts（没点名动作）时**只清记录、不动页面**：清完就顺手把
+        # 被拒的改动写回去，不是这个开关的意思。
+        actions = {"forget_reverts"} if args.action == "all" else actions | {"forget_reverts"}
     run_once(site, actions, args.basis, args.write, args.summary, args.from_rev,
              kinds, limit)
 

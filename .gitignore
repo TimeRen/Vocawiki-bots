@@ -4,6 +4,8 @@ sandbox.py
 sync_pages/
 texts/
 *.txt
+# 依赖清单要进仓库（Toolforge 的 bootstrap_venv.sh 与本地都用它）
+!requirements.txt
 
 # pywikibot generated files
 *.lwp
@@ -26,3 +28,6 @@ __pycache__/
 .DS_Store
 # 临时调试脚本（我自己的探测用，不进仓库）
 _*.py
+
+# bot output (preview files written by --out-dir)
+output/

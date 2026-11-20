@@ -16,6 +16,14 @@ rm -rf pyvenv
 python3 -m venv pyvenv
 source pyvenv/bin/activate
 pip install --disable-pip-version-check -U pip wheel
-pip install --disable-pip-version-check pywikibot
+# 依赖清单在仓库根的 requirements.txt（pywikibot + wikitextparser）：
+# 有它时照它装，免得两边版本对不上；仓库还没 sync 下来时退回只装 pywikibot。
+if [[ -f "$HOME/Vocawiki-bots/requirements.txt" ]]; then
+    pip install --disable-pip-version-check -r "$HOME/Vocawiki-bots/requirements.txt"
+else
+    pip install --disable-pip-version-check pywikibot wikitextparser
+fi
 
-python -c "import pywikibot, sys; print('pywikibot', pywikibot.__version__, 'on Python', sys.version.split()[0])"
+python -c "import pywikibot, wikitextparser, sys; \
+print('pywikibot', pywikibot.__version__, '| wikitextparser', wikitextparser.__version__, \
+'on Python', sys.version.split()[0])"

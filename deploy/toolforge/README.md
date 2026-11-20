@@ -75,8 +75,12 @@ toolforge jobs run bootstrap-venv --image python3.13 --wait \
 `/data/project/<tool>`，不是仓库目录，所以必须带 `Vocawiki-bots/` 这一层，
 写成 `./deploy/...` 会报 `exitcode 127`。
 
-结束时会打印 `pywikibot <版本> on Python 3.x`。容器里的 `$HOME` 就是工具的
+结束时会打印 `pywikibot <版本> | wikitextparser <版本> on Python 3.x`。容器里的 `$HOME` 就是工具的
 `/data/project/<tool>`，所以 `pyvenv` 建在共享存储上，后续 job 直接复用。
+
+> 依赖清单在仓库根的 `requirements.txt`（`pywikibot` + `wikitextparser`）。
+> 老的 venv 里只有 pywikibot，**动员令计分要用 `wikitextparser`**，所以升级后要重跑一次
+> 上面这条命令（脚本会 `rm -rf pyvenv` 重建，几秒钟的事）。
 
 ## 5. 干跑确认链路，再去掉 `--dry-run` 确认登录
 
@@ -120,7 +124,7 @@ toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 > 修权限、校验 `command:` 路径、再 `jobs load`（见「更新代码」一节）。
 
 会创建或更新 `hourly` / `lyrics-plan` / `contributions` / `collection-prune` /
-`translations` 五个任务：
+`translations` / `mobilization` 六个任务：
 
 | job | 类型 | 作用 |
 | --- | --- | --- |
@@ -129,6 +133,7 @@ toolforge jobs load ~/Vocawiki-bots/deploy/toolforge/jobs.yaml
 | `contributions` | schedule（每小时 :53） | 维护贡献页 [[User:人间百态/贡献]]：补新条目、去掉重定向 / 消歧义页，歌姬模板只留主模板（见第 10 节） |
 | `collection-prune` | schedule（每小时 :07） | 把「已经有条目」的歌从搜集库整行删掉（只查站内事实，不联网问外站，见第 12 节） |
 | `translations` | schedule（每周一 03:37 UTC） | 填充 [[User:周某不是轴某/VOCALOID collection搜集库]] 的「翻译来源」（只填空格，每周复检一次，见第 12 节） |
+| `mobilization` | schedule（每小时 :27） | 维护 2027 年冬动员令的「计分板」与「排行榜」（见第 13 节；活动 2026-12-01 才开始） |
 
 **五个任务都有 GitHub Actions 兜底**（Toolforge 故障时顶上），详见第 11 节：
 
@@ -944,6 +949,60 @@ python bots/vocaloid_collection_translations.py --write
 
 `data/` 里的缓存别随手删：删了下一轮会把整页重查一遍（Toolforge 上要跑很久），
 但不会写坏页面。
+
+## 13. 动员令计分（每小时，2026-12-01 起）
+
+维护 2027 年冬动员令的两个页面：
+
+| 页面 | 内容 |
+| --- | --- |
+| `Vocawiki:动员令/2027年冬/计分板` | 每人一个二级节，按类别（`=== 创建歌曲 ===` …）逐条列 `#[[页面]]（+1.50）` |
+| `Vocawiki:动员令/2027年冬/排行榜` | 由计分板汇总出的 `wikitable sortable`，固定 7 列 + 总分 + 合计行 |
+
+计分口径来自 [[Vocawiki:动员令/2027年冬/计分规则]]（2026-11-21 与活动主办方确认）：
+
+| 类别 | 判定（`/计分板` 上那张表） | 分数 |
+| --- | --- | --- |
+| 创建歌曲 | ns0 新建 / 从用户页移动，属「使用X的歌曲」分类且含 `{{LyricsKai…}}` | 1.5 |
+| 歌词翻译 | 摘要含「翻译歌词 / 歌词翻译 / 歌詞翻譯 / 翻譯歌詞」，取 `translated` 字节 | 字节 / 150 |
+| 歌词注音 | 摘要含「歌词注音」 | 0.2 |
+| 创建周刊 | 属 `Category:周刊VOCAL Character & UTAU排行榜` | 20；标题含「周刊UTAU排行榜」→ 25 |
+| 创建大家族模板 | ns10 新建，属 `Category:虚拟歌手音乐人模板`，按模板内**蓝链**数 | 每 10 个链接 1 分（≥2 个才计） |
+| 创建P主/歌姬/引擎条目 | ns0 新建，属 `P主` / `音声合成软件` / `演唱会` / `XX角色` | 有效字节 / 200 |
+| 内容扩充 | 摘要含「内容扩充」，该笔原始增量 ≥ 500 字节 | 有效字节增量 / 200 |
+
+**有效字节**（`count_bytes`）：原始 UTF-8 字节减去 `Producer_Song` / `Album Infobox` /
+`Tracklist` 的 3/4（机械填表），再减去 `{{playlist}}` 的一半。「日语原文照抄」「没有来源」
+「是不是机翻」这些机器人判不了，由评委复核；评委直接在页面上改分、加行都会被计入总分。
+
+几点实现细节：
+
+* **每次合格编辑各记一行**（与上游一致）。同一页翻译了两次就有两行，评委可以删掉多余的；
+  完全相同的行会被跳过，重跑不会翻倍。
+* **增量状态**在 `data/vj2027winter_mobilization.pickle`：记住每人上次扫到的时间，
+  只处理之后的编辑；新报名的人从活动开始（2026-12-01 00:00 +0800）起算。
+  `--refresh` 可以重扫，但不会重复写行。
+* **时间窗口写在脚本里**：Toolforge 的 cron 不能指定开始日期，所以 job 现在就可以载入，
+  12-01 之前每小时空跑一次（日志写一句「活动还没开始」）；`--ignore-window` 可手动越过。
+* 排行榜的用户名写成 `-{[[U:某某|某某]]}-`（语言转换器不转用户名）。
+
+手动跑一次（不写维基，只把两个页面写成文件）：
+
+```bash
+cd ~/Vocawiki-bots
+~/pyvenv/bin/python -m bots.mobilization_tally --out-dir /tmp/vj-preview
+less /tmp/vj-preview/计分板.wikitext /tmp/vj-preview/排行榜.wikitext
+```
+
+确认无误后去掉 `--out-dir`、加 `--write`：
+
+```bash
+toolforge jobs run mobilization-now --image python3.13 --wait \
+  --command "./Vocawiki-bots/deploy/toolforge/run-mobilization-tally.sh"
+```
+
+> 活动结束（2027-02-15 23:59）后脚本会自动停止写页面；之后需要改分就手动改计分板，
+> 再跑一次 `--ignore-window --write` 让排行榜跟上。
 
 ## 更新代码
 

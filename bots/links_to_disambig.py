@@ -2,7 +2,7 @@ import sys
 from argparse import ArgumentParser
 from typing import Dict, List
 
-from pywikibot import Page, APISite
+from pywikibot import Page, Site
 from pywikibot.data.api import PropertyGenerator
 from pywikibot.pagegenerators import GeneratorFactory
 from pywikibot.tools.itertools import itergroup
@@ -10,7 +10,7 @@ from pywikibot.tools.itertools import itergroup
 from utils.sites import voca
 from utils.utils import adjust_trailing_newline
 
-site: APISite = voca()
+site: Site = voca()
 
 
 def get_disambig_pages():

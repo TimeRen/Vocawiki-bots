@@ -1,0 +1,10 @@
+# 机器人脚本的第三方依赖。
+#
+# 装法：
+#   pip install -r requirements.txt
+#
+# Toolforge 上由 deploy/toolforge/bootstrap_venv.sh 装进 $HOME/pyvenv。
+pywikibot>=11
+# main.py 里的老机器人（disambiguator / template_splitter / rank_contributors …）
+# 与 bots/mobilization_tally 都用它解析 wikitext。
+wikitextparser>=0.56

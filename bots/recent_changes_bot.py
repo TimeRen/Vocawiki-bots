@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import List, Union
 
 import pywikibot
-from pywikibot import APISite, Page, Timestamp
+from pywikibot import Page, Site, Timestamp
 from pywikibot.bot import SingleSiteBot
 from pywikibot.pagegenerators import PreloadingGenerator
 
@@ -45,7 +45,7 @@ def filter_recent_changes(resume_id: int, recent_changes_generator):
 class RecentChangesBot(SingleSiteBot, ABC):
     from utils.sites import voca
 
-    def __init__(self, bot_name: str, resume_id: int = None, site: APISite = voca(), group_size: int = get_rate_limit(),
+    def __init__(self, bot_name: str, resume_id: int = None, site: Site = voca(), group_size: int = get_rate_limit(),
                  ns: Union[str, List[str]] = "0", delay: int = -2, change_type: str = 'edit|new|log', **kwargs):
         super(RecentChangesBot, self).__init__(site=site, **kwargs)
         self.group_size = group_size

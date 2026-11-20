@@ -12,7 +12,6 @@ from pywikibot.tools import deprecated
 from wikitextparser import Template, WikiLink
 
 from utils.config import get_data_path, get_rate_limit
-from utils.voca import vocaPage
 
 
 def process_title(s: str) -> str:

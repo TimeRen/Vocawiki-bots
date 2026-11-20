@@ -7,7 +7,7 @@ from pathlib import Path
 from queue import Queue, Empty
 from threading import Thread
 
-from pywikibot import Page, APISite, FilePage
+from pywikibot import Page, FilePage, Site
 from pywikibot.data.api import QueryGenerator
 
 from utils.sites import mirror, icu, cm, icu_cm
@@ -19,7 +19,7 @@ def should_download(page_title: str) -> bool:
 
 def process_batch(page_list: list):
     queue = Queue()
-    s: APISite = mirror()
+    s: Site = mirror()
     s.login()
     for p in page_list:
         queue.put(p)
@@ -60,7 +60,7 @@ def upload_files_from_commons(exclude: set):
     else:
         start = open(cont, "r").read()
     print("Continue from", start)
-    s: APISite = icu_cm()
+    s: Site = icu_cm()
     pages_gen = s.allpages(namespace=6, start=start)
     pages_gen = (p for p in pages_gen if p.title(with_ns=True) not in exclude and should_download(p.title()))
     page_list = []

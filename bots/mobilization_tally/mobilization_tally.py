@@ -1,173 +1,293 @@
+"""维护 [[Vocawiki:动员令/2027年冬/计分板]] 与 [[…/排行榜]]。
+
+按 `/计分板` 页面上那张说明表格约定的方式识别得分点（新建 / 移动 / 编辑摘要关键字），
+再把每个人的得分写进计分板、把汇总写进排行榜。
+
+    python -m bots.mobilization_tally                     # 预演：只打印，不写维基
+    python -m bots.mobilization_tally --out-dir output/x   # 预演 + 把两个页面写成文件
+    python -m bots.mobilization_tally --write              # 真正写回维基
+
+活动窗口是 2026-12-01 00:00 ~ 2027-02-15 23:59（+0800）；窗口外脚本直接退出，
+所以 cron 可以一直挂着，到点自然开始（`--ignore-window` 可以手动越过）。
+"""
+from __future__ import annotations
+
+import argparse
 import pickle
-import sys
-from argparse import ArgumentParser
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Callable, List, Union, Optional
+from typing import Dict, List, Optional, Sequence
 
 import pywikibot
-import wikitextparser as wtp
-from pywikibot import Page, User
-from wikitextparser import Section, WikiText
+from pywikibot import Page
+from pywikibot.exceptions import EditConflictError
 
-from bots.mobilization_tally.presets import Preset, get_preset, get_preset_names
-from bots.mobilization_tally.update_scoreboard import parse_section_title_username, USERNAME_SECTION_LEVEL, \
-    SCORE_SECTION_LEVEL, update_scoreboard
-from bots.mobilization_tally.utils import username_to_section_title, set_site, get_site
-from utils.config import get_data_path
-from utils.sites import get_site_by_name
-from utils.utils import adjust_trailing_newline, parse_time, CST
+from bots.mobilization_tally.presets import get_preset
+from bots.mobilization_tally.update_scoreboard import (add_score_lines, collect_scores,
+                                                       rebuild_ranking)
+from bots.mobilization_tally.utils import CST, adjust, link_titles, set_site
+
+TARGET_DEFAULT = "Vocawiki:动员令/2027年冬"
+STATE_PATH = Path("data/vj2027winter_mobilization.pickle")
+
+EVENT_START = datetime(2026, 12, 1, 0, 0, tzinfo=CST)
+EVENT_END = datetime(2027, 2, 15, 23, 59, tzinfo=CST)
+
+SIGNUP_SUFFIX = "/报名"
+SCOREBOARD_SUFFIX = "/计分板"
+RANKING_SUFFIX = "/排行榜"
+
+SCOREBOARD_SUMMARY = "更新计分板"
+RANKING_SUMMARY = "更新排行榜"
+
+DEFAULT_EDIT_LIMIT = 500
+EVENT_START_KEY = "__EVENT_START"
 
 
-def add_results(results: List[str], section: Section):
-    existing_lines = {line.strip().lstrip('*#') for line in str(section).split("\n")}
-    section.contents = adjust_trailing_newline(section.contents, 1)
-    for result in results:
-        if result in existing_lines:
-            pywikibot.info("Skipping " + result)
-            continue
-        existing_lines.add(result)
-        section.contents += "#" + result + "\n"
+# ---------------------------------------------------------------- 小工具
+
+def parse_time(value: Optional[str]) -> Optional[datetime]:
+    """`2026-12-01` / `2026-12-01T00:00:00+08:00` → 带时区的 datetime（默认东八区）。"""
+    if not value:
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=CST)
+    return parsed.astimezone(CST)
 
 
-def apply_preset(preset: Preset, contributions: list, parsed: Section):
-    for preset_name, preset_function in preset.items():
-        results = []
-        for c in contributions:
-            line = preset_function(c)
-            if line is not None:
-                results.append(line)
-        if len(results) == 0:
-            continue
-        for section in parsed.sections:
-            if section.level == SCORE_SECTION_LEVEL and section.title.strip() == preset_name:
-                target_section = section
-                break
+def participants(site, target: str) -> List[str]:
+    """报名区里的用户名（`*-{[[U:某某]]}-` 这种链接），去重保序。"""
+    text = Page(site, target + SIGNUP_SUFFIX).text or ""
+    result: List[str] = []
+    for title in link_titles(text):
+        lowered = title.lower()
+        if lowered.startswith("user:"):
+            name = title[len("user:"):].strip()
+        elif lowered.startswith("u:"):
+            name = title[len("u:"):].strip()
         else:
-            equal = SCORE_SECTION_LEVEL * "="
-            parsed.string = adjust_trailing_newline(parsed.string) + \
-                            f"{equal} {preset_name} {equal}\n"
-            target_section = parsed.sections[-1]
-        add_results(results, target_section)
-
-
-def get_mobilization_participants(target: str):
-    signup_page = Page(source=get_site(), title=target + "/报名")
-    parsed = wtp.parse(signup_page.text)
-    section = parsed.sections[1]
-    return [User(source=get_site(), title=link.title)
-            for link in section.wikilinks
-            if link.title[0] == 'U']
-
-
-USER_CONTRIBUTION_UPDATE_FILE: Path
-
-
-def get_today() -> datetime:
-    now = datetime.now(tz=CST)
-    return datetime(year=now.year, month=now.month, day=now.day)
-
-
-def get_last_update(usernames: List[str], event_start: Optional[datetime]) -> Dict[str, datetime]:
-    if USER_CONTRIBUTION_UPDATE_FILE.exists():
-        result = pickle.load(open(USER_CONTRIBUTION_UPDATE_FILE, "rb"))
-    else:
-        result = dict()
-    event_start_key = '__EVENT_START'
-    # set/override the start of the event
-    if event_start is not None:
-        result[event_start_key] = event_start
-    # if event start is not set, default to the beginning of today
-    if event_start_key not in result:
-        result[event_start_key] = get_today()
-    event_start = result[event_start_key]
-    for username in usernames:
-        if username not in result:
-            result[username] = event_start
+            continue
+        if name and name not in result:
+            result.append(name)
     return result
 
 
-def get_user_contributions(username: str, last_update: Dict) -> list:
-    site = get_site()
-    time_start = last_update[username]
-    contributions = [
-        {
-            'page': Page(source=site, title=c['title']),
-            'ns': c['ns'],
-            'timestamp': parse_time(c['timestamp'], cst=True),
-            'new': 'new' in c,
-            'minor': 'minor' in c,
-            'comment': c.get('comment', ''),
-            'revid': c['revid']
-        }
-        for c in site.usercontribs(user=username, total=500)]
-    last_update[username] = datetime.now(tz=CST)
-    return [c for c in contributions if c['timestamp'] > time_start]
-
-
-def get_user_section(username: str, parsed: WikiText) -> Section:
-    for section in parsed.sections:
-        if section.level == USERNAME_SECTION_LEVEL and \
-                parse_section_title_username(section.title.strip()) == username:
-            return section
-    else:
-        equals = USERNAME_SECTION_LEVEL * "="
-        parsed.string = adjust_trailing_newline(parsed.string) + \
-                        f"{equals} {username_to_section_title(username)} {equals}\n"
-        return parsed.sections[-1]
-
-
-def list_contributions(target: str, preset: str, event_start: Optional[datetime], **kwargs):
-    # get list of participants
-    users = get_mobilization_participants(target)
-    usernames = [u.username for u in users]
-    last_update = get_last_update(usernames, event_start)
-    contributions_page = Page(source=get_site(), title=target + "/计分板")
-    if not contributions_page.exists():
-        pywikibot.error("Contributions page named " + contributions_page.title() + " does not exist.")
+def parse_timestamp(value) -> Optional[datetime]:
+    """把 pywikibot 的时间戳（11.x 里是 ISO 字符串，旧版是 Timestamp）统一成 datetime。"""
+    if isinstance(value, datetime):
+        return value.astimezone(CST) if value.tzinfo else value.replace(tzinfo=CST)
+    if not value:
         return None
-    parsed = wtp.parse(contributions_page.text)
-    preset = get_preset(preset)
-    for username in usernames:
-        pywikibot.info("Processing user " + username)
-        contributions = get_user_contributions(username, last_update)
-        target_section = get_user_section(username, parsed)
-        apply_preset(preset, contributions, target_section)
-    contributions_page.text = str(parsed)
-    contributions_page.save(summary="更新计分板", minor=True)
-    with open(USER_CONTRIBUTION_UPDATE_FILE, "wb") as f:
-        pickle.dump(last_update, f)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(CST) if parsed.tzinfo else parsed.replace(tzinfo=CST)
 
 
-def run_mobilization_tally():
-    dispatcher: Dict[str, Callable[..., None]] = {
-        'scoreboard': update_scoreboard,
-        'list_contributions': list_contributions
-    }
-    parser = ArgumentParser()
-    parser.add_argument("command", nargs=1,
-                        help="scoreboard command changes the scoreboard table; "
-                             "list_contributions tracks the score of each participant.")
-    parser.add_argument("target", nargs=1,
-                        help="Target page of an event. Should be a user page on which you have event information.")
-    parser.add_argument("-s", "--site", type=str, dest="site", default="voca")
-    parser.add_argument("-p", "--preset", type=str, dest="preset", default="vj",
-                        help="Organization preset. Only applies to list_contributions."
-                             "Defaults to vj. "
-                             "Available options are: " + ", ".join(get_preset_names()))
-    parser.add_argument("-t", "--time", dest="start", default=None,
-                        help="The start time. Only applies to list_contributions. "
-                             "Format as %Y-%m-%dT%H:%M:%SZ. Please use CST (+8).")
-    args = parser.parse_args(sys.argv[2:])
-    set_site(get_site_by_name(args.site))
-    command = args.command[0]
-    global USER_CONTRIBUTION_UPDATE_FILE
-    USER_CONTRIBUTION_UPDATE_FILE = get_data_path().joinpath(args.preset + "_mobilization.pickle")
-    start = args.start
-    if start is not None:
-        # start time is already in CST
-        start = parse_time(start)
-    if command in dispatcher:
-        dispatcher[command](target=args.target[0], preset=args.preset, event_start=start)
+def user_contributions(site, username: str, limit: int = DEFAULT_EDIT_LIMIT) -> List[dict]:
+    """最近 `limit` 笔编辑，转成计分规则认识的形状（按时间正序）。
+
+    ⚠️ pywikibot 11 起 `site.usercontribs()` 给的 `timestamp` 是 **ISO 字符串**
+    （旧版是 `Timestamp` 对象），这里统一解析成 datetime——不解析的话时间比较
+    会让每一条都落空（2026-11-21 实测：500 笔编辑一条都没进窗口）。
+    """
+    rows = []
+    for item in site.usercontribs(user=username, total=limit):
+        rows.append({
+            "page": Page(site, item["title"]),
+            "title": item["title"],
+            "ns": item["ns"],
+            "timestamp": parse_timestamp(item.get("timestamp")),
+            "new": "new" in item,
+            "minor": "minor" in item,
+            "comment": item.get("comment") or "",
+            "revid": item.get("revid"),
+        })
+    rows.sort(key=lambda row: row["timestamp"] or datetime.min.replace(tzinfo=CST))
+    return rows
+
+
+def load_state(path: Path) -> Dict:
+    try:
+        with Path(path).open("rb") as handle:
+            data = pickle.load(handle)
+    except (OSError, pickle.PickleError, EOFError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(path: Path, state: Dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        pickle.dump(state, handle)
+
+
+def in_window(stamp, start: datetime, end: datetime) -> bool:
+    return start < stamp <= end
+
+
+def _as_datetime(value) -> Optional[datetime]:
+    return parse_timestamp(value)
+
+
+def collect_additions(contributions: Sequence[dict], preset,
+                      since: datetime, until: datetime) -> Dict[str, List[str]]:
+    """跑一遍所有计分项，返回 `{类别: [计分行]}`（按时间顺序）。"""
+    additions: Dict[str, List[str]] = {}
+    for contribution in contributions:
+        stamp = _as_datetime(contribution.get("timestamp"))
+        if stamp is None or not in_window(stamp, since, until):
+            continue
+        for category, score in preset.items():
+            try:
+                line = score(contribution)
+            except Exception as exc:                    # noqa: BLE001  单条失败不能中断整轮
+                pywikibot.error(f"{contribution.get('title')} 的「{category}」判定失败：{exc}")
+                continue
+            if line:
+                additions.setdefault(category, []).append(line)
+                pywikibot.output(f"  + [{category}] {line}")
+    return additions
+
+
+def save_page(site, title: str, text: str, summary: str) -> bool:
+    """内容有变化才保存；编辑冲突时重读一次再写。"""
+    page = Page(site, title)
+    original = page.text or ""
+    if original.strip() == (text or "").strip():
+        pywikibot.output(f"{title}：没有变化，跳过")
+        return False
+    for attempt in (1, 2):
+        try:
+            page.text = text
+            page.save(summary=summary, minor=True, bot=True, tags="Bot")
+            pywikibot.output(f"{title}：已保存")
+            return True
+        except EditConflictError:
+            if attempt == 2:
+                raise
+            pywikibot.warning(f"{title}：编辑冲突，重读后再写")
+            page = Page(site, title)
+            page.text = text
+    return False
+
+
+def write_preview(out_dir: Path, ranking: str, scoreboard: str) -> None:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, text in (("排行榜.wikitext", ranking), ("计分板.wikitext", scoreboard)):
+        (out_dir / name).write_text(text, encoding="utf-8")
+    pywikibot.output(f"预览已写入 {out_dir}（排行榜.wikitext / 计分板.wikitext）")
+
+
+# ---------------------------------------------------------------- 主流程
+
+def run_once(site, target: str = TARGET_DEFAULT, write: bool = False,
+             out_dir: Optional[str] = None, state_path: Path = STATE_PATH,
+             edit_limit: int = DEFAULT_EDIT_LIMIT,
+             event_start: Optional[datetime] = None,
+             event_end: Optional[datetime] = None,
+             refresh: bool = False, ignore_window: bool = False,
+             preset_name: str = "vj2027", now: Optional[datetime] = None) -> int:
+    """跑一轮。返回本轮新增的计分行数。"""
+    now = now or datetime.now(CST)
+    start = event_start or EVENT_START
+    end = event_end or EVENT_END
+    if not ignore_window:
+        if now < start:
+            pywikibot.output(f"活动还没开始（{start:%Y-%m-%d %H:%M %z}），本轮不处理。")
+            return 0
+        if now > end:
+            pywikibot.output(f"活动已结束（{end:%Y-%m-%d %H:%M %z}），本轮不处理。")
+            return 0
+
+    set_site(site)
+    preset = get_preset(preset_name)
+    state = load_state(state_path)
+    users = participants(site, target)
+    pywikibot.output(f"报名者 {len(users)} 人：" + ("、".join(users) or "（空）"))
+
+    scoreboard_page = Page(site, target + SCOREBOARD_SUFFIX)
+    ranking_page = Page(site, target + RANKING_SUFFIX)
+    scoreboard_text = scoreboard_page.text or ""
+    ranking_text = ranking_page.text or ""
+    state.setdefault(EVENT_START_KEY, time.mktime(start.timetuple()))
+
+    additions: Dict[str, Dict[str, List[str]]] = {}
+    for username in users:
+        stored = None if refresh else _as_datetime(state.get(username))
+        since = max(stored or start, start)
+        contributions = user_contributions(site, username, edit_limit)
+        pywikibot.output(f"{username}: {len(contributions)} 笔最近编辑，从 {since:%Y-%m-%d %H:%M} 起算")
+        found = collect_additions(contributions, preset, since, min(now, end))
+        if found:
+            additions[username] = found
+        state[username] = now.timestamp()
+
+    scoreboard_text, added = add_score_lines(scoreboard_text, additions)
+    ranking_text = rebuild_ranking(ranking_text, scoreboard_text)
+    scores = collect_scores(scoreboard_text)
+    pywikibot.output(f"本轮新增 {added} 行；计分板共 {len(scores)} 人")
+    for user, values in sorted(scores.items(),
+                               key=lambda item: -adjust(sum(item[1].values()))):
+        pywikibot.output(f"  {user}：总分 {adjust(sum(values.values()))}")
+
+    if out_dir:
+        write_preview(Path(out_dir), ranking_text, scoreboard_text)
+
+    if write:
+        save_page(site, scoreboard_page.title(), scoreboard_text, SCOREBOARD_SUMMARY)
+        save_page(site, ranking_page.title(), ranking_text, RANKING_SUMMARY)
+        save_state(state_path, state)          # 只在真写过之后推进进度
     else:
-        print(", ".join(dispatcher.keys()))
+        pywikibot.output("预演模式：没有写回维基（加 --write 才会保存）。")
+    return added
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="维护 2027 年冬动员令的计分板与排行榜")
+    parser.add_argument("--target", default=TARGET_DEFAULT, help="活动主页（子页面按 /计分板 等拼）")
+    parser.add_argument("--write", action="store_true", help="真正写回维基")
+    parser.add_argument("--dry-run", action="store_true", help="只看结果，不写维基（默认行为）")
+    parser.add_argument("--out-dir", help="把两个页面的完整 wikitext 写到这个目录，便于人工核对")
+    parser.add_argument("--state", default=str(STATE_PATH), help="增量进度文件")
+    parser.add_argument("--event-start", help="覆盖活动开始时间（默认 2026-12-01 00:00 +0800）")
+    parser.add_argument("--event-end", help="覆盖活动结束时间（默认 2027-02-15 23:59 +0800）")
+    parser.add_argument("--limit", type=int, default=DEFAULT_EDIT_LIMIT,
+                        help="每人最多回看多少笔编辑")
+    parser.add_argument("--refresh", action="store_true",
+                        help="忽略上次进度，从活动开始重新扫（不会重复写行）")
+    parser.add_argument("--ignore-window", action="store_true", help="忽略活动时间窗口")
+    parser.add_argument("--preset", default="vj2027", help="计分规则（目前只有 vj2027）")
+    args = parser.parse_args(argv)
+
+    if args.write and args.dry_run:
+        parser.error("--write 与 --dry-run 不能同时用")
+
+    site = pywikibot.Site()
+    if args.write:
+        if not site.logged_in():
+            site.login()
+        if not site.logged_in():
+            raise RuntimeError("登录失败：请检查 user-config.py 与 user-password.py")
+
+    run_once(site, target=args.target, write=args.write, out_dir=args.out_dir,
+             state_path=Path(args.state), edit_limit=args.limit,
+             event_start=parse_time(args.event_start), event_end=parse_time(args.event_end),
+             refresh=args.refresh, ignore_window=args.ignore_window,
+             preset_name=args.preset)
+
+
+if __name__ == "__main__":
+    main()

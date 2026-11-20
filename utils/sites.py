@@ -1,15 +1,15 @@
-from pywikibot import Site, APISite
+from pywikibot import Site
 
 
 def cm():
     return Site(fam="commons", code="commons")
 
 
-def voca() -> APISite:
+def voca() -> Site:
     return Site(fam="voca", code="voca")
 
 
-def mirror() -> APISite:
+def mirror() -> Site:
     return Site(fam="mirror", code="mirror")
 
 

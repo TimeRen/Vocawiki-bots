@@ -451,7 +451,7 @@ class RunOnceTest(TestCase):
         }
         self.song = FakePage("同一夜", "{{LyricsKai|original=あ}}", ["使用VOCALOID的歌曲"])
 
-    def _run(self, write=False, contributions=None, out_dir=None):
+    def _run(self, write=False, contributions=None, out_dir=None, ignore_window=True):
         contribution = _contribution(self.song, timestamp=datetime(2026, 12, 2, tzinfo=CST))
         contributions = contributions if contributions is not None else [contribution]
         with mock.patch.object(mt, "Page", FakeSitePage), \
@@ -459,7 +459,7 @@ class RunOnceTest(TestCase):
              mock.patch.object(mt, "save_page") as save, \
              mock.patch.object(mt, "save_state") as state:
             added = mt.run_once(object(), target="Vocawiki:X", write=write, now=self.now,
-                                state_path=Path("unused"), ignore_window=True,
+                                state_path=Path("unused"), ignore_window=ignore_window,
                                 out_dir=out_dir)
         return added, save, state
 
@@ -486,8 +486,13 @@ class RunOnceTest(TestCase):
 
     def test_edits_outside_the_event_are_ignored(self):
         old = _contribution(self.song, timestamp=datetime(2026, 11, 30, tzinfo=CST))
-        added, _, _ = self._run(contributions=[old])
+        added, _, _ = self._run(contributions=[old], ignore_window=False)
         self.assertEqual(0, added)
+
+    def test_ignore_window_scores_everything(self):
+        old = _contribution(self.song, timestamp=datetime(2026, 11, 30, tzinfo=CST))
+        added, _, _ = self._run(contributions=[old], ignore_window=True)
+        self.assertEqual(1, added)
 
     def test_window_gate_skips_before_start(self):
         with mock.patch.object(mt, "Page", FakeSitePage), \

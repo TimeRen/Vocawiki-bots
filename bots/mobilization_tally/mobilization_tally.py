@@ -8,7 +8,8 @@
     python -m bots.mobilization_tally --write              # 真正写回维基
 
 活动窗口是 2026-12-01 00:00 ~ 2027-02-15 23:59（+0800）；窗口外脚本直接退出，
-所以 cron 可以一直挂着，到点自然开始（`--ignore-window` 可以手动越过）。
+所以 cron 可以一直挂着，到点自然开始。`--ignore-window` 用于预演：完全不管窗口，
+抓到的编辑全算（活动还没开始时想看效果就靠它）。
 """
 from __future__ import annotations
 
@@ -26,13 +27,16 @@ from pywikibot.exceptions import EditConflictError
 from bots.mobilization_tally.presets import get_preset
 from bots.mobilization_tally.update_scoreboard import (add_score_lines, collect_scores,
                                                        rebuild_ranking)
-from bots.mobilization_tally.utils import CST, adjust, link_titles, set_site
+from bots.mobilization_tally.utils import (CST, adjust, format_points, link_titles,
+                                          set_site)
 
 TARGET_DEFAULT = "Vocawiki:动员令/2027年冬"
 STATE_PATH = Path("data/vj2027winter_mobilization.pickle")
 
 EVENT_START = datetime(2026, 12, 1, 0, 0, tzinfo=CST)
 EVENT_END = datetime(2027, 2, 15, 23, 59, tzinfo=CST)
+# 早于任何维基编辑的时间点：`--ignore-window` 时当作窗口起点
+ANY_TIME = datetime(1970, 1, 1, tzinfo=CST)
 
 SIGNUP_SUFFIX = "/报名"
 SCOREBOARD_SUFFIX = "/计分板"
@@ -204,13 +208,17 @@ def run_once(site, target: str = TARGET_DEFAULT, write: bool = False,
     now = now or datetime.now(CST)
     start = event_start or EVENT_START
     end = event_end or EVENT_END
-    if not ignore_window:
+    if ignore_window:
+        pywikibot.output("--ignore-window：不看活动窗口，抓到的编辑全算（预演用）。")
+        scan_start, scan_end = ANY_TIME, now
+    else:
         if now < start:
             pywikibot.output(f"活动还没开始（{start:%Y-%m-%d %H:%M %z}），本轮不处理。")
             return 0
         if now > end:
             pywikibot.output(f"活动已结束（{end:%Y-%m-%d %H:%M %z}），本轮不处理。")
             return 0
+        scan_start, scan_end = start, min(now, end)
 
     set_site(site)
     preset = get_preset(preset_name)
@@ -227,10 +235,10 @@ def run_once(site, target: str = TARGET_DEFAULT, write: bool = False,
     additions: Dict[str, Dict[str, List[str]]] = {}
     for username in users:
         stored = None if refresh else _as_datetime(state.get(username))
-        since = max(stored or start, start)
+        since = max(stored or scan_start, scan_start)
         contributions = user_contributions(site, username, edit_limit)
         pywikibot.output(f"{username}: {len(contributions)} 笔最近编辑，从 {since:%Y-%m-%d %H:%M} 起算")
-        found = collect_additions(contributions, preset, since, min(now, end))
+        found = collect_additions(contributions, preset, since, scan_end)
         if found:
             additions[username] = found
         state[username] = now.timestamp()
@@ -241,7 +249,7 @@ def run_once(site, target: str = TARGET_DEFAULT, write: bool = False,
     pywikibot.output(f"本轮新增 {added} 行；计分板共 {len(scores)} 人")
     for user, values in sorted(scores.items(),
                                key=lambda item: -adjust(sum(item[1].values()))):
-        pywikibot.output(f"  {user}：总分 {adjust(sum(values.values()))}")
+        pywikibot.output(f"  {user}：总分 {format_points(sum(values.values()))}")
 
     if out_dir:
         write_preview(Path(out_dir), ranking_text, scoreboard_text)
@@ -268,7 +276,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         help="每人最多回看多少笔编辑")
     parser.add_argument("--refresh", action="store_true",
                         help="忽略上次进度，从活动开始重新扫（不会重复写行）")
-    parser.add_argument("--ignore-window", action="store_true", help="忽略活动时间窗口")
+    parser.add_argument("--ignore-window", action="store_true",
+                        help="不看活动时间窗口，抓到的编辑全算（预演用）")
     parser.add_argument("--preset", default="vj2027", help="计分规则（目前只有 vj2027）")
     args = parser.parse_args(argv)
 

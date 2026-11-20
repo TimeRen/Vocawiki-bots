@@ -5,7 +5,8 @@
 #     --command "./Vocawiki-bots/deploy/toolforge/run-mobilization-tally.sh --dry-run"
 #
 # 活动期 2026-12-01 00:00 ~ 2027-02-15 23:59（+0800）。Toolforge 的 cron 不能指定开始日期，
-# 所以闸门写在机器人里：窗口外直接退出 0，到 12-01 自然开始。--ignore-window 可手动越过。
+# 所以闸门写在机器人里：窗口外直接退出 0，到 12-01 自然开始。
+# 预演时用 --ignore-window（不看窗口，抓到的编辑全算）。
 #
 # 其它参数原样转给机器人（--limit / --refresh / --out-dir / --state …）。
 source "$(dirname "$0")/common.sh"

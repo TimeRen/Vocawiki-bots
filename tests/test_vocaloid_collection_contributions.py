@@ -2408,3 +2408,132 @@ class MultiColourReportTest(TestCase):
                             [Entry("甲", ["#1", "#2"]), Entry("乙", ["#1"])])]
         self.assertEqual([("2025夏", "TOP100", "甲", ["#1", "#2"])],
                          contributions.multi_colour_cells(sections))
+
+
+def chart_text(axis, series):
+    """一份最小的 {{Echart}}：``series`` 是 ``{系列名: [每个数字]}``（按 ``axis`` 排）。"""
+    chart = {
+        "legend": {"data": list(series)},
+        "yAxis": {"data": list(axis)},
+        "series": [{"name": name, "type": "bar",
+                    "itemStyle": {"color": "#111111"}, "data": list(values)}
+                   for name, values in series.items()],
+    }
+    return ("{{Echart|data=<nowiki>" + json.dumps(chart, ensure_ascii=False)
+            + "</nowiki>}}")
+
+
+def chart_of(text):
+    return json.loads(contributions.CHART_RE.search(text).group(2))
+
+
+class RenameTest(TestCase):
+    """改过名的账号（`Beikeeeeeeeeeeee` → `贝壳beike`）只能算一个人。"""
+
+    def legend(self, **kwargs):
+        return Legend.parse(kwargs.pop("text", "{{User|贝壳beike}}"), renames=kwargs.pop("renames", None))
+
+    def test_legend_parses_renames(self):
+        legend = Legend.parse(
+            ":{{color block/wl|#4A4A48}} {{User|贝壳beike}}<!-- Beike、贝壳 -->",
+            {"beikeeeeeeeeeeee": "贝壳beike"})
+        self.assertEqual("#4A4A48", legend.identity("Beikeeeeeeeeeeee"))
+        self.assertEqual("贝壳beike", legend.display(legend.identity("Beikeeeeeeeeeeee")))
+        self.assertEqual("#4A4A48", legend.identity("Beike"))
+
+    def test_old_name_in_the_legend_still_colours_the_current_name(self):
+        # 图例上还写着旧名时，颜色要挂到现用名下，否则改名后整行都认不出来
+        legend = Legend.parse(
+            ":{{color block/wl|#4A4A48}} {{User|Beikeeeeeeeeeeee}}",
+            {"beikeeeeeeeeeeee": "贝壳beike"})
+        self.assertEqual("#4A4A48", legend.identity("贝壳beike"))
+        self.assertEqual("贝壳beike", legend.display("#4A4A48"))
+
+    def test_rename_chain_follows_to_the_last_name(self):
+        legend = Legend.parse("", {"old name": "Mid", "mid": "New"})
+        self.assertEqual("New", legend.current_name("Old Name"))
+
+    def test_two_rows_of_one_person_are_merged(self):
+        axis = ["别人", "贝壳beike", "Beikeeeeeeeeeeee"]
+        text = chart_text(axis, {"ボカコレ2025冬": [5, 3, 8]})
+        legend = Legend.parse(
+            ":{{color block/wl|#4A4A48}} {{User|贝壳beike}}",
+            {"beikeeeeeeeeeeee": "贝壳beike"})
+        sections = [Section("2025冬", "TOP100", [])]
+
+        updated, _ = contributions.render_chart(
+            text, sections, legend, {"2025冬": {"#4A4A48": 10}})
+
+        parsed = chart_of(updated)
+        self.assertEqual(["别人", "贝壳beike"], parsed["yAxis"]["data"])
+        self.assertEqual([5, 11], parsed["series"][0]["data"],
+                         "旧行的 8 要加到现用名那行（3 + 8），不能凭空消失或算两遍")
+
+    def test_merging_is_idempotent(self):
+        axis = ["贝壳beike", "Beikeeeeeeeeeeee"]
+        text = chart_text(axis, {"ボカコレ2025冬": [3, 8]})
+        legend = Legend.parse(
+            ":{{color block/wl|#4A4A48}} {{User|贝壳beike}}",
+            {"beikeeeeeeeeeeee": "贝壳beike"})
+        sections = [Section("2025冬", "TOP100", [])]
+
+        once, _ = contributions.render_chart(
+            text, sections, legend, {"2025冬": {"#4A4A48": 10}})
+        twice, _ = contributions.render_chart(
+            once, sections, legend, {"2025冬": {"#4A4A48": 10}})
+
+        self.assertEqual(chart_of(once)["series"][0]["data"],
+                         chart_of(twice)["series"][0]["data"])
+        self.assertEqual([11], chart_of(twice)["series"][0]["data"])
+
+    def test_ledger_entries_move_to_the_current_name(self):
+        ledger = {"2025冬|Beikeeeeeeeeeeee": 3, "2025冬|别人": 1}
+        moved = contributions.merge_renamed_keys(
+            ledger, {"Beikeeeeeeeeeeee": "贝壳beike"})
+        self.assertEqual(1, moved)
+        self.assertEqual({"2025冬|贝壳beike": 3, "2025冬|别人": 1}, ledger)
+
+    def test_ledger_move_keeps_existing_numbers(self):
+        ledger = {"2025冬|贝壳beike": 2, "2025冬|Beikeeeeeeeeeeee": 3}
+        contributions.merge_renamed_keys(ledger, {"Beikeeeeeeeeeeee": "贝壳beike"})
+        self.assertEqual({"2025冬|贝壳beike": 5}, ledger)
+
+    def test_rename_log_reads_details(self):
+        entries = [Mock(params={"olduser": "Beikeeeeeeeeeeee", "newuser": "贝壳beike"}),
+                   Mock(params={"olduser": "甲", "newuser": "乙"}),
+                   Mock(params={})]
+        site = Mock()
+        site.logevents.return_value = entries
+        self.assertEqual({"beikeeeeeeeeeeee": "贝壳beike", "甲": "乙"},
+                         contributions.rename_log(site))
+
+    def test_rename_log_failure_is_not_an_empty_log(self):
+        site = Mock()
+        site.logevents.side_effect = RuntimeError("boom")
+        self.assertIsNone(contributions.rename_log(site))
+
+    def test_account_renames_uses_the_cache_within_the_ttl(self):
+        store = {"renames": {"甲": "乙"}, "stamp": time.time()}
+        site = Mock()
+        with patch.object(contributions, "RENAMES_CACHE", Path("unused.pickle")):
+            self.assertEqual({"甲": "乙"}, contributions.account_renames(site, store))
+        site.logevents.assert_not_called()
+
+    def test_account_renames_refetches_when_stale(self):
+        store = {"renames": {"甲": "乙"}, "stamp": 0}
+        site = Mock()
+        site.logevents.return_value = [Mock(params={"olduser": "丙", "newuser": "丁"})]
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(contributions, "RENAMES_CACHE",
+                              Path(folder, "renames.pickle")), \
+                    patch.object(contributions, "DATA_DIR", Path(folder)):
+                self.assertEqual({"丙": "丁"}, contributions.account_renames(site, store))
+        self.assertTrue(store["stamp"])
+
+    def test_account_renames_keeps_the_cache_when_the_log_fails(self):
+        store = {"renames": {"甲": "乙"}, "stamp": 0}
+        site = Mock()
+        site.logevents.side_effect = RuntimeError("boom")
+        with patch.object(contributions, "save_cache") as save:
+            self.assertEqual({"甲": "乙"}, contributions.account_renames(site, store))
+        save.assert_not_called()

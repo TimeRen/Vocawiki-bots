@@ -45,6 +45,11 @@ The bot can:
   a *creator plus an important contributor*, not two creators: only the creator
   is counted, the other colours are recorded and reported (``多色格子``) but
   never counted, see ``multi_colour_cells``.
+  One person is one chart row: an account renamed on the wiki keeps its old name
+  in every revision it made (MediaWiki does not rewrite history), and a legend
+  comment may list the extra names someone used, so the old name's row is merged
+  into the current one (numbers added up, see ``chart_row_aliases``) instead of
+  being drawn as a second person.
   Some chart numbers come from bookkeeping outside the wiki and cannot be
   derived at all, so a cell is normally only raised, never lowered.
   New chart rows are added only above five computed creations; manually removing
@@ -159,7 +164,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import unquote, urlencode
 
 import pywikibot
@@ -185,6 +190,10 @@ REVERTS_CACHE = DATA_DIR / "vocaloid_collection_reverts.pickle"
 REVERTS_TTL = 180 * 24 * 3600       # 撤销记录多久后清理（秒）
 REVERTS_MAX_BLOCKS = 300            # 最多记这么多块被拒改动，防止文件越滚越大
 REVERTS_REV_LIMIT = 12              # 往前看多少版找「我们的版本被撤销」
+# 站点改名日志：``旧用户名 -> 现用名``。改名不改写历史修订，不折回新名就会在图表里
+# 被算成两个人（2026-11-13 Beikeeeeeeeeeeee → 贝壳beike）。
+RENAMES_CACHE = DATA_DIR / "vocaloid_collection_renames.pickle"
+RENAMES_TTL = 24 * 3600             # 改名很罕见：一天问一次日志就够
 VOCA_NAMES_VERSION = 2      # 歌名拆模板（{{ruby|…}}）后要重取
 MOEGIRL_SONG_VERSION = 2    # 跟重定向 + 带上「最旧一版作者」，旧缓存要重取
 SITE_ORDER_VERSION = 2      # 结论口径变了（认不出创建者不下调、核对表补条目）
@@ -432,10 +441,23 @@ class Legend:
     colour_to_name: Dict[str, str] = field(default_factory=dict)
     name_to_colour: Dict[str, str] = field(default_factory=dict)
     alias_to_name: Dict[str, str] = field(default_factory=dict)
+    # 改过名的账号：``旧名（小写） -> 新名``，来自站点改名日志（见 account_renames）
+    rename_to: Dict[str, str] = field(default_factory=dict)
+
+    def current_name(self, user: str) -> str:
+        """顺着改名链走到现用名（``A→B→C`` 取 ``C``，防环）。"""
+        name = user
+        for _ in range(8):
+            target = self.rename_to.get(name.lower())
+            if not target or target.lower() == name.lower():
+                break
+            name = target
+        return name
 
     def identity(self, user: str) -> str:
         """Collapse a revision username to a stable key (its colour when known)."""
-        name = self.alias_to_name.get(user.lower(), user)
+        name = self.current_name(user)
+        name = self.alias_to_name.get(name.lower(), name)
         return self.name_to_colour.get(name, name)
 
     def display(self, identity: str) -> str:
@@ -445,23 +467,27 @@ class Legend:
         m = re.search(r"<!--(.*?)-->", segment, re.S)
         if not m:
             return
+        current = self.current_name(name)
         for alias in re.split(r"[、,，/]", m.group(1)):
             alias = alias.strip()
             if alias:
-                self.alias_to_name.setdefault(alias.lower(), name)
+                self.alias_to_name.setdefault(alias.lower(), current)
 
     @classmethod
-    def parse(cls, text: str) -> "Legend":
-        legend = cls()
+    def parse(cls, text: str, renames: Optional[Dict[str, str]] = None) -> "Legend":
+        legend = cls(rename_to={key: value for key, value in (renames or {}).items()})
         pattern = re.compile(
             r"color block/wl\|(#\w+)\}\}\s*"
             r"(?:\{\{User\|([^}|]+)\}\}|'''\[\[(?:zhmoe):User:([^|\]]+)\|([^\]]+)\]\]''')")
         for m in pattern.finditer(text):
             colour = normalise_colour(m.group(1))
             name = (m.group(2) or m.group(4)).strip()
-            legend.colour_to_name.setdefault(colour, name)
-            legend.name_to_colour.setdefault(name, colour)
-            legend.alias_to_name[name.lower()] = name
+            # 图例上写的是旧用户名（改名之前的版本）时，颜色要挂到现用名上
+            current = legend.current_name(name)
+            legend.colour_to_name.setdefault(colour, current)
+            legend.name_to_colour.setdefault(current, colour)
+            legend.alias_to_name[name.lower()] = current
+            legend.alias_to_name.setdefault(current.lower(), current)
             line_end = text.find("\n", m.end())
             legend._add_aliases(name, text[m.end():line_end if line_end != -1 else len(text)])
         # 榜外 creators carry no colour but still have aliases worth canonicalising
@@ -470,7 +496,7 @@ class Legend:
                 continue
             for um in re.finditer(r"\{\{User\|([^}|]+)\}\}|\[\[(?:zhmoe):(?:User:)?([^|\]]+)\|([^\]]+)\]\]", line):
                 name = (um.group(1) or um.group(3)).strip()
-                legend.alias_to_name.setdefault(name.lower(), name)
+                legend.alias_to_name.setdefault(name.lower(), legend.current_name(name))
                 legend._add_aliases(name, line[um.end():])
         return legend
 
@@ -870,6 +896,50 @@ def flush_caches(force: bool = False, interval: float = CACHE_FLUSH_INTERVAL) ->
             save_cache(path, cache)
         except Exception as exc:  # noqa: BLE001
             pywikibot.warning(f"缓存写盘失败（{path.name}）：{exc}")
+
+
+def rename_log(site) -> Optional[Dict[str, str]]:
+    """站点改名日志 ``旧用户名（小写） -> 新名``；读不到返回 ``None``。
+
+    MediaWiki 改名**不改写历史修订**，旧修订上挂的还是旧用户名，而图例里只有现用名，
+    于是同一个人在图表格子与图表行上被算成两个人（2026-11-13 ``Beikeeeeeeeeeeee``
+    → ``贝壳beike`` 就是这样，改完名图表里多出一行）。所以拿日志把旧名折回新名。
+    """
+    events = getattr(site, "logevents", None)
+    if events is None:
+        return None
+    found: Dict[str, str] = {}
+    try:
+        for entry in events(logtype="renameuser", total=None):
+            params = getattr(entry, "params", None) or {}
+            old = str(params.get("olduser") or "").strip()
+            new = str(params.get("newuser") or "").strip()
+            if old and new and old != new:
+                found[old.lower()] = new
+    except Exception as exc:  # noqa: BLE001
+        pywikibot.warning(f"读改名日志失败（用缓存里的旧结果）：{exc}")
+        return None
+    return found
+
+
+def account_renames(site, store: Optional[Dict] = None) -> Dict[str, str]:
+    """``旧用户名（小写） -> 现用名``，``RENAMES_TTL`` 内用缓存，不重复问日志。"""
+    store = load_cache(RENAMES_CACHE) if store is None else store
+    try:
+        stale = time.time() - float(store.get("stamp") or 0) > RENAMES_TTL
+    except (TypeError, ValueError):
+        stale = True
+    if stale:
+        fresh = rename_log(site)
+        if fresh is not None:
+            store["renames"] = fresh
+            store["stamp"] = time.time()
+            try:
+                save_cache(RENAMES_CACHE, store)
+            except Exception as exc:  # noqa: BLE001
+                pywikibot.warning(f"改名缓存写盘失败：{exc}")
+    renames = store.get("renames")
+    return dict(renames) if isinstance(renames, dict) else {}
 
 
 def batch_creators(site, titles: Iterable[str], cache: Dict,
@@ -1484,8 +1554,49 @@ def canonical_names(legend: Legend, yaxis: List[str]) -> Dict[str, str]:
         identities = {legend.identity(tok.strip()) for tok in re.split(r"[/／]", name)}
         identities.add(legend.identity(name))
         for identity in identities:
-            mapping.setdefault(identity, name)
+            known = mapping.get(identity)
+            # 现用名那一行优先：改过名的账号在旧修订里是旧名，别把计数记到旧行上
+            if known is None or (legend.display(identity) == name and known != name):
+                mapping[identity] = name
     return mapping
+
+
+def chart_row_aliases(legend: Legend, yaxis: Sequence[str]) -> Dict[str, str]:
+    """``旧行名 -> 该行现在该用的名字``：同一个人的多行并成一行。
+
+    账号改名后历史修订里挂的还是旧用户名，图例注释里的马甲别名也一样，于是同一个人
+    在图上被画成两行（2026-11-13 ``Beikeeeeeeeeeeee`` → ``贝壳beike``，2026-11-21
+    报上来的就是它）。图例认得出这个人（知道他的颜色／现用名）时，把旧名那一行并到
+    现用名那一行：数字相加、旧行删掉。不并的话两行各自被「只升不降」护住，一个人
+    的贡献会在图上被算两遍。
+    """
+    names = list(yaxis)
+    mapping: Dict[str, str] = {}
+    for name in names:
+        identity = legend.identity(name)
+        display = legend.display(identity)
+        if display == name:
+            continue
+        if identity in legend.colour_to_name or display in names:
+            mapping[name] = display
+    return mapping
+
+
+def merge_renamed_keys(store: Optional[Dict[str, int]],
+                       row_alias: Dict[str, str]) -> int:
+    """把账本里记在旧用户名下的格子（``"赛季|用户"``）搬到现用名下，返回搬了几格。"""
+    if not store or not row_alias:
+        return 0
+    moved = 0
+    for key in list(store):
+        season, _, user = str(key).rpartition("|")
+        target = row_alias.get(user)
+        if not target:
+            continue
+        merged = f"{season}|{target}" if season else target
+        store[merged] = int(store.get(merged, 0) or 0) + int(store.pop(key) or 0)
+        moved += 1
+    return moved
 
 
 def _matching_bracket(text: str, open_index: int) -> int:
@@ -1617,6 +1728,15 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     chart = json.loads(raw)
     yaxis: List[str] = chart["yAxis"]["data"]
     colours = canonical_names(legend, yaxis)
+    # 同一个人被画成两行（改过名 / 图例注释里的马甲）：并到现用名那一行
+    row_alias = chart_row_aliases(legend, yaxis)
+    if row_alias:
+        pywikibot.output("统计: 合并同一人的多行: " + "、".join(
+            f"{old} → {new}" for old, new in sorted(row_alias.items())))
+        for ledger in (applied, floors):
+            moved = merge_renamed_keys(ledger, row_alias)
+            if moved:
+                pywikibot.output(f"统计: 账本里 {moved} 格搬到现用名下")
 
     seasons: List[str] = []
     for section in sections:
@@ -1630,6 +1750,8 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     for season in seasons:
         for key, count in counts.get(season, {}).items():
             user = colours.get(key, legend.display(key))
+            if user in KNOWN_BOTS:      # 改过名的机器人账号（Dm → Dm bot）
+                continue
             per_season[season][user] += count
             totals[user] += count
 
@@ -1693,10 +1815,19 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     kept: Dict[str, Dict[str, int]] = {}
     for series in base_chart.get("series", []):
         label = series.get("name", "")
-        kept[label] = {name: value for name, value in
-                       zip(base_axis, series.get("data", [])) if value}
+        bucket = kept.setdefault(label, {})
+        for name, value in zip(base_axis, series.get("data", [])):
+            if not value:
+                continue
+            # 旧用户名的格子算到现用名头上：不并的话两行都会被「只升不降」护住，
+            # 一个人的贡献会被算两遍。
+            target = row_alias.get(name, name)
+            bucket[target] = bucket.get(target, 0) + value
 
-    users = [u for u in yaxis if totals[u] > CHART_NEW_USER_THRESHOLD
+    # 现有行按合并后的名字去重（旧名那一行让位给现用名，位置留在第一次出现的地方）
+    axis_names = list(dict.fromkeys(row_alias.get(name, name) for name in yaxis))
+    users = [u for u in axis_names
+             if totals[u] > CHART_NEW_USER_THRESHOLD
              or any(u in kept.get(l, {}) for l in labels)]
     users += [u for u in totals
               if totals[u] > CHART_NEW_USER_THRESHOLD and u not in users]
@@ -1750,11 +1881,13 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     # **升序**排，图上看起来才是从多到少。同分保持页面上原来的先后（稳定排序）：
     # 按名字再排一次只是噪声，会把整条 yAxis 与全部数据点重写一遍（277973 那次
     # 就是这么被撤销的），真正该换的只有「被别人超过」的行。
-    order = {user: index for index, user in enumerate(yaxis)}
+    order: Dict[str, int] = {}
+    for index, name in enumerate(axis_names):
+        order.setdefault(name, index)
     if keep_order:
         # 有人撤销过「调整行顺序」（277990 撤销 277973）：从此保持页面原顺序，
         # 只补新行。排序不承载信息，硬排只会跟人对刷。
-        users = [u for u in yaxis if u in users] + [u for u in users if u not in order]
+        users = [u for u in axis_names if u in users] + [u for u in users if u not in order]
         pywikibot.output("统计: 人工撤销过行顺序调整，本轮保持页面原顺序")
     else:
         existing_rows = [u for u in users if u in order]
@@ -3406,7 +3539,7 @@ def run_once(site, actions, basis: str = "listed", write: bool = False,
     page = Page(site, PAGE_TITLE)
     original = page.text
     sections = parse_sections(original)
-    legend = Legend.parse(original)
+    legend = Legend.parse(original, account_renames(site))
     if not sections:
         pywikibot.error("未解析到任何赛季小节，跳过。")
         return False

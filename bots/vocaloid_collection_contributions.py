@@ -1731,9 +1731,12 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
     raw = match.group(2)
     chart = json.loads(raw)
     yaxis: List[str] = chart["yAxis"]["data"]
-    colours = canonical_names(legend, yaxis)
     # 同一个人被画成两行（改过名 / 图例注释里的马甲）：并到现用名那一行
     row_alias = chart_row_aliases(legend, yaxis)
+    # 归属表拿的是「图里已经在用的名字」，旧名那一行也在里面；先折到现用名，
+    # 否则计数会落到旧名那一行上，旧行删不掉、又多出一行。
+    colours = {identity: row_alias.get(name, name)
+               for identity, name in canonical_names(legend, yaxis).items()}
     if row_alias:
         pywikibot.output("统计: 合并同一人的多行: " + "、".join(
             f"{old} → {new}" for old, new in sorted(row_alias.items())))

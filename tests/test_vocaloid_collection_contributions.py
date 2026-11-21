@@ -2483,6 +2483,22 @@ class RenameTest(TestCase):
 
         self.assertEqual([23], chart_of(updated)["series"][0]["data"])
 
+    def test_a_renamed_row_is_renamed_even_when_the_old_name_is_the_only_row(self):
+        # 线上就是这样：图里只有旧名 东方巡天 那一行，颜色却已经挂在现用名 东方璨巡天 上。
+        # 归属表要是照旧把计数记到旧名那行，旧行删不掉、还会多冒出一行。
+        axis = ["别人", "东方巡天"]
+        text = chart_text(axis, {"ボカコレ2025夏": [5, 7]})
+        legend = Legend.parse(
+            ":{{color block/wl|#FFA500}} {{User|东方璨巡天}}<!-- 东方巡天 -->")
+        sections = [Section("2025夏", "TOP100", [])]
+
+        updated, _ = contributions.render_chart(
+            text, sections, legend, {"2025夏": {"#FFA500": 7}})
+
+        parsed = chart_of(updated)
+        self.assertEqual(["别人", "东方璨巡天"], parsed["yAxis"]["data"])
+        self.assertEqual([5, 7], parsed["series"][0]["data"])
+
     def test_merging_is_idempotent(self):
         axis = ["贝壳beike", "Beikeeeeeeeeeeee"]
         text = chart_text(axis, {"ボカコレ2025冬": [3, 8]})

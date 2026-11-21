@@ -1584,7 +1584,11 @@ def chart_row_aliases(legend: Legend, yaxis: Sequence[str]) -> Dict[str, str]:
 
 def merge_renamed_keys(store: Optional[Dict[str, int]],
                        row_alias: Dict[str, str]) -> int:
-    """把账本里记在旧用户名下的格子（``"赛季|用户"``）搬到现用名下，返回搬了几格。"""
+    """把账本里记在旧用户名下的格子（``"赛季|用户"``）搬到现用名下，返回搬了几格。
+
+    同一格两条记录说的是同一件事（都是「这个人这一季扣过多少 / 人工还原过多少」），
+    所以取大的那个，不相加——相加会让「已经扣过」多算，把该扣的账挡在门外。
+    """
     if not store or not row_alias:
         return 0
     moved = 0
@@ -1594,7 +1598,7 @@ def merge_renamed_keys(store: Optional[Dict[str, int]],
         if not target:
             continue
         merged = f"{season}|{target}" if season else target
-        store[merged] = int(store.get(merged, 0) or 0) + int(store.pop(key) or 0)
+        store[merged] = max(int(store.get(merged, 0) or 0), int(store.pop(key) or 0))
         moved += 1
     return moved
 
@@ -1819,10 +1823,11 @@ def render_chart(text: str, sections: List[Section], legend: Legend,
         for name, value in zip(base_axis, series.get("data", [])):
             if not value:
                 continue
-            # 旧用户名的格子算到现用名头上：不并的话两行都会被「只升不降」护住，
-            # 一个人的贡献会被算两遍。
+            # 旧用户名的格子算到现用名头上：两行说的是**同一批创建**（同一个人），
+            # 相加会把数字翻倍（2026-11-13 改名后 2026冬 的 23 被写成 46），所以取
+            # 两者中大的那一个——宁可少算也不能多算：图表只会往上抬，多算的永远降不回来。
             target = row_alias.get(name, name)
-            bucket[target] = bucket.get(target, 0) + value
+            bucket[target] = max(bucket.get(target, 0), value)
 
     # 现有行按合并后的名字去重（旧名那一行让位给现用名，位置留在第一次出现的地方）
     axis_names = list(dict.fromkeys(row_alias.get(name, name) for name in yaxis))

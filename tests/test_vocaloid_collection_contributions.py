@@ -2453,7 +2453,7 @@ class RenameTest(TestCase):
         legend = Legend.parse("", {"old name": "Mid", "mid": "New"})
         self.assertEqual("New", legend.current_name("Old Name"))
 
-    def test_two_rows_of_one_person_are_merged(self):
+    def test_two_rows_of_one_person_take_the_larger_number(self):
         axis = ["别人", "贝壳beike", "Beikeeeeeeeeeeee"]
         text = chart_text(axis, {"ボカコレ2025冬": [5, 3, 8]})
         legend = Legend.parse(
@@ -2466,8 +2466,22 @@ class RenameTest(TestCase):
 
         parsed = chart_of(updated)
         self.assertEqual(["别人", "贝壳beike"], parsed["yAxis"]["data"])
-        self.assertEqual([5, 11], parsed["series"][0]["data"],
-                         "旧行的 8 要加到现用名那行（3 + 8），不能凭空消失或算两遍")
+        self.assertEqual([5, 10], parsed["series"][0]["data"],
+                         "两行是同一个人的同一批创建：取大的那个，不能相加（会翻倍）")
+
+    def test_merging_never_inflates_a_cell(self):
+        # 改名后机器人曾把同一个人的 23 写成两行 23+23=46：并起来要回到 23
+        axis = ["贝壳beike", "Beikeeeeeeeeeeee"]
+        text = chart_text(axis, {"ボカコレ2026冬": [23, 23]})
+        legend = Legend.parse(
+            ":{{color block/wl|#4A4A48}} {{User|贝壳beike}}",
+            {"beikeeeeeeeeeeee": "贝壳beike"})
+        sections = [Section("2026冬", "TOP100", [])]
+
+        updated, _ = contributions.render_chart(
+            text, sections, legend, {"2026冬": {"#4A4A48": 23}})
+
+        self.assertEqual([23], chart_of(updated)["series"][0]["data"])
 
     def test_merging_is_idempotent(self):
         axis = ["贝壳beike", "Beikeeeeeeeeeeee"]
@@ -2484,7 +2498,7 @@ class RenameTest(TestCase):
 
         self.assertEqual(chart_of(once)["series"][0]["data"],
                          chart_of(twice)["series"][0]["data"])
-        self.assertEqual([11], chart_of(twice)["series"][0]["data"])
+        self.assertEqual([10], chart_of(twice)["series"][0]["data"])
 
     def test_ledger_entries_move_to_the_current_name(self):
         ledger = {"2025冬|Beikeeeeeeeeeeee": 3, "2025冬|别人": 1}
@@ -2493,10 +2507,10 @@ class RenameTest(TestCase):
         self.assertEqual(1, moved)
         self.assertEqual({"2025冬|贝壳beike": 3, "2025冬|别人": 1}, ledger)
 
-    def test_ledger_move_keeps_existing_numbers(self):
+    def test_ledger_move_keeps_the_larger_number(self):
         ledger = {"2025冬|贝壳beike": 2, "2025冬|Beikeeeeeeeeeeee": 3}
         contributions.merge_renamed_keys(ledger, {"Beikeeeeeeeeeeee": "贝壳beike"})
-        self.assertEqual({"2025冬|贝壳beike": 5}, ledger)
+        self.assertEqual({"2025冬|贝壳beike": 3}, ledger)
 
     def test_rename_log_reads_details(self):
         entries = [Mock(params={"olduser": "Beikeeeeeeeeeeee", "newuser": "贝壳beike"}),

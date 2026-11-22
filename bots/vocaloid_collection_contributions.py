@@ -48,7 +48,8 @@ The bot can:
   One person is one chart row: an account renamed on the wiki keeps its old name
   in every revision it made (MediaWiki does not rewrite history), and a legend
   comment may list the extra names someone used, so the old name's row is merged
-  into the current one (numbers added up, see ``chart_row_aliases``) instead of
+  into the current one (the larger number of the two wins - adding them up would
+  count the same creations twice, see ``chart_row_aliases``) instead of
   being drawn as a second person.
   Some chart numbers come from bookkeeping outside the wiki and cannot be
   derived at all, so a cell is normally only raised, never lowered.
